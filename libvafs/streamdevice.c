@@ -296,7 +296,7 @@ static int __grow_buffer(
         return -1;
     }
 
-    device->Memory.Buffer = buffer;
+    device->Memory.Buffer   = buffer;
     device->Memory.Capacity = newSize;
     return 0;
 }
@@ -313,6 +313,7 @@ int vafs_streamdevice_write(
     size_t                   length,
     size_t*                  bytesWritten)
 {
+    VAFS_DEBUG("vafs_streamdevice_write(length=%zu)\n", length);
     if (device == NULL || buffer == NULL || length == 0 || bytesWritten == NULL) {
         errno = EINVAL;
         return -1;

@@ -153,7 +153,7 @@ static int __load_blockbuffer(
     VAFS_DEBUG("__load_blockbuffer(length=%u)\n", block->Length);
 
     blockSize = block->Length;
-    blockData = malloc(block->Length);
+    blockData = malloc(blockSize);
     if (!blockData) {
         errno = ENOMEM;
         return -1;
@@ -231,14 +231,15 @@ int vafs_stream_seek(
         }
         
         // have we reached the target block, and does it contain our index?
-        if (i >= targetBlock) {
+        if (i == targetBlock) {
+            // is the offset inside the current block?
             if (targetOffset < stream->BlockSize) {
-                offset += sizeof(VaFsBlock_t);
-                break;
+                break; // yep, we are done here
             }
 
-            targetBlock++;
+            // nope, reduce offset, switch to next block
             targetOffset -= stream->BlockSize;
+            targetBlock++;
         }
 
         offset += sizeof(VaFsBlock_t) + block.Length;
@@ -251,7 +252,7 @@ int vafs_stream_seek(
         return status;
     }
 
-    stream->BlockBufferIndex = targetBlock;
+    stream->BlockBufferIndex  = targetBlock;
     stream->BlockBufferOffset = targetOffset;
     return 0;
 }
@@ -268,6 +269,8 @@ static int __write_block_header(
     header.Crc = __get_blockbuffer_crc(stream, stream->BlockBufferOffset);
     header.Length = blockLength;
     header.Flags = 0;
+
+    VAFS_DEBUG("__write_block_header: crc=%u\n", header.Crc);
     return vafs_streamdevice_write(stream->Device, &header, sizeof(VaFsBlock_t), &written);
 }
 
@@ -316,6 +319,7 @@ int vafs_stream_write(
     const void*        buffer,
     size_t             size)
 {
+    uint8_t* data = (uint8_t*)buffer;
     uint32_t bytesLeftInBlock;
     size_t   bytesToWrite = size;
     VAFS_DEBUG("vafs_stream_write(size=%u)\n", size);
@@ -332,9 +336,11 @@ int vafs_stream_write(
         bytesLeftInBlock = stream->BlockSize - (stream->BlockBufferOffset % stream->BlockSize);
         byteCount = MIN(bytesToWrite, bytesLeftInBlock);
 
-        memcpy(stream->BlockBuffer + stream->BlockBufferOffset, buffer, byteCount);
+        memcpy(stream->BlockBuffer + stream->BlockBufferOffset, data, byteCount);
+        
         stream->BlockBufferOffset += byteCount;
-        bytesToWrite -= byteCount;
+        data                      += byteCount;
+        bytesToWrite              -= byteCount;
 
         if (stream->BlockBufferOffset == stream->BlockSize) {
             if (__flush_block(stream)) {
@@ -352,8 +358,9 @@ int vafs_stream_read(
     void*              buffer,
     size_t             size)
 {
-    size_t bytesLeftInBlock;
-    size_t bytesToRead = size;
+    uint8_t* data        = (uint8_t*)buffer;
+    size_t   bytesToRead = size;
+    size_t   bytesLeftInBlock;
     VAFS_DEBUG("vafs_stream_read(size=%u)\n", size);
 
     if (stream == NULL || buffer == NULL || size == 0) {
@@ -368,9 +375,11 @@ int vafs_stream_read(
         bytesLeftInBlock = stream->BlockSize - stream->BlockBufferOffset;
         byteCount = MIN(bytesToRead, bytesLeftInBlock);
 
-        memcpy(buffer, stream->BlockBuffer + stream->BlockBufferOffset, byteCount);
+        memcpy(data, stream->BlockBuffer + stream->BlockBufferOffset, byteCount);
+        
         stream->BlockBufferOffset += byteCount;
-        bytesToRead -= byteCount;
+        data                      += byteCount;
+        bytesToRead               -= byteCount;
 
         if (stream->BlockBufferOffset == stream->BlockSize) {
             VaFsBlock_t block;
