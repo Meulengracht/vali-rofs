@@ -106,14 +106,16 @@ static int __extract_directory(
     char*            filepathBuffer;
 
     // ensure the directory exists
-    status = __directory_exists(path);
-    if (status == -1) {
-        return status;
-    }
+    if (strlen(path)) {
+        status = __directory_exists(path);
+        if (status == -1) {
+            return status;
+        }
 
-    if (!status && mkdir(path, 0777)) {
-        fprintf(stderr, "unmkvafs: unable to create directory %s\n", path);
-        return -1;
+        if (!status && mkdir(path, 0777)) {
+            fprintf(stderr, "unmkvafs: unable to create directory %s\n", path);
+            return -1;
+        }
     }
 
     do {
@@ -184,7 +186,7 @@ int main(int argc, char *argv[])
     int                         status;
 
     char* imagePath = NULL;
-    char* destinationPath = "";
+    char* destinationPath = "vafs-root";
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--out") && (i + 1) < argc) {

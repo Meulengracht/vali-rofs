@@ -72,6 +72,17 @@ static const char* __get_relative_path(
 	return relative;
 }
 
+static const char* __get_filename(
+	const char* path)
+{
+	const char* filename = (const char*)strrchr(path, '/');
+	if (filename == NULL)
+		filename = path;
+	else
+		filename++;
+	return filename;
+}
+
 static int __is_directory(
 	const char* path)
 {
@@ -85,8 +96,8 @@ static int __is_directory(
 
 static int __write_file(
 	struct VaFsDirectoryHandle* directoryHandle,
-	const char*                 root,
-	const char*                 path)
+	const char*                 path,
+	const char*                 filename)
 {
 	struct VaFsFileHandle* fileHandle;
 	FILE*                  file;
@@ -95,9 +106,9 @@ static int __write_file(
 	int                    status;
 
 	// create the VaFS file
-	status = vafs_directory_open_file(directoryHandle, __get_relative_path(root, path), &fileHandle);
+	status = vafs_directory_open_file(directoryHandle, filename, &fileHandle);
 	if (status) {
-		fprintf(stderr, "mkvafs: failed to create file '%s'\n", __get_relative_path(root, path));
+		fprintf(stderr, "mkvafs: failed to create file '%s'\n", filename);
 		return -1;
 	}
 
@@ -116,13 +127,13 @@ static int __write_file(
 	// write the file to the VaFS file
 	status = vafs_file_write(fileHandle, fileBuffer, fileSize);
 	if (status) {
-		fprintf(stderr, "mkvafs: failed to write file '%s'\n", __get_relative_path(root, path));
+		fprintf(stderr, "mkvafs: failed to write file '%s'\n", filename);
 		return -1;
 	}
 
 	status = vafs_file_close(fileHandle);
 	if (status) {
-		fprintf(stderr, "mkvafs: failed to close file '%s'\n", __get_relative_path(root, path));
+		fprintf(stderr, "mkvafs: failed to close file '%s'\n", filename);
 		return -1;
 	}
 	return 0;
@@ -130,7 +141,6 @@ static int __write_file(
 
 static int __write_directory(
 	struct VaFsDirectoryHandle* directoryHandle,
-	const char*                 root,
 	const char*                 path)
 {
     struct dirent* dp;
@@ -149,18 +159,22 @@ static int __write_directory(
 		if (strcmp(dp->d_name, ".") == 0 || strcmp(dp->d_name, "..") == 0)
 			continue;
 
-		sprintf(filepathBuffer, "%s/%s", path, dp->d_name);
+		// only append a '/' if not provided
+		if (path[strlen(path) - 1] != '/')
+			sprintf(filepathBuffer, "%s/%s", path, dp->d_name);
+		else
+			sprintf(filepathBuffer, "%s%s", path, dp->d_name);
 		printf("mkvafs: found '%s'\n", filepathBuffer);
 
 		if (__is_directory(filepathBuffer)) {
 			struct VaFsDirectoryHandle* subdirectoryHandle;
-			status = vafs_directory_open_directory(directoryHandle, __get_relative_path(root, filepathBuffer), &subdirectoryHandle);
+			status = vafs_directory_open_directory(directoryHandle, dp->d_name, &subdirectoryHandle);
 			if (status) {
-				fprintf(stderr, "mkvafs: failed to create directory '%s'\n", __get_relative_path(root, filepathBuffer));
+				fprintf(stderr, "mkvafs: failed to create directory '%s'\n", dp->d_name);
 				continue;
 			}
 
-			status = __write_directory(subdirectoryHandle, root, filepathBuffer);
+			status = __write_directory(subdirectoryHandle, filepathBuffer);
 			if (status != 0) {
 				fprintf(stderr, "mkvafs: unable to write directory %s\n", filepathBuffer);
 				break;
@@ -168,14 +182,14 @@ static int __write_directory(
 
 			status = vafs_directory_close(subdirectoryHandle);
 			if (status) {
-				fprintf(stderr, "mkvafs: failed to close directory '%s'\n", __get_relative_path(root, filepathBuffer));
+				fprintf(stderr, "mkvafs: failed to close directory '%s'\n", filepathBuffer);
 				break;
 			}
 		}
 		else {
-			status = __write_file(directoryHandle, root, filepathBuffer);
+			status = __write_file(directoryHandle, filepathBuffer, dp->d_name);
 			if (status != 0) {
-				fprintf(stderr, "mkvafs: unable to write file %s\n", filepathBuffer);
+				fprintf(stderr, "mkvafs: unable to write file %s\n", dp->d_name);
 				break;
 			}
 		}
@@ -250,14 +264,14 @@ int main(int argc, char *argv[])
 
 	for (int i = 0; i < pathCount; i++) {
 		if (__is_directory(paths[i])) {
-			status = __write_directory(directoryHandle, paths[i], paths[i]);
+			status = __write_directory(directoryHandle, paths[i]);
 			if (status != 0) {
 				fprintf(stderr, "mkvafs: unable to write directory %s\n", paths[i]);
 				break;
 			}
 		}
 		else {
-			status = __write_file(directoryHandle, paths[i], paths[i]);
+			status = __write_file(directoryHandle, paths[i], __get_filename(paths[i]));
 			if (status != 0) {
 				fprintf(stderr, "mkvafs: unable to write file %s\n", paths[i]);
 				break;

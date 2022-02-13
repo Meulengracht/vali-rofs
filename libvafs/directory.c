@@ -218,18 +218,20 @@ static struct VaFsDirectory* __create_directory_from_descriptor(
     VaFsDirectoryDescriptor_t* descriptor,
     const char*                name)
 {
-    struct VaFsDirectory* directory;
+    struct VaFsDirectoryReader* directory;
     
-    directory = (struct VaFsDirectory*)malloc(sizeof(struct VaFsDirectory));
+    directory = (struct VaFsDirectoryReader*)malloc(sizeof(struct VaFsDirectoryReader));
     if (!directory) {
         errno = ENOMEM;
         return NULL;
     }
     
-    memcpy(&directory->Descriptor, descriptor, sizeof(VaFsDirectoryDescriptor_t));
-    directory->Name = name;
-    directory->VaFs = vafs;
-    return directory;
+    directory->State     = VaFsDirectoryState_Open;
+    directory->Entries   = NULL;
+    directory->Base.Name = name;
+    directory->Base.VaFs = vafs;
+    memcpy(&directory->Base.Descriptor, descriptor, sizeof(VaFsDirectoryDescriptor_t));
+    return &directory->Base;
 }
 
 static struct VaFsDirectoryEntry* __create_entry_from_descriptor(
@@ -362,11 +364,17 @@ int vafs_directory_open_root(
         errno = ENOMEM;
         return -1;
     }
-    memset(reader, 0, sizeof(struct VaFsDirectoryReader));
 
     reader->Base.VaFs = vafs;
     reader->Base.Name = strdup("root");
     reader->State     = VaFsDirectoryState_Open;
+    reader->Entries   = NULL;
+    
+    // initialize the root descriptor for the directory
+    reader->Base.Descriptor.Base.Length = sizeof(VaFsDirectoryDescriptor_t);
+    reader->Base.Descriptor.Base.Type   = VA_FS_DESCRIPTOR_TYPE_DIRECTORY;
+    reader->Base.Descriptor.Descriptor.Index = position->Index;
+    reader->Base.Descriptor.Descriptor.Offset = position->Offset;
 
     *directoryOut = (struct VaFsDirectory*)reader;
     return 0;
@@ -472,7 +480,7 @@ static struct VaFsDirectoryHandle* __create_handle(
     }
 
     handle->Directory = directory;
-    handle->Index = 0;
+    handle->Index     = 0;
     return handle;
 }
 
@@ -550,7 +558,8 @@ static int __write_file_descriptor(
     struct VaFsDirectoryEntry*  entry)
 {
     int status;
-    VAFS_DEBUG("vafs_directory_write_file_descriptor(name=%s)\n", entry->File->Name);
+    VAFS_DEBUG("vafs_directory_write_file_descriptor(name=%s)\n",
+        entry->File->Name);
 
     // increase descriptor length by name, do not account
     // for the null terminator
@@ -578,7 +587,8 @@ static int __write_directory_descriptor(
     struct VaFsDirectoryEntry*  entry)
 {
     int status;
-    VAFS_DEBUG("vafs_directory_write_directory_descriptor(name=%s)\n", entry->Directory->Name);
+    VAFS_DEBUG("vafs_directory_write_directory_descriptor(name=%s)\n",
+        entry->Directory->Name);
     
     // increase descriptor length by name, do not account
     // for the null terminator
@@ -637,7 +647,7 @@ int vafs_directory_flush(
 
     directory->Descriptor.Descriptor.Index  = block;
     directory->Descriptor.Descriptor.Offset = offset;
-    VAFS_DEBUG("directory %s index %d offset %d\n", directory->Name, block, offset);
+    VAFS_DEBUG("vafs_directory_flush  name=%s index=%d offset=%d\n", directory->Name, block, offset);
 
     status = __write_directory_header(writer, entryCount);
     if (status) {
@@ -648,6 +658,8 @@ int vafs_directory_flush(
     // now we actually write all the descriptors
     entry = writer->Entries;
     while (entry != NULL) {
+        VAFS_DEBUG("vafs_directory_flush: writing entry=%s, type=%i\n",
+            entry->File->Name, entry->Type);
         if (entry->Type == VA_FS_DESCRIPTOR_TYPE_FILE) {
             status = __write_file_descriptor(writer, entry);
         }
@@ -797,6 +809,7 @@ static int __create_directory_entry(
 {
     struct VaFsDirectoryWriter* entry;
     int                         status;
+    VAFS_DEBUG("__create_directory_entry(name=%s)\n", name);
 
     entry = (struct VaFsDirectoryWriter*)malloc(sizeof(struct VaFsDirectoryWriter));
     if (!entry) {
@@ -847,6 +860,7 @@ int vafs_directory_open_directory(
 {
     struct VaFsDirectoryEntry* entry;
     char                       token[128];
+    VAFS_DEBUG("vafs_directory_open_directory(handle=%p, name=%s, handleOut=%p)\n", handle, name, handleOut);
 
     if (handle == NULL || name == NULL || handleOut == NULL) {
         errno = EINVAL;
