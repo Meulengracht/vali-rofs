@@ -282,6 +282,11 @@ static int __flush_block(
     size_t   written;
     int      status;
     VAFS_DEBUG("__flush_block(blockLength=%u)\n", stream->BlockBufferOffset);
+
+    if (!stream->BlockBufferOffset) {
+        // empty block, ignore it
+        return 0;
+    }
     
     // Handle compressions
     if (stream->Encode) {

@@ -33,4 +33,7 @@ target_compile_definitions(unmkvafs PRIVATE ${ADDITIONAL_DEFINES})
 target_link_libraries(unmkvafs ${ADDITIONAL_LIBS})
 
 # add support for installing
-install(TARGETS mkvafs unmkvafs DESTINATION bin)
+install(
+    TARGETS mkvafs unmkvafs 
+    RUNTIME DESTINATION bin
+)
