@@ -68,7 +68,8 @@ struct VaFsFeatureHeader {
 enum VaFsEntryType {
     VaFsEntryType_Unknown,
     VaFsEntryType_File,
-    VaFsEntryType_Directory
+    VaFsEntryType_Directory,
+    VaFsEntryType_Symlink,
 };
 
 struct VaFsEntry {
@@ -234,6 +235,32 @@ extern int vafs_directory_open_directory(
     struct VaFsDirectoryHandle*  handle,
     const char*                  name,
     struct VaFsDirectoryHandle** handleOut);
+
+/**
+ * @brief 
+ * 
+ * @param handle 
+ * @param name 
+ * @param target 
+ * @return int 
+ */
+extern int vafs_directory_create_symlink(
+    struct VaFsDirectoryHandle* handle,
+    const char*                 name,
+    const char*                 target);
+
+/**
+ * @brief 
+ * 
+ * @param handle 
+ * @param name 
+ * @param targetOut 
+ * @return int 
+ */
+extern int vafs_directory_read_symlink(
+    struct VaFsDirectoryHandle* handle,
+    const char*                 name,
+    const char**                targetOut);
 
 /**
  * @brief 
