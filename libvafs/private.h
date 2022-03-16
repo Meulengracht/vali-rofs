@@ -77,6 +77,7 @@ VAFS_STRUCT(VaFsHeader, {
 
 #define VA_FS_DESCRIPTOR_TYPE_FILE      0x01
 #define VA_FS_DESCRIPTOR_TYPE_DIRECTORY 0x02
+#define VA_FS_DESCRIPTOR_TYPE_SYMLINK   0x03
 
 VAFS_STRUCT(VaFsDescriptor, {
     uint16_t Type;
@@ -98,6 +99,12 @@ VAFS_STRUCT(VaFsDirectoryHeader, {
     int Count;
 });
 
+VAFS_STRUCT(VaFsSymlinkDescriptor, {
+    VaFsDescriptor_t    Base;
+    uint32_t            NameLength;
+    uint32_t            TargetLength;
+});
+
 enum VaFsMode {
     VaFsMode_Read,
     VaFsMode_Write
@@ -113,6 +120,13 @@ struct VaFsDirectory {
     struct VaFs*              VaFs;
     VaFsDirectoryDescriptor_t Descriptor;
     const char*               Name;
+};
+
+struct VaFsSymlink {
+    struct VaFs*            VaFs;
+    VaFsSymlinkDescriptor_t Descriptor;
+    const char*             Name;
+    const char*             Target;
 };
 
 struct VaFs {

@@ -126,6 +126,8 @@ static int __write_file(
 
 	// write the file to the VaFS file
 	status = vafs_file_write(fileHandle, fileBuffer, fileSize);
+	free(fileBuffer);
+	
 	if (status) {
 		fprintf(stderr, "mkvafs: failed to write file '%s'\n", filename);
 		return -1;
@@ -269,8 +271,7 @@ int main(int argc, char *argv[])
 				fprintf(stderr, "mkvafs: unable to write directory %s\n", paths[i]);
 				break;
 			}
-		}
-		else {
+		} else {
 			status = __write_file(directoryHandle, paths[i], __get_filename(paths[i]));
 			if (status != 0) {
 				fprintf(stderr, "mkvafs: unable to write file %s\n", paths[i]);
