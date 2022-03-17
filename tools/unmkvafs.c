@@ -67,6 +67,19 @@ static int __directory_exists(
     return S_ISDIR(st.st_mode);
 }
 
+int __symlink(const char* path, const char* target)
+{
+	if (path == NULL || target == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	if (symlink(path, target) == -1) {
+		return -1;
+	}
+	return 0;
+}
+
 static int __extract_file(
     struct VaFsFileHandle* fileHandle,
     const char*            path)
@@ -151,8 +164,23 @@ static int __extract_directory(
                 fprintf(stderr, "unmkvafs: failed to close directory '%s'\n", __get_relative_path(root, filepathBuffer));
                 return -1;
             }
-        }
-        else {
+        } else if (dp.Type == VaFsEntryType_Symlink) {
+            const char* symlinkTarget;
+            
+            status = vafs_directory_read_symlink(directoryHandle, dp.Name, &symlinkTarget);
+            if (status) {
+                fprintf(stderr, "unmkvafs: failed to read symlink '%s' - %i\n",
+                    __get_relative_path(root, filepathBuffer), status);
+                return -1;
+            }
+
+            status = __symlink(symlinkTarget, filepathBuffer);
+            if (status) {
+                fprintf(stderr, "unmkvafs: failed to create symlink '%s' - %i\n",
+                    __get_relative_path(root, filepathBuffer), status);
+                return -1;
+            }
+        } else {
             struct VaFsFileHandle* fileHandle;
             status = vafs_directory_open_file(directoryHandle, dp.Name, &fileHandle);
             if (status) {
