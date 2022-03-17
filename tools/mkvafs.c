@@ -83,6 +83,41 @@ static const char* __get_filename(
 	return filename;
 }
 
+int __read_symlink(const char* path, char** bufferOut)
+{
+	char* buffer;
+
+	if (path == NULL || bufferOut == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	buffer = (char*)malloc(1024);
+	if (buffer == NULL) {
+		errno = ENOMEM;
+		return -1;
+	}
+
+	if (readlink(path, buffer, 1024) == -1) {
+		free(buffer);
+		return -1;
+	}
+
+	*bufferOut = buffer;
+	return 0;
+}
+
+int __is_symlink(
+	const char* path)
+{
+	struct stat st;
+	if (lstat(path, &st) != 0) {
+		fprintf(stderr, "mkvafs: stat failed for '%s'\n", path);
+		return 0;
+	}
+	return S_ISLNK(st.st_mode);
+}
+
 static int __is_directory(
 	const char* path)
 {
@@ -187,8 +222,22 @@ static int __write_directory(
 				fprintf(stderr, "mkvafs: failed to close directory '%s'\n", filepathBuffer);
 				break;
 			}
-		}
-		else {
+		} else if (__is_symlink(filepathBuffer)) {
+			char* linkpath;
+			status = __read_symlink(filepathBuffer, &linkpath);
+			if (status != 0) {
+				fprintf(stderr, "mkvafs: failed to read link %s\n", filepathBuffer);
+				break;
+			}
+
+			status = vafs_directory_create_symlink(directoryHandle, dp->d_name, linkpath);
+			free(linkpath);
+
+			if (status != 0) {
+				fprintf(stderr, "mkvafs: failed to create symlink %s\n", filepathBuffer);
+				break;
+			}
+		} else {
 			status = __write_file(directoryHandle, filepathBuffer, dp->d_name);
 			if (status != 0) {
 				fprintf(stderr, "mkvafs: unable to write file %s\n", dp->d_name);
