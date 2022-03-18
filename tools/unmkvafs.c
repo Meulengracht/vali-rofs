@@ -30,6 +30,7 @@
 #include <dirent_win32.h>
 #else
 #include <dirent.h>
+#include <unistd.h>
 #endif
 #include <sys/stat.h>
 
