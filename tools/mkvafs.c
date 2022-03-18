@@ -19,6 +19,7 @@
  *   This filesystem is used to store the initrd of the kernel.
  */
 
+#include <errno.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
