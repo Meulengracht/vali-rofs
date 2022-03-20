@@ -244,6 +244,7 @@ static int __extract_directory(
             }
             progress->files++;
         }
+        __write_progress(dp.Name, progress);
         free(filepathBuffer);
     } while(1);
 
@@ -257,7 +258,7 @@ static int __handle_overview(struct VaFs* vafsHandle, struct progress_context* p
 
     status = vafs_feature_query(vafsHandle, &g_overviewGuid, (struct VaFsFeatureHeader**)&overview);
     if (status) {
-        fprintf(stderr, "unmkvafs: failed to query feature overview - %i\n", status);
+        fprintf(stderr, "unmkvafs: failed to query feature overview - %i\n", errno);
         return -1;
     }
 
@@ -306,17 +307,17 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    status = __handle_filter(vafsHandle);
-    if (status) {
-        vafs_close(vafsHandle);
-        fprintf(stderr, "unmkvafs: failed to handle image filter\n");
-        return -1;
-    }
-
     status = __handle_overview(vafsHandle, &progressContext);
     if (status) {
         vafs_close(vafsHandle);
         fprintf(stderr, "unmkvafs: failed to handle image overview\n");
+        return -1;
+    }
+
+    status = __handle_filter(vafsHandle);
+    if (status) {
+        vafs_close(vafsHandle);
+        fprintf(stderr, "unmkvafs: failed to handle image filter\n");
         return -1;
     }
 

@@ -340,6 +340,7 @@ static int __write_directory(
             }
             progress->files++;
         }
+        __write_progress(filepathBuffer, progress);
     }
 
     free(filepathBuffer);
@@ -466,6 +467,7 @@ int main(int argc, char *argv[])
             }
             progressContext.files++;
         }
+        __write_progress(paths[i], &progressContext);
 
     }
     if (!progressContext.disabled) {

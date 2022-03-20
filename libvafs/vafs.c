@@ -87,9 +87,7 @@ int vafs_feature_add(
         return -1;
     }
 
-    memcpy(vafs->Features[vafs->FeatureCount], feature, feature->Length);
-
-    vafs->FeatureCount++;
+    memcpy(vafs->Features[vafs->FeatureCount++], feature, feature->Length);
     return 0;
 }
 
@@ -199,13 +197,11 @@ static void __parse_known_features(
 static int __load_features(
     struct VaFs* vafs)
 {
-    int i;
-
     if (!vafs->Header.FeatureCount) {
         return 0;
     }
     
-    for (i = 0; i < vafs->Header.FeatureCount; i++) {
+    for (int i = 0; i < vafs->Header.FeatureCount; i++) {
         vafs->Features[i] = __load_feature(vafs);
         if (vafs->Features[i] == NULL) {
             return -1;
@@ -581,16 +577,16 @@ static int __create_image(
         return -1;
     }
 
-    // write the header
-    VAFS_DEBUG("__create_image: writing header\n");
-    status = __write_vafs_header(vafs);
+    // install the overview
+    VAFS_DEBUG("__create_image: writing overview\n");
+    status = vafs_feature_add(vafs, &vafs->Overview.Header);
     if (status) {
         return -1;
     }
 
-    // install the overview
-    VAFS_DEBUG("__create_image: writing overview\n");
-    status = vafs_feature_add(vafs, &vafs->Overview.Header);
+    // write the header
+    VAFS_DEBUG("__create_image: writing header\n");
+    status = __write_vafs_header(vafs);
     if (status) {
         return -1;
     }
