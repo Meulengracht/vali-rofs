@@ -32,11 +32,11 @@ struct vafs_block_cache;
  * will cache a maximum of @maxBlocks blocks, after this, the cache will start evicting
  * the least-used blocks.
  * 
+ * @param[In]  maxBlocks The maximum number of blocks to cache.
  * @param[Out] cacheOut  A pointer to store the newly malloc'd cache.
- * @param[In]  maxBlocks The maximum number of blocks to cache. 
  * @return int 0 on success, -1 on failure, errno will be set accordingly.
  */
-extern int vafs_cache_create(struct vafs_block_cache** cacheOut, int maxBlocks);
+extern int vafs_cache_create(int maxBlocks, struct vafs_block_cache** cacheOut);
 
 /**
  * @brief Destroys the blocks cache and frees any resources allocated.

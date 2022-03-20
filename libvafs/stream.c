@@ -72,7 +72,7 @@ static int __new_stream(
     stream->Encode = NULL;
     stream->Decode = NULL;
     
-    status = vafs_cache_create(&stream->Cache, STREAM_CACHE_SIZE);
+    status = vafs_cache_create(STREAM_CACHE_SIZE, &stream->Cache);
     if (status != 0) {
         free(stream);
         return -1;

@@ -130,8 +130,9 @@ struct VaFsSymlink {
 };
 
 struct VaFs {
-    VaFsHeader_t  Header;
-    enum VaFsMode Mode;
+    VaFsHeader_t               Header;
+    enum VaFsMode              Mode;
+    struct VaFsFeatureOverview Overview;
 
     // Features present
     struct VaFsFeatureHeader** Features;

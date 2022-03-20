@@ -54,6 +54,14 @@ struct vafs_block_cache* __block_cache_new()
     
     cache = malloc(sizeof(struct vafs_block_cache));
     if (!cache) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    cache->cache = malloc(sizeof(hashtable_t));
+    if (!cache->cache) {
+        free(cache);
+        errno = ENOMEM;
         return NULL;
     }
     
@@ -68,17 +76,17 @@ struct vafs_block_cache* __block_cache_new()
     return cache;
 }
 
-int vafs_cache_create(struct vafs_block_cache** cacheOut, int maxBlocks)
+int vafs_cache_create(int maxBlocks, struct vafs_block_cache** cacheOut)
 {
     struct vafs_block_cache* cache;
 
-    if (!cacheOut) {
+    if (cacheOut == NULL || maxBlocks < 0) {
         errno = EINVAL;
         return -1;
     }
 
     cache = __block_cache_new();
-    if (!cache) {
+    if (cache == NULL) {
         return -1;
     }
 

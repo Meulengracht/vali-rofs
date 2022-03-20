@@ -202,6 +202,11 @@ size_t vafs_file_write(
         return -1;
     }
 
+    // add to filelength
     handle->File->Descriptor.FileLength += size;
+
+    // add to overview
+    handle->File->VaFs->Overview.TotalSizeUncompressed += size;
+
     return 0;
 }
