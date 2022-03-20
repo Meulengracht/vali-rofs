@@ -14,3 +14,4 @@ add_library(vafs STATIC
 )
 target_include_directories(vafs PRIVATE include/vafs)
 target_include_directories(vafs PUBLIC include)
+target_link_libraries(vafs PUBLIC vafs-blockcache)

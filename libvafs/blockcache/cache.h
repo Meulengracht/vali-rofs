@@ -28,42 +28,43 @@
 struct vafs_block_cache;
 
 /**
- * @brief 
+ * @brief Creates a new block cache, that contains the N most-used blocks. The cache
+ * will cache a maximum of @maxBlocks blocks, after this, the cache will start evicting
+ * the least-used blocks.
  * 
- * @param cacheOut 
- * @param maxBlocks 
- * @return int 
+ * @param[Out] cacheOut  A pointer to store the newly malloc'd cache.
+ * @param[In]  maxBlocks The maximum number of blocks to cache. 
+ * @return int 0 on success, -1 on failure, errno will be set accordingly.
  */
 extern int vafs_cache_create(struct vafs_block_cache** cacheOut, int maxBlocks);
 
 /**
- * @brief 
+ * @brief Destroys the blocks cache and frees any resources allocated.
  * 
- * @param cache 
+ * @param[In] cache The cache to destroy. 
  */
 extern void vafs_cache_destroy(struct vafs_block_cache* cache);
 
 /**
- * @brief 
+ * @brief Retrieves a block from the cache.
  * 
- * @param cache 
- * @param index 
- * @param bufferOut 
- * @param sizeOut 
- * @return int 
+ * @param[In]  cache     The cache to retrieve the block from. 
+ * @param[In]  index     The index of the block to retrieve.
+ * @param[Out] bufferOut A pointer where a buffer pointer will be stored. 
+ * @param[Out] sizeOut   A pointer where the size of the block will be stored.
+ * @return int 0 on success, -1 on failure, errno will be set accordingly. 
  */
 extern int vafs_cache_get(struct vafs_block_cache* cache, uint32_t index, void** bufferOut, size_t* sizeOut);
 
 /**
- * @brief 
+ * @brief Stores a block in the cache.
  * 
- * @param cache 
- * @param index 
- * @param buffer 
- * @param size 
+ * @param[In] cache  The cache to store the block in. 
+ * @param[In] index  The index of the block to store.
+ * @param[In] buffer The buffer to store, a copy of it will be created and managed by the cache.
+ * @param[In] size   The size of the buffer.
  * @return int 
  */
 extern int vafs_cache_set(struct vafs_block_cache* cache, uint32_t index, void* buffer, size_t size);
-
 
 #endif //!__VAFS_BLOCKCACHE_CACHE_H__

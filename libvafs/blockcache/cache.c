@@ -28,6 +28,7 @@
 static uint64_t __cache_hash(const void* element);
 static int      __cache_cmp(const void* lh, const void* rh);
 static void     __cache_enum(int index, const void* element, void* userContext);
+static void     __cache_enum_free(int index, const void* element, void* userContext);
 
 struct vafs_block {
     uint32_t index;
@@ -94,6 +95,7 @@ void vafs_cache_destroy(struct vafs_block_cache* cache)
         return;
     }
     
+    hashtable_enumerate(cache->cache, __cache_enum_free, NULL);
     hashtable_destroy(cache->cache);
     free(cache);
 }
@@ -207,4 +209,10 @@ void __cache_enum(int index, const void* element, void* userContext)
         context->index = block->index;
         context->uses  = block->uses;
     }
+}
+
+void __cache_enum_free(int index, const void* element, void* userContext)
+{
+    const struct vafs_block* block = element;
+    free(block->buffer);
 }

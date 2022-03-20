@@ -19,6 +19,7 @@
  *   This filesystem is used to store the initrd of the kernel.
  */
 
+#include "blockcache/cache.h"
 #include "crc.h"
 #include <errno.h>
 #include "private.h"
@@ -29,12 +30,15 @@
 #define STREAM_TYPE_FILE   0
 #define STREAM_TYPE_MEMORY 1
 
+#define STREAM_CACHE_SIZE  32
+
 struct VaFsStream {
     uint32_t                 BlockSize;
     struct VaFsStreamDevice* Device;
     long                     DeviceOffset;
     VaFsFilterEncodeFunc     Encode;
     VaFsFilterDecodeFunc     Decode;
+    struct vafs_block_cache* Cache;
 
     // The block buffer is used for staging data before
     // we flush it to the data stream. The staging buffer
@@ -51,6 +55,8 @@ static int __new_stream(
     struct VaFsStream**      streamOut)
 {
     struct VaFsStream* stream;
+    int                status;
+
     VAFS_DEBUG("__new_stream(offset=%lu, blockSize=%u)\n",
         deviceOffset, blockSize);
     
@@ -65,9 +71,16 @@ static int __new_stream(
     stream->BlockSize = blockSize;
     stream->Encode = NULL;
     stream->Decode = NULL;
+    
+    status = vafs_cache_create(&stream->Cache, STREAM_CACHE_SIZE);
+    if (status != 0) {
+        free(stream);
+        return -1;
+    }
 
     stream->BlockBuffer = malloc(blockSize);
     if (!stream->BlockBuffer) {
+        vafs_cache_destroy(stream->Cache);
         free(stream);
         errno = ENOMEM;
         return -1;
@@ -143,14 +156,24 @@ static uint32_t __get_blockbuffer_crc(
 
 static int __load_blockbuffer(
     struct VaFsStream* stream,
+    uint16_t           blockIndex,
     VaFsBlock_t*       block)
 {
     void*    blockData;
-    uint32_t blockSize;
+    size_t   blockSize;
     size_t   read;
     uint32_t crc;
     int      status;
     VAFS_DEBUG("__load_blockbuffer(length=%u)\n", block->Length);
+
+    // Always check the block cache first
+    status = vafs_cache_get(stream->Cache, blockIndex, &blockData, &blockSize);
+    if (status == 0) {
+        // We have the block in the cache, so we can just copy the data
+        // to the block buffer and return.
+        memcpy(stream->BlockBuffer, blockData, blockSize);
+        return 0;
+    }
 
     blockSize = block->Length;
     blockData = malloc(blockSize);
@@ -168,7 +191,7 @@ static int __load_blockbuffer(
     if (stream->Decode) {
         uint32_t blockBufferSize = stream->BlockSize;
 
-        VAFS_DEBUG("__load_blockbuffer decoding buffer of size %u\n", blockSize);
+        VAFS_DEBUG("__load_blockbuffer decoding buffer of size %zu\n", blockSize);
         status = stream->Decode(blockData, blockSize, stream->BlockBuffer, &blockBufferSize);
         if (status) {
             free(blockData);
@@ -191,6 +214,12 @@ static int __load_blockbuffer(
         VAFS_WARN("__load_blockbuffer: CRC mismatch: %u != %u\n", crc, block->Crc);
         errno = EIO;
         return -1;
+    }
+
+    // Cache the block
+    status = vafs_cache_set(stream->Cache, blockIndex, stream->BlockBuffer, blockSize);
+    if (status) {
+        VAFS_WARN("__load_blockbuffer: failed to cache block %u\n", blockIndex);
     }
     return 0;
 }
@@ -246,7 +275,7 @@ int vafs_stream_seek(
         i++;
     }
 
-    status = __load_blockbuffer(stream, &block);
+    status = __load_blockbuffer(stream, targetBlock, &block);
     if (status) {
         VAFS_ERROR("vafs_stream_seek: load blockbuffer failed: %i\n", status);
         return status;
@@ -397,7 +426,7 @@ int vafs_stream_read(
                 return -1;
             }
 
-            if (__load_blockbuffer(stream, &block)) {
+            if (__load_blockbuffer(stream, stream->BlockBufferIndex, &block)) {
                 VAFS_ERROR("vafs_stream_read: failed to load block\n");
                 return -1;
             }
@@ -431,6 +460,7 @@ int vafs_stream_close(
         return -1;
     }
 
+    vafs_cache_destroy(stream->Cache);
     free(stream->BlockBuffer);
     free(stream);
     return 0;
