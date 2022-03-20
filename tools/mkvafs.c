@@ -134,16 +134,6 @@ static enum VaFsArchitecture __get_vafs_arch(
     }
 }
 
-static const char* __get_relative_path(
-    const char* root,
-    const char* path)
-{
-    const char* relative = path;
-    if (strncmp(path, root, strlen(root)) == 0)
-        relative = path + strlen(root);
-    return relative;
-}
-
 static const char* __get_filename(
     const char* path)
 {
