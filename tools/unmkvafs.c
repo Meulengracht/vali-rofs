@@ -30,11 +30,25 @@
 #include <dirent_win32.h>
 #else
 #include <dirent.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
-#include <sys/stat.h>
+
+struct progress_context {
+    int disabled;
+
+    int files;
+    int directories;
+    int symlinks;
+
+    int files_total;
+    int directories_total;
+    int symlinks_total;
+};
 
 extern int __handle_filter(struct VaFs* vafs);
+
+static struct VaFsGuid g_overviewGuid = VA_FS_FEATURE_OVERVIEW;
 
 // Prints usage format of this program
 static void __show_help(void)
@@ -110,7 +124,31 @@ static int __extract_file(
     return 0;
 }
 
+static void __write_progress(const char* prefix, struct progress_context* context)
+{
+    static int last = 0;
+    int        current;
+    int        total;
+    int        progress;
+
+    if (context->disabled) {
+        return;
+    }
+
+    total   = context->files_total + context->directories_total + context->symlinks_total;
+    current = context->files + context->directories + context->symlinks;
+    progress = (current * 100) / total;
+
+    printf("\33[2K\r%s [%d%%] %i/%i files, %i/%i dirs",
+        prefix, progress,
+        context->files, context->files_total,
+        context->directories, context->directories_total
+    );
+    fflush(stdout);
+}
+
 static int __extract_directory(
+    struct progress_context*    progress,
     struct VaFsDirectoryHandle* directoryHandle,
     const char*                 root,
     const char*                 path)
@@ -146,6 +184,7 @@ static int __extract_directory(
         filepathBuffer = malloc(strlen(path) + strlen(dp.Name) + 2);
         sprintf(filepathBuffer, "%s/%s", path, dp.Name);
 
+        __write_progress(dp.Name, progress);
         if (dp.Type == VaFsEntryType_Directory) {
             struct VaFsDirectoryHandle* subdirectoryHandle;
             status = vafs_directory_open_directory(directoryHandle, dp.Name, &subdirectoryHandle);
@@ -154,7 +193,7 @@ static int __extract_directory(
                 return -1;
             }
 
-            status = __extract_directory(subdirectoryHandle, root, filepathBuffer);
+            status = __extract_directory(progress, subdirectoryHandle, root, filepathBuffer);
             if (status) {
                 fprintf(stderr, "unmkvafs: unable to extract directory '%s'\n", __get_relative_path(root, path));
                 return -1;
@@ -165,6 +204,7 @@ static int __extract_directory(
                 fprintf(stderr, "unmkvafs: failed to close directory '%s'\n", __get_relative_path(root, filepathBuffer));
                 return -1;
             }
+            progress->directories++;
         } else if (dp.Type == VaFsEntryType_Symlink) {
             const char* symlinkTarget;
             
@@ -181,6 +221,7 @@ static int __extract_directory(
                     __get_relative_path(root, filepathBuffer), status);
                 return -1;
             }
+            progress->symlinks++;
         } else {
             struct VaFsFileHandle* fileHandle;
             status = vafs_directory_open_file(directoryHandle, dp.Name, &fileHandle);
@@ -201,10 +242,28 @@ static int __extract_directory(
                 fprintf(stderr, "unmkvafs: failed to close file '%s'\n", __get_relative_path(root, filepathBuffer));
                 return -1;
             }
+            progress->files++;
         }
         free(filepathBuffer);
     } while(1);
 
+    return 0;
+}
+
+static int __handle_overview(struct VaFs* vafsHandle, struct progress_context* progress)
+{
+    struct VaFsFeatureOverview* overview;
+    int                         status;
+
+    status = vafs_feature_query(vafsHandle, &g_overviewGuid, (struct VaFsFeatureHeader**)&overview);
+    if (status) {
+        fprintf(stderr, "unmkvafs: failed to query feature overview - %i\n", status);
+        return -1;
+    }
+
+    progress->files_total       = overview->Counts.Files;
+    progress->directories_total = overview->Counts.Directories;
+    progress->symlinks_total    = overview->Counts.Symlinks;
     return 0;
 }
 
@@ -213,6 +272,7 @@ int main(int argc, char *argv[])
     struct VaFsDirectoryHandle* directoryHandle;
     struct VaFs*                vafsHandle;
     int                         status;
+    struct progress_context     progressContext = { 0 };
 
     char* imagePath = NULL;
     char* destinationPath = "vafs-root";
@@ -223,9 +283,11 @@ int main(int argc, char *argv[])
         }
 		else if (!strcmp(argv[i], "--v")) {
 			vafs_log_initalize(VaFsLogLevel_Info);
+            progressContext.disabled = 1;
 		}
 		else if (!strcmp(argv[i], "--vv")) {
 			vafs_log_initalize(VaFsLogLevel_Debug);
+            progressContext.disabled = 1;
 		}
         else {
             imagePath = argv[i];
@@ -251,6 +313,13 @@ int main(int argc, char *argv[])
         return -1;
     }
 
+    status = __handle_overview(vafsHandle, &progressContext);
+    if (status) {
+        vafs_close(vafsHandle);
+        fprintf(stderr, "unmkvafs: failed to handle image overview\n");
+        return -1;
+    }
+
     status = vafs_directory_open(vafsHandle, "/", &directoryHandle);
     if (status) {
         vafs_close(vafsHandle);
@@ -258,11 +327,15 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    status = __extract_directory(directoryHandle, destinationPath, destinationPath);
+    status = __extract_directory(&progressContext, directoryHandle, destinationPath, destinationPath);
     if (status != 0) {
         vafs_close(vafsHandle);
         fprintf(stderr, "unmkvafs: unable to extract to directory %s\n", destinationPath);
         return -1;
+    }
+
+    if (!progressContext.disabled) {
+        printf("\n");
     }
 
     return vafs_close(vafsHandle);

@@ -28,6 +28,7 @@
 
 static void vafs_destroy(struct VaFs* vafs);
 
+static struct VaFsGuid g_overviewGuid  = VA_FS_FEATURE_OVERVIEW;
 static struct VaFsGuid g_filterGuid    = VA_FS_FEATURE_FILTER;
 static struct VaFsGuid g_filterOpsGuid = VA_FS_FEATURE_FILTER_OPS;
 static int             g_initialized   = 0;
@@ -62,8 +63,6 @@ int vafs_feature_add(
     struct VaFs*              vafs,
     struct VaFsFeatureHeader* feature)
 {
-    int i;
-
     if (vafs == NULL || feature == NULL) {
         errno = EINVAL;
         return -1;
@@ -75,7 +74,7 @@ int vafs_feature_add(
         return 0;
     }
 
-    for (i = 0; i < vafs->FeatureCount; i++) {
+    for (int i = 0; i < vafs->FeatureCount; i++) {
         if (!__compare_guids(&vafs->Features[i]->Guid, &feature->Guid)) {
             errno = EEXIST;
             return -1;
@@ -368,8 +367,8 @@ static int __new_vafs(
     enum VaFsArchitecture    architecture,
     struct VaFs**            vafsOut)
 {
-    struct VaFs*       vafs;
-    int                status;
+    struct VaFs* vafs;
+    int          status;
 
     if (imageDevice == NULL || vafsOut == NULL) {
         errno = EINVAL;
@@ -427,6 +426,14 @@ static int __new_vafs(
     return 0;
 }
 
+static void __initialize_overview(
+    struct VaFs* vafs)
+{
+    // initialize the overview
+    memcpy(&vafs->Overview.Header.Guid, &g_overviewGuid, sizeof(struct VaFsGuid));
+    vafs->Overview.Header.Length = sizeof(struct VaFsFeatureOverview);
+}
+
 int vafs_create(
     const char*           path,
     enum VaFsArchitecture architecture,
@@ -442,7 +449,15 @@ int vafs_create(
         VAFS_ERROR("vafs_create: failed to create image file: %i\n", status);
         return status;
     }
-    return __new_vafs(VaFsMode_Write, imageDevice, architecture, vafsOut);
+    
+    status = __new_vafs(VaFsMode_Write, imageDevice, architecture, vafsOut);
+    if (status) {
+        VAFS_ERROR("vafs_create: failed to create new vafs instance: %i\n", status);
+        return status;
+    }
+
+    __initialize_overview(*vafsOut);
+    return 0;
 }
 
 int vafs_open_file(
@@ -573,6 +588,13 @@ static int __create_image(
         return -1;
     }
 
+    // install the overview
+    VAFS_DEBUG("__create_image: writing overview\n");
+    status = vafs_feature_add(vafs, &vafs->Overview.Header);
+    if (status) {
+        return -1;
+    }
+
     // write the features
     VAFS_DEBUG("__create_image: writing features\n");
     status = __write_vafs_features(vafs);
@@ -617,14 +639,24 @@ static void vafs_destroy(
     struct VaFs* vafs)
 {
     VAFS_INFO("vafs_close: cleaning up\n");
+
+    // close all open streams
     vafs_stream_close(vafs->DescriptorStream);
     vafs_stream_close(vafs->DataStream);
 
+    // close all the stream devices active
     if (vafs->Mode == VaFsMode_Write) {
         vafs_streamdevice_close(vafs->DescriptorDevice);
         vafs_streamdevice_close(vafs->DataDevice);
     }
     vafs_streamdevice_close(vafs->ImageDevice);
+
+    // cleanup features
+    for (int i = 0; i < vafs->FeatureCount; i++) {
+        free(vafs->Features[i]);
+    }
     free(vafs->Features);
+    
+    // cleanup the base instance
     free(vafs);
 }

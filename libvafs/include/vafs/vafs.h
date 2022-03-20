@@ -38,11 +38,13 @@ struct VaFsGuid {
 
 /**
  * List of builtin features for the filesystem
+ * VA_FS_FEATURE_OVERVIEW   - Overview of the filesystem
  * VA_FS_FEATURE_FILTER     - Data filters can be applied for data streams
  * VA_FS_FEATURE_FILTER_OPS - Filter operations (Not persistant)
  */
-#define VA_FS_FEATURE_FILTER     { 0x99C25D91, 0xFA99, 0x4A71, {0x9C, 0xB5, 0x96, 0x1A, 0xA9, 0x3D, 0xDF, 0xBB } }
-#define VA_FS_FEATURE_FILTER_OPS { 0x17BC0212, 0x7DF3, 0x4BDD, {0x99, 0x24, 0x5A, 0xC8, 0x13, 0xBE, 0x72, 0x49 } }
+#define VA_FS_FEATURE_OVERVIEW   { 0xB1382352, 0x4BC7, 0x45D2, { 0xB7, 0x59, 0x61, 0x5A, 0x42, 0xD4, 0x45, 0x2A } }
+#define VA_FS_FEATURE_FILTER     { 0x99C25D91, 0xFA99, 0x4A71, { 0x9C, 0xB5, 0x96, 0x1A, 0xA9, 0x3D, 0xDF, 0xBB } }
+#define VA_FS_FEATURE_FILTER_OPS { 0x17BC0212, 0x7DF3, 0x4BDD, { 0x99, 0x24, 0x5A, 0xC8, 0x13, 0xBE, 0x72, 0x49 } }
 
 enum VaFsLogLevel {
     VaFsLogLevel_Error,
@@ -63,6 +65,18 @@ enum VaFsArchitecture {
 struct VaFsFeatureHeader {
     struct VaFsGuid Guid;
     uint32_t        Length; // Length of the entire feature data including this header
+};
+
+struct VaFsFeatureOverview {
+    struct VaFsFeatureHeader Header;
+    size_t                   TotalSizeUncompressed;
+    
+    // Individual entry counts
+    struct {
+        size_t Files;
+        size_t Directories;
+        size_t Symlinks;
+    } Counts;
 };
 
 enum VaFsEntryType {

@@ -870,6 +870,8 @@ static int __create_file_entry(
         free(entry);
         return status;
     }
+
+    writer->Base.VaFs->Overview.Counts.Files++;
     return 0;
 }
 
@@ -931,6 +933,8 @@ static int __create_symlink_entry(
         free(entry);
         return status;
     }
+
+    writer->Base.VaFs->Overview.Counts.Symlinks++;
     return 0;
 }
 
@@ -983,6 +987,8 @@ static int __create_directory_entry(
         free(entry);
         return status;
     }
+
+    writer->Base.VaFs->Overview.Counts.Directories++;
     return 0;
 }
 
