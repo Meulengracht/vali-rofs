@@ -1,3 +1,8 @@
+
+# include subdirectories
+add_subdirectory(blockcache)
+
+# add primary library target
 add_library(vafs STATIC
     crc.c
     directory.c
