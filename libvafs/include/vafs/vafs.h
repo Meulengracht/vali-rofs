@@ -54,6 +54,7 @@ enum VaFsLogLevel {
 };
 
 enum VaFsArchitecture {
+    VaFsArchitecture_UNKNOWN = 0,
     VaFsArchitecture_X86 = 0x8086,
     VaFsArchitecture_X64 = 0x8664,
     VaFsArchitecture_ARM = 0xA12B,
@@ -119,6 +120,21 @@ struct VaFsFeatureFilterOps {
     VaFsFilterDecodeFunc     Decode;
 };
 
+struct VaFsConfiguration {
+    // Allow the filesystem to be valid only for a specific
+    // architecture
+    enum VaFsArchitecture Architecture;
+
+    // The data block size can override the dynamic selection of 
+    // block sizes, by enforcing all data block sizes to be of this
+    // size. The allowed range for this value is 8kb - 1mb.
+    uint32_t              DataBlockSize;
+};
+
+extern void vafs_config_initialize(struct VaFsConfiguration* configuration);
+extern void vafs_config_set_architecture(struct VaFsConfiguration* configuration, enum VaFsArchitecture architecture);
+extern void vafs_config_set_block_size(struct VaFsConfiguration* configuration, uint32_t blockSize);
+
 /**
  * @brief Control the log level of the library. This is useful for debugging. The default
  * log level is set to VaFsLogLevel_Warning.
@@ -132,15 +148,15 @@ extern void vafs_log_initalize(
  * @brief Creates a new filesystem image. The image handle only permits operations that write
  * to the image. This means that reading from the image will fail.
  * 
- * @param[In]  path         The path the image file should be created at.
- * @param[In]  architecture The architecture of the image platform.
- * @param[Out] vafsOut      A pointer where the handle of the filesystem instance will be stored.
+ * @param[In]  path          The path the image file should be created at.
+ * @param[In]  configuration Configuration parameters for the filesystem.
+ * @param[Out] vafsOut       A pointer where the handle of the filesystem instance will be stored.
  * @return int 0 on success, -1 on failure.
  */
 extern int vafs_create(
-    const char*              path, 
-    enum VaFsArchitecture    architecture,
-    struct VaFs**            vafsOut);
+    const char*               path,
+    struct VaFsConfiguration* configuration,
+    struct VaFs**             vafsOut);
 
 /**
  * @brief Opens an existing filesystem image. The image handle only permits operations that read

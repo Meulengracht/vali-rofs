@@ -19,7 +19,7 @@
  *   This filesystem is used to store the initrd of the kernel.
  */
 
-#include "blockcache/cache.h"
+#include "cache/blockcache.h"
 #include "crc.h"
 #include <errno.h>
 #include "private.h"
@@ -27,18 +27,33 @@
 #include <string.h>
 #include <stdio.h>
 
+#define STREAM_MAGIC       0x314D5356 // VSM1
+
 #define STREAM_TYPE_FILE   0
 #define STREAM_TYPE_MEMORY 1
 
 #define STREAM_CACHE_SIZE  32
 
+struct VaFsStreamIndexMapping {
+    uint32_t Block;
+    uint32_t Offset;
+};
+
+struct VaFsStreamHeader {
+    uint32_t Magic;
+    uint32_t BlockSize;
+    uint32_t IndexMappingsOffset;
+    uint32_t Padding;
+};
+
 struct VaFsStream {
-    uint32_t                 BlockSize;
-    struct VaFsStreamDevice* Device;
-    long                     DeviceOffset;
-    VaFsFilterEncodeFunc     Encode;
-    VaFsFilterDecodeFunc     Decode;
-    struct vafs_block_cache* Cache;
+    struct VaFsStreamHeader        Header;
+    struct VaFsStreamDevice*       Device;
+    long                           DeviceOffset;
+    VaFsFilterEncodeFunc           Encode;
+    VaFsFilterDecodeFunc           Decode;
+    struct VaFsBlockCache*         BlockCache;
+    struct VaFsStreamIndexMapping* IndexMappings;
 
     // The block buffer is used for staging data before
     // we flush it to the data stream. The staging buffer
@@ -66,13 +81,16 @@ static int __new_stream(
         return -1;
     }
 
-    stream->Device = device;
+    memset(stream, 0, sizeof(struct VaFsStream));
+
+    // Initialize the stream header to initial values
+    stream->Header.Magic     = STREAM_MAGIC;
+    stream->Header.BlockSize = blockSize;
+
+    stream->Device       = device;
     stream->DeviceOffset = deviceOffset;
-    stream->BlockSize = blockSize;
-    stream->Encode = NULL;
-    stream->Decode = NULL;
     
-    status = vafs_cache_create(STREAM_CACHE_SIZE, &stream->Cache);
+    status = vafs_cache_create(STREAM_CACHE_SIZE, &stream->BlockCache);
     if (status != 0) {
         free(stream);
         return -1;
@@ -80,13 +98,11 @@ static int __new_stream(
 
     stream->BlockBuffer = malloc(blockSize);
     if (!stream->BlockBuffer) {
-        vafs_cache_destroy(stream->Cache);
+        vafs_cache_destroy(stream->BlockCache);
         free(stream);
         errno = ENOMEM;
         return -1;
     }
-    stream->BlockBufferIndex = 0;
-    stream->BlockBufferOffset = 0;
 
     *streamOut = stream;
     return 0;
@@ -99,18 +115,38 @@ int vafs_stream_create(
     struct VaFsStream**      streamOut)
 {
     struct VaFsStream* stream;
+    int                status;
 
-    if (blockSize == 0 || streamOut == NULL) {
+    if (device == NULL || streamOut == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    if (__new_stream(device, deviceOffset, blockSize, &stream)) {
+    status = __new_stream(device, deviceOffset, blockSize, &stream);
+    if (status != 0) {
         return -1;
     }
 
     *streamOut = stream;
     return 0;
+}
+
+static long  __get_header_offset(
+    struct VaFsStream* stream)
+{
+    return stream->DeviceOffset;
+}
+
+static long __get_data_offset(
+    struct VaFsStream* stream)
+{
+    return stream->DeviceOffset + sizeof(struct VaFsStreamHeader);
+}
+
+static long __get_index_mappings_offset(
+    struct VaFsStream* stream)
+{
+    return stream->DeviceOffset + stream->Header.IndexMappingsOffset;
 }
 
 int vafs_stream_set_filter(
@@ -167,7 +203,7 @@ static int __load_blockbuffer(
     VAFS_DEBUG("__load_blockbuffer(length=%u)\n", block->Length);
 
     // Always check the block cache first
-    status = vafs_cache_get(stream->Cache, blockIndex, &blockData, &blockSize);
+    status = vafs_cache_get(stream->BlockCache, blockIndex, &blockData, &blockSize);
     if (status == 0) {
         // We have the block in the cache, so we can just copy the data
         // to the block buffer and return.
@@ -217,7 +253,7 @@ static int __load_blockbuffer(
     }
 
     // Cache the block
-    status = vafs_cache_set(stream->Cache, blockIndex, stream->BlockBuffer, blockSize);
+    status = vafs_cache_set(stream->BlockCache, blockIndex, stream->BlockBuffer, blockSize);
     if (status) {
         VAFS_WARN("__load_blockbuffer: failed to cache block %u\n", blockIndex);
     }
@@ -245,7 +281,7 @@ int vafs_stream_seek(
     }
     
     // seek to start of stream
-    offset = stream->DeviceOffset;
+    offset = __get_data_offset(stream);
     while (1) {
         status = vafs_streamdevice_seek(stream->Device, offset, SEEK_SET);
         if (status < 0) {
@@ -294,10 +330,10 @@ static int __write_block_header(
     size_t      written;
     VAFS_DEBUG("__write_block_header(blockLength=%u)\n", blockLength);
 
-    header.Magic = VA_FS_BLOCKMAGIC;
-    header.Crc = __get_blockbuffer_crc(stream, stream->BlockBufferOffset);
+    header.Magic  = VA_FS_BLOCKMAGIC;
+    header.Crc    = __get_blockbuffer_crc(stream, stream->BlockBufferOffset);
     header.Length = blockLength;
-    header.Flags = 0;
+    header.Flags  = 0;
 
     VAFS_DEBUG("__write_block_header: crc=%u\n", header.Crc);
     return vafs_streamdevice_write(stream->Device, &header, sizeof(VaFsBlock_t), &written);
@@ -460,7 +496,7 @@ int vafs_stream_close(
         return -1;
     }
 
-    vafs_cache_destroy(stream->Cache);
+    vafs_cache_destroy(stream->BlockCache);
     free(stream->BlockBuffer);
     free(stream);
     return 0;
