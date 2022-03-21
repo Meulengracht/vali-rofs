@@ -236,7 +236,6 @@ static void __initialize_header(
     vafs->Header.Architecture = configuration->Architecture;
     vafs->Header.FeatureCount = 0;
     vafs->Header.Reserved = 0;
-    vafs->Header.BlockSize = configuration->DataBlockSize;
     vafs->Header.Attributes = 0;
 }
 
@@ -284,10 +283,9 @@ static int __initialize_fsstreams_read(
     VAFS_DEBUG("__initialize_fsstreams_read: vafs: %p\n", vafs);
     // create the descriptor and data streams, when reading we do not
     // provide any compression parameter as it's set on block level.
-    status = vafs_stream_create(
+    status = vafs_stream_open(
         vafs->ImageDevice, 
         vafs->Header.DescriptorBlockOffset,
-        VA_FS_DESCRIPTOR_BLOCK_SIZE,
         &vafs->DescriptorStream
     );
     if (status) {
@@ -295,23 +293,24 @@ static int __initialize_fsstreams_read(
         return status;
     }
 
-    status = vafs_stream_create(
+    status = vafs_stream_open(
         vafs->ImageDevice, 
         vafs->Header.DataBlockOffset,
-        vafs->Header.BlockSize,
         &vafs->DataStream
     );
     return status;
 }
 
 static int __initialize_fsstreams_write(
-    struct VaFs* vafs)
+    struct VaFs*              vafs,
+    struct VaFsConfiguration* configuration)
 {
     int status;
     
     VAFS_DEBUG("__initialize_fsstreams_write: vafs: %p\n", vafs);
     status = vafs_streamdevice_create_memory(
-        vafs->Header.BlockSize, &vafs->DescriptorDevice
+        VA_FS_DESCRIPTOR_BLOCK_SIZE, 
+        &vafs->DescriptorDevice
     );
     if (status) {
         VAFS_ERROR("__initialize_fsstreams_write: failed to create descriptor stream device: %i\n", status);
@@ -319,7 +318,8 @@ static int __initialize_fsstreams_write(
     }
 
     status = vafs_streamdevice_create_memory(
-        vafs->Header.BlockSize, &vafs->DataDevice
+        configuration->DataBlockSize,
+        &vafs->DataDevice
     );
     if (status) {
         VAFS_ERROR("__initialize_fsstreams_write: failed to create data stream device: %i\n", status);
@@ -340,20 +340,21 @@ static int __initialize_fsstreams_write(
     status = vafs_stream_create(
         vafs->DataDevice, 
         0,
-        vafs->Header.BlockSize,
+        configuration->DataBlockSize,
         &vafs->DataStream
     );
     return status;
 }
 
 static int __initialize_fsstreams(
-    struct VaFs* vafs)
+    struct VaFs*              vafs,
+    struct VaFsConfiguration* configuration)
 {
     if (vafs->Mode == VaFsMode_Read) {
         return __initialize_fsstreams_read(vafs);
     }
     else {
-        return __initialize_fsstreams_write(vafs);
+        return __initialize_fsstreams_write(vafs, configuration);
     }
 }
 
@@ -399,7 +400,7 @@ static int __new_vafs(
         return -1;
     }
 
-    status = __initialize_fsstreams(vafs);
+    status = __initialize_fsstreams(vafs, configuration);
     if (status) {
         VAFS_ERROR("__new_vafs: failed to initialize filesystem streams: %i\n", status);
         vafs_destroy(vafs);

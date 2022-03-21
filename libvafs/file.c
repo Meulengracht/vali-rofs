@@ -163,9 +163,9 @@ size_t vafs_file_write(
     void*                  buffer,
     size_t                 size)
 {
-    uint16_t block;
-    uint32_t offset;
-    int      status;
+    vafsblock_t block;
+    uint32_t    offset;
+    int         status;
 
     if (!handle || !buffer || size == 0) {
         errno = EINVAL;

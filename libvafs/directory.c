@@ -707,7 +707,7 @@ int vafs_directory_flush(
     struct VaFsDirectoryEntry*  entry;
     int                         status;
     int                         entryCount = 0;
-    uint16_t                    block;
+    vafsblock_t                 block;
     uint32_t                    offset;
     VAFS_DEBUG("vafs_directory_flush(name=%s)\n", directory->Name);
 

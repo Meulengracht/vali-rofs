@@ -354,6 +354,7 @@ int main(int argc, char *argv[])
     struct VaFs*                vafsHandle;
     int                         status;
     struct progress_context     progressContext = { 0 };
+    struct VaFsConfiguration    configuration;
 
     // parameters
     char* paths[32];
@@ -392,7 +393,9 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    status = vafs_create(imagePath, __get_vafs_arch(arch), &vafsHandle);
+    vafs_config_initialize(&configuration);
+    vafs_config_set_architecture(&configuration, __get_vafs_arch(arch));
+    status = vafs_create(imagePath, &configuration, &vafsHandle);
     if (status) {
         fprintf(stderr, "mkvafs: cannot create vafs output file: %s\n", imagePath);
         return -1;

@@ -100,7 +100,6 @@ int vafs_cache_create(int maxBlocks, struct VaFsBlockCache** cacheOut)
 void vafs_cache_destroy(struct VaFsBlockCache* cache)
 {
     if (!cache) {
-        errno = EINVAL;
         return;
     }
     
