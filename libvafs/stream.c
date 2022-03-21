@@ -34,16 +34,22 @@
 
 #define STREAM_CACHE_SIZE  32
 
-struct VaFsStreamIndexMapping {
+struct IndexMapping {
     uint32_t Block;
     uint32_t Offset;
+};
+
+struct VaFsStreamIndexMappings {
+    int                  Count;
+    int                  Capacity; 
+    struct IndexMapping* Mappings;
 };
 
 struct VaFsStreamHeader {
     uint32_t Magic;
     uint32_t BlockSize;
     uint32_t IndexMappingsOffset;
-    uint32_t Padding;
+    uint32_t IndexMappingsCount;
 };
 
 struct VaFsStream {
@@ -53,7 +59,7 @@ struct VaFsStream {
     VaFsFilterEncodeFunc           Encode;
     VaFsFilterDecodeFunc           Decode;
     struct VaFsBlockCache*         BlockCache;
-    struct VaFsStreamIndexMapping* IndexMappings;
+    struct VaFsStreamIndexMappings IndexMappings;
 
     // The block buffer is used for staging data before
     // we flush it to the data stream. The staging buffer
@@ -66,14 +72,12 @@ struct VaFsStream {
 static int __new_stream(
     struct VaFsStreamDevice* device,
     long                     deviceOffset,
-    uint32_t                 blockSize,
     struct VaFsStream**      streamOut)
 {
     struct VaFsStream* stream;
     int                status;
 
-    VAFS_DEBUG("__new_stream(offset=%lu, blockSize=%u)\n",
-        deviceOffset, blockSize);
+    VAFS_DEBUG("__new_stream(offset=%lu)\n", deviceOffset);
     
     stream = (struct VaFsStream*)malloc(sizeof(struct VaFsStream));
     if (!stream) {
@@ -83,28 +87,23 @@ static int __new_stream(
 
     memset(stream, 0, sizeof(struct VaFsStream));
 
-    // Initialize the stream header to initial values
-    stream->Header.Magic     = STREAM_MAGIC;
-    stream->Header.BlockSize = blockSize;
-
     stream->Device       = device;
     stream->DeviceOffset = deviceOffset;
     
-    status = vafs_cache_create(STREAM_CACHE_SIZE, &stream->BlockCache);
-    if (status != 0) {
-        free(stream);
-        return -1;
-    }
+    *streamOut = stream;
+    return 0;
+}
 
-    stream->BlockBuffer = malloc(blockSize);
+static int __allocate_blockbuffer(
+    struct VaFsStream* stream)
+{
+    VAFS_DEBUG("__allocate_blockbuffer()\n");
+    
+    stream->BlockBuffer = malloc(stream->Header.BlockSize);
     if (!stream->BlockBuffer) {
-        vafs_cache_destroy(stream->BlockCache);
-        free(stream);
         errno = ENOMEM;
         return -1;
     }
-
-    *streamOut = stream;
     return 0;
 }
 
@@ -116,14 +115,33 @@ int vafs_stream_create(
 {
     struct VaFsStream* stream;
     int                status;
+    size_t             written;
 
     if (device == NULL || streamOut == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    status = __new_stream(device, deviceOffset, blockSize, &stream);
+    status = __new_stream(device, deviceOffset, &stream);
     if (status != 0) {
+        return -1;
+    }
+
+    // initialize the stream header to initial values
+    stream->Header.Magic     = STREAM_MAGIC;
+    stream->Header.BlockSize = blockSize;
+
+    // write the initial stream header
+    status = vafs_streamdevice_write(device, &stream->Header, sizeof(struct VaFsStreamHeader), &written);
+    if (status != 0) {
+        vafs_stream_close(stream);
+        return -1;
+    }
+
+    // allocate the block buffer
+    status = __allocate_blockbuffer(stream);
+    if (status != 0) {
+        vafs_stream_close(stream);
         return -1;
     }
 
@@ -149,6 +167,127 @@ static long __get_index_mappings_offset(
     return stream->DeviceOffset + stream->Header.IndexMappingsOffset;
 }
 
+static long __get_block_offset(
+    struct VaFsStream* stream,
+    vafsblock_t        block)
+{
+    return stream->IndexMappings.Mappings[block].Offset;
+}
+
+static int __verify_header(
+    struct VaFsStreamHeader* header)
+{
+    if (header->Magic != STREAM_MAGIC) {
+        VAFS_ERROR("__verify_header: invalid stream magic\n");
+        return -1;
+    }
+
+    if (header->BlockSize < VA_FS_DATA_MIN_BLOCKSIZE || header->BlockSize > VA_FS_DATA_MAX_BLOCKSIZE) {
+        VAFS_ERROR("__verify_header: invalid block size: %u\n", header->BlockSize);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int __load_index_mappings(
+    struct VaFsStream* stream)
+{
+    int    status;
+    size_t read;
+
+    VAFS_DEBUG("__load_index_mappings()\n");
+
+    // allocate the index mappings
+    stream->IndexMappings.Count = stream->Header.IndexMappingsCount;
+    stream->IndexMappings.Capacity = stream->IndexMappings.Count;
+    stream->IndexMappings.Mappings = (struct IndexMapping*)malloc(sizeof(struct IndexMapping) * stream->IndexMappings.Capacity);
+    if (!stream->IndexMappings.Mappings) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    // seek to index mappings
+    vafs_streamdevice_seek(stream->Device, __get_index_mappings_offset(stream), SEEK_SET);
+
+    // read the index mappings
+    status = vafs_streamdevice_read(
+        stream->Device, stream->IndexMappings.Mappings,
+        sizeof(struct IndexMapping) * stream->IndexMappings.Count,
+        &read
+    );
+    if (status != 0) {
+        return status;
+    }
+    return 0;
+}
+
+static int __load_metadata(
+    struct VaFsStream* stream)
+{
+    size_t read;
+    int    status;
+
+    VAFS_DEBUG("__load_metadata()\n");
+
+    status = vafs_streamdevice_read(stream->Device, &stream->Header, sizeof(struct VaFsStreamHeader), &read);
+    if (status != 0) {
+        vafs_stream_close(stream);
+        return -1;
+    }
+
+    status = __verify_header(&stream->Header);
+    if (status != 0) {
+        vafs_stream_close(stream);
+        return -1;
+    }
+    return __load_index_mappings(stream);
+}
+
+int vafs_stream_open(
+    struct VaFsStreamDevice* device,
+    long                     deviceOffset,
+    struct VaFsStream**      streamOut)
+{
+    struct VaFsStream* stream;
+    int                status;
+    size_t             read;
+    VAFS_DEBUG("vafs_stream_open(offset=%lu)\n", deviceOffset);
+
+    if (device == NULL || streamOut == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    status = __new_stream(device, deviceOffset, &stream);
+    if (status != 0) {
+        return -1;
+    }
+
+    status = __load_metadata(stream);
+    if (status != 0) {
+        vafs_stream_close(stream);
+        return -1;
+    }
+
+    // create the block cache
+    status = vafs_cache_create(STREAM_CACHE_SIZE, &stream->BlockCache);
+    if (status != 0) {
+        vafs_stream_close(stream);
+        return -1;
+    }
+
+    // allocate the block buffer
+    status = __allocate_blockbuffer(stream);
+    if (status != 0) {
+        vafs_stream_close(stream);
+        return -1;
+    }
+
+    *streamOut = stream;
+    return 0;
+}
+
 int vafs_stream_set_filter(
     struct VaFsStream*   stream,
     VaFsFilterEncodeFunc encode,
@@ -166,7 +305,7 @@ int vafs_stream_set_filter(
 
 int vafs_stream_position(
     struct VaFsStream* stream, 
-    uint16_t*          blockOut,
+    vafsblock_t*       blockOut,
     uint32_t*          offsetOut)
 {
     if (stream == NULL || blockOut == NULL || offsetOut == NULL) {
@@ -174,7 +313,7 @@ int vafs_stream_position(
         return -1;
     }
 
-    *blockOut = (uint16_t)stream->BlockBufferIndex;
+    *blockOut  = (vafsblock_t)stream->BlockBufferIndex;
     *offsetOut = (uint32_t)stream->BlockBufferOffset;
     return 0;
 }
@@ -192,7 +331,7 @@ static uint32_t __get_blockbuffer_crc(
 
 static int __load_blockbuffer(
     struct VaFsStream* stream,
-    uint16_t           blockIndex,
+    vafsblock_t        blockIndex,
     VaFsBlock_t*       block)
 {
     void*    blockData;
@@ -225,7 +364,7 @@ static int __load_blockbuffer(
 
     // Handle data filters
     if (stream->Decode) {
-        uint32_t blockBufferSize = stream->BlockSize;
+        uint32_t blockBufferSize = stream->Header.BlockSize;
 
         VAFS_DEBUG("__load_blockbuffer decoding buffer of size %zu\n", blockSize);
         status = stream->Decode(blockData, blockSize, stream->BlockBuffer, &blockBufferSize);
@@ -262,16 +401,16 @@ static int __load_blockbuffer(
 
 int vafs_stream_seek(
     struct VaFsStream* stream, 
-    uint16_t           blockIndex,
+    vafsblock_t        blockIndex,
     uint32_t           blockOffset)
 {
     VaFsBlock_t block;
     int         status;
     long        offset;
-    uint16_t    targetBlock = blockIndex;
-    uint32_t    targetOffset = blockOffset;
     size_t      read;
-    uint16_t    i = 0;
+    vafsblock_t targetBlock  = blockIndex;
+    uint32_t    targetOffset = blockOffset;
+    vafsblock_t i            = blockIndex;
     VAFS_DEBUG("vafs_stream_seek(blockIndex=%u, blockOffset=%u)\n",
         blockIndex, blockOffset);
 
@@ -281,7 +420,7 @@ int vafs_stream_seek(
     }
     
     // seek to start of stream
-    offset = __get_data_offset(stream);
+    offset = __get_block_offset(stream, blockIndex);
     while (1) {
         status = vafs_streamdevice_seek(stream->Device, offset, SEEK_SET);
         if (status < 0) {
@@ -298,12 +437,12 @@ int vafs_stream_seek(
         // have we reached the target block, and does it contain our index?
         if (i == targetBlock) {
             // is the offset inside the current block?
-            if (targetOffset < stream->BlockSize) {
+            if (targetOffset < stream->Header.BlockSize) {
                 break; // yep, we are done here
             }
 
             // nope, reduce offset, switch to next block
-            targetOffset -= stream->BlockSize;
+            targetOffset -= stream->Header.BlockSize;
             targetBlock++;
         }
 
@@ -319,6 +458,41 @@ int vafs_stream_seek(
 
     stream->BlockBufferIndex  = targetBlock;
     stream->BlockBufferOffset = targetOffset;
+    return 0;
+}
+
+static int __add_index_mapping(
+    struct VaFsStream* stream)
+{
+    long offset;
+
+    offset = vafs_streamdevice_seek(stream->Device, 0, SEEK_CUR);
+
+    VAFS_DEBUG("__add_index_mapping: adding index mapping %u => %lu\n",
+        stream->BlockBufferIndex, offset);
+
+    if (stream->IndexMappings.Count == stream->IndexMappings.Capacity) {
+        struct IndexMapping* newMappings;
+        size_t               newCapacity;
+
+        newCapacity = stream->IndexMappings.Capacity * 2;
+        if (newCapacity == 0) {
+            newCapacity = 8;
+        }
+
+        newMappings = realloc(stream->IndexMappings.Mappings, newCapacity * sizeof(struct IndexMapping));
+        if (!newMappings) {
+            errno = ENOMEM;
+            return -1;
+        }
+
+        stream->IndexMappings.Mappings = newMappings;
+        stream->IndexMappings.Capacity = newCapacity;
+    }
+
+    stream->IndexMappings.Mappings[stream->IndexMappings.Count].Block  = stream->BlockBufferIndex;
+    stream->IndexMappings.Mappings[stream->IndexMappings.Count].Offset = (uint32_t)offset;
+    stream->IndexMappings.Count++;
     return 0;
 }
 
@@ -362,16 +536,24 @@ static int __flush_block(
         VAFS_DEBUG("__flush_block compressed buffer size %u\n", compressedSize);
     }
 
+    // add index mapping
+    status = __add_index_mapping(stream);
+    if (status) {
+        VAFS_ERROR("__flush_block: failed to register index mapping\n");
+        return status;
+    }
+
     // flush the block to the stream, write header first
-    if (__write_block_header(stream, compressedSize)) {
+    status = __write_block_header(stream, compressedSize);
+    if (status) {
         VAFS_ERROR("__flush_block: failed to write block header\n");
-        return -1;
+        return status;
     }
 
     status = vafs_streamdevice_write(stream->Device, compressedData, compressedSize, &written);
     if (status) {
         VAFS_ERROR("__flush_block: failed to write block data\n");
-        return -1;
+        return status;
     }
 
     // In the case of a compressed stream, we need to free the compressed data
@@ -403,7 +585,7 @@ int vafs_stream_write(
     while (bytesToWrite) {
         size_t byteCount;
 
-        bytesLeftInBlock = stream->BlockSize - (stream->BlockBufferOffset % stream->BlockSize);
+        bytesLeftInBlock = stream->Header.BlockSize - (stream->BlockBufferOffset % stream->Header.BlockSize);
         byteCount = MIN(bytesToWrite, bytesLeftInBlock);
 
         memcpy(stream->BlockBuffer + stream->BlockBufferOffset, data, byteCount);
@@ -412,7 +594,7 @@ int vafs_stream_write(
         data                      += byteCount;
         bytesToWrite              -= byteCount;
 
-        if (stream->BlockBufferOffset == stream->BlockSize) {
+        if (stream->BlockBufferOffset == stream->Header.BlockSize) {
             if (__flush_block(stream)) {
                 VAFS_ERROR("vafs_stream_write: failed to flush block\n");
                 return -1;
@@ -442,7 +624,7 @@ int vafs_stream_read(
     while (bytesToRead) {
         size_t byteCount;
 
-        bytesLeftInBlock = stream->BlockSize - stream->BlockBufferOffset;
+        bytesLeftInBlock = stream->Header.BlockSize - stream->BlockBufferOffset;
         byteCount = MIN(bytesToRead, bytesLeftInBlock);
 
         memcpy(data, stream->BlockBuffer + stream->BlockBufferOffset, byteCount);
@@ -451,7 +633,7 @@ int vafs_stream_read(
         data                      += byteCount;
         bytesToRead               -= byteCount;
 
-        if (stream->BlockBufferOffset == stream->BlockSize) {
+        if (stream->BlockBufferOffset == stream->Header.BlockSize) {
             VaFsBlock_t block;
             size_t      read;
             int         status;
@@ -478,22 +660,99 @@ int vafs_stream_read(
 int vafs_stream_flush(
     struct VaFsStream* stream)
 {
+    int status;
+
     VAFS_DEBUG("vafs_stream_flush()\n");
     if (!stream) {
         errno = EINVAL;
         return -1;
     }
 
-    return __flush_block(stream);
+    status = __flush_block(stream);
+    if (status) {
+        VAFS_ERROR("vafs_stream_flush: failed to flush block\n");
+        return status;
+    }
+    return 0;
+}
+
+static int __write_index_mappings(
+    struct VaFsStream* stream)
+{
+    size_t written;
+    int    status;
+    long   offset;
+    VAFS_DEBUG("__write_index_mapping()\n");
+
+    // get current offset
+    offset = vafs_streamdevice_seek(stream->Device, 0, SEEK_CUR);
+    status = vafs_streamdevice_write(
+        stream->Device,
+        stream->IndexMappings.Mappings,
+        stream->IndexMappings.Count * sizeof(struct IndexMapping),
+        &written
+    );
+    if (status) {
+        VAFS_ERROR("__write_index_mapping: failed to write index mapping\n");
+        return status;
+    }
+
+    // update the header
+    stream->Header.IndexMappingsOffset = offset - stream->DeviceOffset;
+    stream->Header.IndexMappingsCount  = stream->IndexMappings.Count;
+    return 0;
+}
+
+static int __update_stream_header(
+    struct VaFsStream* stream)
+{
+    size_t written;
+    int    status;
+    long   position;
+    VAFS_DEBUG("__update_stream_header()\n");
+
+    position = vafs_streamdevice_seek(stream->Device, 0, SEEK_CUR);
+    vafs_streamdevice_seek(stream->Device, stream->DeviceOffset, SEEK_SET);
+
+    status = vafs_streamdevice_write(
+        stream->Device,
+        &stream->Header,
+        sizeof(struct VaFsStreamHeader),
+        &written
+    );
+    if (status) {
+        VAFS_ERROR("__update_stream_header: failed to write stream header\n");
+        return status;
+    }
+
+    vafs_streamdevice_seek(stream->Device, position, SEEK_SET);
+    return 0;
 }
 
 int vafs_stream_close(
     struct VaFsStream* stream)
 {
+    int status;
+
     VAFS_DEBUG("vafs_stream_close()\n");
     if (!stream) {
         errno = EINVAL;
         return -1;
+    }
+
+    if (stream->IndexMappings.Mappings) {
+        status = __write_index_mappings(stream);
+        if (status) {
+            VAFS_ERROR("vafs_stream_close: failed to write index mappings\n");
+            return status;
+        }
+        free(stream->IndexMappings.Mappings);
+
+        status = __update_stream_header(stream);
+        if (status) {
+            VAFS_ERROR("vafs_stream_close: failed to update stream header\n");
+            return status;
+        }
     }
 
     vafs_cache_destroy(stream->BlockCache);

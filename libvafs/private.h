@@ -30,6 +30,8 @@
 struct VaFsStream;
 struct VaFsStreamDevice;
 
+typedef uint16_t vafsblock_t;
+
 #define VA_FS_MAGIC       0x3144524D
 #define VA_FS_VERSION     0x00010000
 #define VA_FS_BLOCKMAGIC  0xAE305532
@@ -43,9 +45,10 @@ struct VaFsStreamDevice;
 
 // The default block size for the descriptor stream is 8kb
 // The allowed block sizes for data streams are between 16kb - 1mb
-#define VA_FS_DESCRIPTOR_BLOCK_SIZE (8 * 1024)
-#define VA_FS_DATA_MIN_BLOCKSIZE    (8 * 1024)
-#define VA_FS_DATA_MAX_BLOCKSIZE    (1024 * 1024)
+#define VA_FS_DESCRIPTOR_BLOCK_SIZE  (8 * 1024)
+#define VA_FS_DATA_MIN_BLOCKSIZE     (8 * 1024)
+#define VA_FS_DATA_DEFAULT_BLOCKSIZE (128 * 1024)
+#define VA_FS_DATA_MAX_BLOCKSIZE     (1024 * 1024)
 
 // Logging macros
 #define VAFS_ERROR(...)  vafs_log_message(VaFsLogLevel_Error, "libvafs: " __VA_ARGS__)
@@ -61,8 +64,8 @@ VAFS_STRUCT(VaFsBlock, {
 });
 
 VAFS_STRUCT(VaFsBlockPosition, {
-    uint16_t Index;
-    uint32_t Offset;
+    vafsblock_t Index;
+    uint32_t    Offset;
 });
 
 VAFS_STRUCT(VaFsHeader, {
@@ -71,7 +74,6 @@ VAFS_STRUCT(VaFsHeader, {
     uint32_t            Architecture;
     uint16_t            FeatureCount;
     uint16_t            Reserved;
-    uint32_t            BlockSize;
     uint32_t            Attributes;
     uint32_t            DescriptorBlockOffset;
     uint32_t            DataBlockOffset;
@@ -227,6 +229,19 @@ extern int vafs_stream_create(
     struct VaFsStream**      streamOut);
 
 /**
+ * @brief Open a new stream for reading from the provided stream device.
+ * 
+ * @param[In]  device       The stream device to read from.
+ * @param[In]  deviceOffset The offset in the device to start reading from.
+ * @param[Out] streamOut    A pointer to where to store the handle of the stream.
+ * @return int 0 if the stream was valid and successfully opened, otherwise -1.
+ */
+extern int vafs_stream_open(
+    struct VaFsStreamDevice* device,
+    long                     deviceOffset,
+    struct VaFsStream**      streamOut);
+
+/**
  * @brief 
  * 
  * @param stream 
@@ -249,7 +264,7 @@ extern int vafs_stream_set_filter(
  */
 extern int vafs_stream_position(
     struct VaFsStream* stream, 
-    uint16_t*          blockOut,
+    vafsblock_t*       blockOut,
     uint32_t*          offsetOut);
 
 /**
@@ -262,7 +277,7 @@ extern int vafs_stream_position(
  */
 extern int vafs_stream_seek(
     struct VaFsStream* stream, 
-    uint16_t           blockIndex,
+    vafsblock_t        blockIndex,
     uint32_t           blockOffset);
 
 /**

@@ -29,8 +29,8 @@ void vafs_config_initialize(struct VaFsConfiguration* configuration)
         return;
     }
 
-    configuration->Architecture = VaFsArchitecture_UNKNOWN;
-    configuration->BlockSize    = 0;
+    configuration->Architecture  = VaFsArchitecture_UNKNOWN;
+    configuration->DataBlockSize = VA_FS_DATA_DEFAULT_BLOCKSIZE;
 }
 
 void vafs_config_set_architecture(struct VaFsConfiguration* configuration, enum VaFsArchitecture architecture)
@@ -53,5 +53,5 @@ void vafs_config_set_block_size(struct VaFsConfiguration* configuration, uint32_
         return;
     }
 
-    configuration->BlockSize = blockSize;
+    configuration->DataBlockSize = blockSize;
 }
