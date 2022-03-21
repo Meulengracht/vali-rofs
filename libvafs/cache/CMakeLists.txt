@@ -1,4 +1,4 @@
 add_library(vafs-blockcache STATIC
-    cache.c
+    blockcache.c
     hashtable.c
 )

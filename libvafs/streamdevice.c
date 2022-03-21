@@ -30,6 +30,7 @@
 
 struct VaFsStreamDevice {
     int   Type;
+    int   ReadOnly;
     mtx_t Lock;
 
     union {
@@ -85,7 +86,8 @@ int vafs_streamdevice_open_file(
         return -1;
     }
 
-    device->File = handle;
+    device->File     = handle;
+    device->ReadOnly = 1;
     
     *deviceOut = device;
     return 0;
@@ -107,10 +109,11 @@ int vafs_streamdevice_open_memory(
         return -1;
     }
 
-    device->Memory.Buffer = (void*)buffer;
+    device->ReadOnly        = 1;
+    device->Memory.Buffer   = (void*)buffer;
     device->Memory.Capacity = (long)length;
     device->Memory.Position = 0;
-    device->Memory.Owned = 0;
+    device->Memory.Owned    = 0;
     
     *deviceOut = device;
     return 0;
@@ -319,6 +322,11 @@ int vafs_streamdevice_write(
         return -1;
     }
 
+    if (device->ReadOnly) {
+        errno = EACCES;
+        return -1;
+    }
+
     // flush the actual block data
     if (device->Type == STREAMDEVICE_FILE) {
         *bytesWritten = fwrite(buffer, 1, length, device->File);
@@ -367,6 +375,11 @@ int vafs_streamdevice_copy(
 
     if (destination == NULL || source == NULL) {
         errno = EINVAL;
+        return -1;
+    }
+
+    if (destination->ReadOnly) {
+        errno = EACCES;
         return -1;
     }
 

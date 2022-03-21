@@ -20,6 +20,7 @@
  */
 
 #include <errno.h>
+#include "blockcache.h"
 #include "hashtable.h"
 #include <limits.h>
 #include <stdlib.h>
@@ -37,7 +38,7 @@ struct vafs_block {
     int      uses;
 };
 
-struct vafs_block_cache {
+struct VaFsBlockCache {
     int          max_blocks;
     hashtable_t* cache;
 };
@@ -47,12 +48,12 @@ struct cache_enum_context {
     int      uses;
 };
 
-struct vafs_block_cache* __block_cache_new()
+struct VaFsBlockCache* __block_cache_new()
 {
-    struct vafs_block_cache* cache;
+    struct VaFsBlockCache* cache;
     int                      status;
     
-    cache = malloc(sizeof(struct vafs_block_cache));
+    cache = malloc(sizeof(struct VaFsBlockCache));
     if (!cache) {
         errno = ENOMEM;
         return NULL;
@@ -76,9 +77,9 @@ struct vafs_block_cache* __block_cache_new()
     return cache;
 }
 
-int vafs_cache_create(int maxBlocks, struct vafs_block_cache** cacheOut)
+int vafs_cache_create(int maxBlocks, struct VaFsBlockCache** cacheOut)
 {
-    struct vafs_block_cache* cache;
+    struct VaFsBlockCache* cache;
 
     if (cacheOut == NULL || maxBlocks < 0) {
         errno = EINVAL;
@@ -96,7 +97,7 @@ int vafs_cache_create(int maxBlocks, struct vafs_block_cache** cacheOut)
     return 0;
 }
 
-void vafs_cache_destroy(struct vafs_block_cache* cache)
+void vafs_cache_destroy(struct VaFsBlockCache* cache)
 {
     if (!cache) {
         errno = EINVAL;
@@ -108,7 +109,7 @@ void vafs_cache_destroy(struct vafs_block_cache* cache)
     free(cache);
 }
 
-int vafs_cache_get(struct vafs_block_cache* cache, uint32_t index, void** bufferOut, size_t* sizeOut)
+int vafs_cache_get(struct VaFsBlockCache* cache, uint32_t index, void** bufferOut, size_t* sizeOut)
 {
     struct vafs_block* block;
 
@@ -129,7 +130,7 @@ int vafs_cache_get(struct vafs_block_cache* cache, uint32_t index, void** buffer
     return 0;
 }
 
-static void __eject_lowuse(struct vafs_block_cache* cache)
+static void __eject_lowuse(struct VaFsBlockCache* cache)
 {
     struct cache_enum_context context = { .index = UINT_MAX, .uses = INT_MAX };
     struct vafs_block*        block;
@@ -165,7 +166,7 @@ static void* __memdup(const void* src, size_t size)
     return dst;
 }
 
-int vafs_cache_set(struct vafs_block_cache* cache, uint32_t index, void* buffer, size_t size)
+int vafs_cache_set(struct VaFsBlockCache* cache, uint32_t index, void* buffer, size_t size)
 {
     struct vafs_block* block;
 

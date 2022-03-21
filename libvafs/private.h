@@ -41,8 +41,11 @@ struct VaFsStreamDevice;
 // decision this.
 #define VA_FS_MAX_FEATURES 16
 
-// Default ramdisk block size is 64 kb
-#define VA_FS_BLOCKSIZE (64 * 1024)
+// The default block size for the descriptor stream is 8kb
+// The allowed block sizes for data streams are between 16kb - 1mb
+#define VA_FS_DESCRIPTOR_BLOCK_SIZE (8 * 1024)
+#define VA_FS_DATA_MIN_BLOCKSIZE    (8 * 1024)
+#define VA_FS_DATA_MAX_BLOCKSIZE    (1024 * 1024)
 
 // Logging macros
 #define VAFS_ERROR(...)  vafs_log_message(VaFsLogLevel_Error, "libvafs: " __VA_ARGS__)

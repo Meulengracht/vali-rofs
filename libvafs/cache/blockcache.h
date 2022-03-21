@@ -25,7 +25,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-struct vafs_block_cache;
+struct VaFsBlockCache;
 
 /**
  * @brief Creates a new block cache, that contains the N most-used blocks. The cache
@@ -36,14 +36,14 @@ struct vafs_block_cache;
  * @param[Out] cacheOut  A pointer to store the newly malloc'd cache.
  * @return int 0 on success, -1 on failure, errno will be set accordingly.
  */
-extern int vafs_cache_create(int maxBlocks, struct vafs_block_cache** cacheOut);
+extern int vafs_cache_create(int maxBlocks, struct VaFsBlockCache** cacheOut);
 
 /**
  * @brief Destroys the blocks cache and frees any resources allocated.
  * 
  * @param[In] cache The cache to destroy. 
  */
-extern void vafs_cache_destroy(struct vafs_block_cache* cache);
+extern void vafs_cache_destroy(struct VaFsBlockCache* cache);
 
 /**
  * @brief Retrieves a block from the cache.
@@ -54,7 +54,7 @@ extern void vafs_cache_destroy(struct vafs_block_cache* cache);
  * @param[Out] sizeOut   A pointer where the size of the block will be stored.
  * @return int 0 on success, -1 on failure, errno will be set accordingly. 
  */
-extern int vafs_cache_get(struct vafs_block_cache* cache, uint32_t index, void** bufferOut, size_t* sizeOut);
+extern int vafs_cache_get(struct VaFsBlockCache* cache, uint32_t index, void** bufferOut, size_t* sizeOut);
 
 /**
  * @brief Stores a block in the cache.
@@ -65,6 +65,6 @@ extern int vafs_cache_get(struct vafs_block_cache* cache, uint32_t index, void**
  * @param[In] size   The size of the buffer.
  * @return int 
  */
-extern int vafs_cache_set(struct vafs_block_cache* cache, uint32_t index, void* buffer, size_t size);
+extern int vafs_cache_set(struct VaFsBlockCache* cache, uint32_t index, void* buffer, size_t size);
 
 #endif //!__VAFS_BLOCKCACHE_CACHE_H__

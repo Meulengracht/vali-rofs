@@ -15,7 +15,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  *
  * Vali Initrd Filesystem
- * - Contains the implementation of the Vali Initrd Filesystem.
+ * - Contains the implementation of the Vali Initrd Filesystem. maximum block size for data blocks is 1mb
  *   This filesystem is used to store the initrd of the kernel.
  */
 
@@ -228,22 +228,22 @@ static int __verify_header(
 }
 
 static void __initialize_header(
-    struct VaFs*             vafs,
-    enum VaFsArchitecture    architecture)
+    struct VaFs*              vafs,
+    struct VaFsConfiguration* configuration)
 {
     vafs->Header.Magic = VA_FS_MAGIC;
     vafs->Header.Version = VA_FS_VERSION;
-    vafs->Header.Architecture = architecture;
+    vafs->Header.Architecture = configuration->Architecture;
     vafs->Header.FeatureCount = 0;
     vafs->Header.Reserved = 0;
-    vafs->Header.BlockSize = VA_FS_BLOCKSIZE;
+    vafs->Header.BlockSize = configuration->DataBlockSize;
     vafs->Header.Attributes = 0;
 }
 
 static int __initialize_imagestream(
-    struct VaFs*             vafs,
-    struct VaFsStreamDevice* imageDevice,
-    enum VaFsArchitecture    architecture)
+    struct VaFs*              vafs,
+    struct VaFsStreamDevice*  imageDevice,
+    struct VaFsConfiguration* configuration)
 {
     int status = 0;
 
@@ -271,7 +271,7 @@ static int __initialize_imagestream(
         status = __load_features(vafs);
     }
     else {
-        __initialize_header(vafs, architecture);
+        __initialize_header(vafs, configuration);
     }
     return status;
 }
@@ -287,7 +287,7 @@ static int __initialize_fsstreams_read(
     status = vafs_stream_create(
         vafs->ImageDevice, 
         vafs->Header.DescriptorBlockOffset,
-        VA_FS_BLOCKSIZE,
+        VA_FS_DESCRIPTOR_BLOCK_SIZE,
         &vafs->DescriptorStream
     );
     if (status) {
@@ -298,7 +298,7 @@ static int __initialize_fsstreams_read(
     status = vafs_stream_create(
         vafs->ImageDevice, 
         vafs->Header.DataBlockOffset,
-        VA_FS_BLOCKSIZE,
+        vafs->Header.BlockSize,
         &vafs->DataStream
     );
     return status;
@@ -329,7 +329,7 @@ static int __initialize_fsstreams_write(
     status = vafs_stream_create(
         vafs->DescriptorDevice, 
         0,
-        vafs->Header.BlockSize,
+        VA_FS_DESCRIPTOR_BLOCK_SIZE,
         &vafs->DescriptorStream
     );
     if (status) {
@@ -358,10 +358,10 @@ static int __initialize_fsstreams(
 }
 
 static int __new_vafs(
-    enum VaFsMode            mode,
-    struct VaFsStreamDevice* imageDevice,
-    enum VaFsArchitecture    architecture,
-    struct VaFs**            vafsOut)
+    enum VaFsMode             mode,
+    struct VaFsStreamDevice*  imageDevice,
+    struct VaFsConfiguration* configuration,
+    struct VaFs**             vafsOut)
 {
     struct VaFs* vafs;
     int          status;
@@ -392,7 +392,7 @@ static int __new_vafs(
     }
 
     // try to create the output file, otherwise do not continue
-    status = __initialize_imagestream(vafs, imageDevice, architecture);
+    status = __initialize_imagestream(vafs, imageDevice, configuration);
     if (status) {
         VAFS_ERROR("__new_vafs: failed to initialize image stream: %i\n", status);
         vafs_destroy(vafs);
@@ -431,9 +431,9 @@ static void __initialize_overview(
 }
 
 int vafs_create(
-    const char*           path,
-    enum VaFsArchitecture architecture,
-    struct VaFs**         vafsOut)
+    const char*               path,
+    struct VaFsConfiguration* configuration,
+    struct VaFs**             vafsOut)
 {
     struct VaFsStreamDevice* imageDevice;
     int                      status;
@@ -446,7 +446,7 @@ int vafs_create(
         return status;
     }
     
-    status = __new_vafs(VaFsMode_Write, imageDevice, architecture, vafsOut);
+    status = __new_vafs(VaFsMode_Write, imageDevice, configuration, vafsOut);
     if (status) {
         VAFS_ERROR("vafs_create: failed to create new vafs instance: %i\n", status);
         return status;
