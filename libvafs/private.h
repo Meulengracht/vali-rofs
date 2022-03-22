@@ -34,7 +34,6 @@ typedef uint16_t vafsblock_t;
 
 #define VA_FS_MAGIC       0x3144524D
 #define VA_FS_VERSION     0x00010000
-#define VA_FS_BLOCKMAGIC  0xAE305532
 
 #define VA_FS_INVALID_BLOCK  0xFFFF
 #define VA_FS_INVALID_OFFSET 0xFFFFFFFF
@@ -55,13 +54,6 @@ typedef uint16_t vafsblock_t;
 #define VAFS_WARN(...)   vafs_log_message(VaFsLogLevel_Warning, "libvafs: " __VA_ARGS__)
 #define VAFS_INFO(...)   vafs_log_message(VaFsLogLevel_Info, "libvafs: " __VA_ARGS__)
 #define VAFS_DEBUG(...)  vafs_log_message(VaFsLogLevel_Debug, "libvafs: " __VA_ARGS__)
-
-VAFS_STRUCT(VaFsBlock, {
-    uint32_t Magic;
-    uint32_t Length;
-    uint32_t Crc;
-    uint16_t Flags;
-});
 
 VAFS_STRUCT(VaFsBlockPosition, {
     vafsblock_t Index;
