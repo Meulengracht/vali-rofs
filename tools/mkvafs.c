@@ -173,7 +173,7 @@ int __get_count_recursive(char *path, int* fileCountOut, int* SymlinkCountOut, i
 
                 (*dirCountOut)++;
                 
-                npath = malloc(strlen(path)+strlen(direntp->d_name)+2);
+                npath = malloc(strlen(path) + strlen(direntp->d_name) + 2);
                 if (npath == NULL) {
                     errno = ENOMEM;
                     return -1;
@@ -214,11 +214,16 @@ static void __write_progress(const char* prefix, struct progress_context* contex
     current = context->files + context->directories + context->symlinks;
     progress = (current * 100) / total;
 
-    printf("\33[2K\r%s [%d%%] %i/%i files, %i/%i dirs",
-        prefix, progress,
-        context->files, context->files_total,
-        context->directories, context->directories_total
-    );
+    printf("\33[2K\r%-20.20s [%d%%]", prefix, progress);
+    if (context->files_total) {
+        printf(" %i/%i files", context->files, context->files_total);
+    }
+    if (context->directories_total) {
+        printf(" %i/%i dirs", context->directories, context->directories_total);
+    }
+    if (context->symlinks_total) {
+        printf(" %i/%i symlinks", context->symlinks, context->symlinks_total);
+    }
     fflush(stdout);
 }
 
@@ -246,8 +251,14 @@ static int __write_file(
     }
 
     fseek(file, 0, SEEK_END);
-    fileSize = ftell(file);
+    fileSize   = ftell(file);
     fileBuffer = malloc(fileSize);
+    if (fileBuffer == NULL) {
+        fprintf(stderr, "mkvafs: failed to allocate memory for file '%s'\n", filename);
+        fclose(file);
+        return -1;
+    }
+
     rewind(file);
     fread(fileBuffer, 1, fileSize, file);
     fclose(file);
@@ -284,7 +295,7 @@ static int __write_directory(
         return -1;
     }
 
-    filepathBuffer = malloc(512);
+    filepathBuffer = malloc(1024);
     while ((dp = readdir(dfd)) != NULL) {
         if (strcmp(dp->d_name, ".") == 0 || strcmp(dp->d_name, "..") == 0)
             continue;
@@ -295,7 +306,7 @@ static int __write_directory(
         else
             sprintf(filepathBuffer, "%s%s", path, dp->d_name);
         
-        __write_progress(filepathBuffer, progress);
+        __write_progress(dp->d_name, progress);
         if (__is_directory(filepathBuffer)) {
             struct VaFsDirectoryHandle* subdirectoryHandle;
             status = vafs_directory_open_directory(directoryHandle, dp->d_name, &subdirectoryHandle);
@@ -340,7 +351,7 @@ static int __write_directory(
             }
             progress->files++;
         }
-        __write_progress(filepathBuffer, progress);
+        __write_progress(dp->d_name, progress);
     }
 
     free(filepathBuffer);

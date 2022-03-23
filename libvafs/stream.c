@@ -63,6 +63,7 @@ struct VaFsStream {
     VaFsFilterDecodeFunc          Decode;
     struct VaFsBlockCache*        BlockCache;
     struct VaFsStreamBlockHeaders BlockHeaders;
+    int                           FlushOnClose;
 
     // The block buffer is used for staging data before
     // we flush it to the data stream. The staging buffer
@@ -133,10 +134,12 @@ int vafs_stream_create(
     // initialize the stream header to initial values
     stream->Header.Magic     = STREAM_MAGIC;
     stream->Header.BlockSize = blockSize;
+    stream->FlushOnClose     = 1;
 
     // write the initial stream header
     status = vafs_streamdevice_write(device, &stream->Header, sizeof(struct VaFsStreamHeader), &written);
     if (status != 0) {
+        VAFS_DEBUG("vafs_stream_create: failed to write stream header\n");
         vafs_stream_close(stream);
         return -1;
     }
@@ -144,6 +147,7 @@ int vafs_stream_create(
     // allocate the block buffer
     status = __allocate_blockbuffer(stream);
     if (status != 0) {
+        VAFS_DEBUG("vafs_stream_create: failed to allocate block buffer\n");
         vafs_stream_close(stream);
         return -1;
     }
@@ -205,9 +209,9 @@ static int __load_block_headers(
     VAFS_DEBUG("__load_block_headers()\n");
 
     // allocate the block headers
-    stream->BlockHeaders.Count = stream->Header.BlockHeadersCount;
-    stream->BlockHeaders.Capacity = stream->BlockHeaders.Count;
-    stream->BlockHeaders.Headers = (struct BlockHeader*)malloc(sizeof(struct BlockHeader) * stream->BlockHeaders.Capacity);
+    stream->BlockHeaders.Count    = stream->Header.BlockHeadersCount;
+    stream->BlockHeaders.Capacity = stream->Header.BlockHeadersCount;
+    stream->BlockHeaders.Headers  = (struct BlockHeader*)malloc(sizeof(struct BlockHeader) * stream->Header.BlockHeadersCount);
     if (!stream->BlockHeaders.Headers) {
         errno = ENOMEM;
         return -1;
@@ -223,6 +227,7 @@ static int __load_block_headers(
         &read
     );
     if (status != 0) {
+        VAFS_ERROR("__load_block_headers: failed to read block headers\n");
         return status;
     }
     return 0;
@@ -236,15 +241,18 @@ static int __load_metadata(
 
     VAFS_DEBUG("__load_metadata()\n");
 
-    status = vafs_streamdevice_read(stream->Device, &stream->Header, sizeof(struct VaFsStreamHeader), &read);
+    status = vafs_streamdevice_read(
+        stream->Device,
+        &stream->Header,
+        sizeof(struct VaFsStreamHeader),
+        &read
+    );
     if (status != 0) {
-        vafs_stream_close(stream);
         return -1;
     }
 
     status = __verify_header(&stream->Header);
     if (status != 0) {
-        vafs_stream_close(stream);
         return -1;
     }
     return __load_block_headers(stream);
@@ -272,6 +280,7 @@ int vafs_stream_open(
 
     status = __load_metadata(stream);
     if (status != 0) {
+        VAFS_ERROR("vafs_stream_open: failed to load metadata\n");
         vafs_stream_close(stream);
         return -1;
     }
@@ -279,6 +288,7 @@ int vafs_stream_open(
     // create the block cache
     status = vafs_cache_create(STREAM_CACHE_SIZE, &stream->BlockCache);
     if (status != 0) {
+        VAFS_ERROR("vafs_stream_open: failed to create block cache\n");
         vafs_stream_close(stream);
         return -1;
     }
@@ -286,6 +296,7 @@ int vafs_stream_open(
     // allocate the block buffer
     status = __allocate_blockbuffer(stream);
     if (status != 0) {
+        VAFS_ERROR("vafs_stream_open: failed to allocate block buffer\n");
         vafs_stream_close(stream);
         return -1;
     }
@@ -721,7 +732,7 @@ int vafs_stream_close(
         return -1;
     }
 
-    if (stream->BlockHeaders.Headers) {
+    if (stream->FlushOnClose) {
         status = __write_block_headers(stream);
         if (status) {
             VAFS_ERROR("vafs_stream_close: failed to write block headers\n");

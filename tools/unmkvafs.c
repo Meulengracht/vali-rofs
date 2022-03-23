@@ -139,11 +139,16 @@ static void __write_progress(const char* prefix, struct progress_context* contex
     current = context->files + context->directories + context->symlinks;
     progress = (current * 100) / total;
 
-    printf("\33[2K\r%s [%d%%] %i/%i files, %i/%i dirs",
-        prefix, progress,
-        context->files, context->files_total,
-        context->directories, context->directories_total
-    );
+    printf("\33[2K\r%-20.20s [%d%%]", prefix, progress);
+    if (context->files_total) {
+        printf(" %i/%i files", context->files, context->files_total);
+    }
+    if (context->directories_total) {
+        printf(" %i/%i dirs", context->directories, context->directories_total);
+    }
+    if (context->symlinks_total) {
+        printf(" %i/%i symlinks", context->symlinks, context->symlinks_total);
+    }
     fflush(stdout);
 }
 
