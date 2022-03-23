@@ -333,14 +333,11 @@ int vafs_streamdevice_write(
         if (*bytesWritten != length) {
             return -1;
         }
-    }
-    else if (device->Type == STREAMDEVICE_MEMORY) {
+    } else if (device->Type == STREAMDEVICE_MEMORY) {
         // if the stream is a memory stream, then ensure enough space in buffer
-        if (device->Type == STREAMDEVICE_MEMORY) {
-            while (length > __memsize_available(device)) {
-                if (__grow_buffer(device, length - __memsize_available(device))) {
-                    return -1;
-                }
+        while (length > __memsize_available(device)) {
+            if (__grow_buffer(device, length - __memsize_available(device))) {
+                return -1;
             }
         }
 

@@ -63,7 +63,6 @@ struct VaFsStream {
     VaFsFilterDecodeFunc          Decode;
     struct VaFsBlockCache*        BlockCache;
     struct VaFsStreamBlockHeaders BlockHeaders;
-    int                           FlushOnClose;
 
     // The block buffer is used for staging data before
     // we flush it to the data stream. The staging buffer
@@ -134,7 +133,6 @@ int vafs_stream_create(
     // initialize the stream header to initial values
     stream->Header.Magic     = STREAM_MAGIC;
     stream->Header.BlockSize = blockSize;
-    stream->FlushOnClose     = 1;
 
     // write the initial stream header
     status = vafs_streamdevice_write(device, &stream->Header, sizeof(struct VaFsStreamHeader), &written);
@@ -197,6 +195,10 @@ static int __verify_header(
         return -1;
     }
 
+    VAFS_DEBUG("__verify_header: block size: %u\n", header->BlockSize);
+    VAFS_DEBUG("__verify_header: block headers offset: %u\n", header->BlockHeadersOffset);
+    VAFS_DEBUG("__verify_header: block headers count: %u\n", header->BlockHeadersCount);
+
     return 0;
 }
 
@@ -218,6 +220,7 @@ static int __load_block_headers(
     }
 
     // seek to block headers
+    VAFS_DEBUG("__load_block_headers: seeking to block headers %lu\n", __get_block_headers_offset(stream));
     vafs_streamdevice_seek(stream->Device, __get_block_headers_offset(stream), SEEK_SET);
 
     // read the block headers
@@ -227,7 +230,7 @@ static int __load_block_headers(
         &read
     );
     if (status != 0) {
-        VAFS_ERROR("__load_block_headers: failed to read block headers\n");
+        VAFS_ERROR("__load_block_headers: failed to read block headers: %i\n", status);
         return status;
     }
     return 0;
@@ -356,6 +359,7 @@ static int __load_blockbuffer(
     size_t              read;
     uint32_t            crc;
     int                 status;
+    long                position;
     VAFS_DEBUG("__load_blockbuffer(block=%u)\n", blockIndex);
 
     // Always check the block cache first
@@ -373,10 +377,20 @@ static int __load_blockbuffer(
         return -1;
     }
 
+    VAFS_DEBUG("__load_blockbuffer: block offset: %u\n", blockHeader->Offset);
+    VAFS_DEBUG("__load_blockbuffer: block size: %u\n", blockHeader->LengthOnDisk);
+
     blockSize   = blockHeader->LengthOnDisk;
     blockData   = malloc(blockSize);
     if (!blockData) {
         errno = ENOMEM;
+        return -1;
+    }
+
+    position = vafs_streamdevice_seek(stream->Device, stream->DeviceOffset + blockHeader->Offset, SEEK_SET);
+    if (position == -1) {
+        VAFS_ERROR("__load_blockbuffer: failed to seek to block: %i\n", blockIndex);
+        free(blockData);
         return -1;
     }
 
@@ -392,6 +406,7 @@ static int __load_blockbuffer(
         VAFS_DEBUG("__load_blockbuffer decoding buffer of size %zu\n", blockSize);
         status = stream->Decode(blockData, blockSize, stream->BlockBuffer, &blockBufferSize);
         if (status) {
+            VAFS_ERROR("__load_blockbuffer: failed to decode block, %i\n", errno);
             free(blockData);
             return status;
         }
@@ -429,7 +444,6 @@ int vafs_stream_seek(
 {
     struct BlockHeader* blockHeader;
     int                 status;
-    size_t              read;
     vafsblock_t         targetBlock  = blockIndex;
     uint32_t            targetOffset = blockOffset;
     vafsblock_t         i            = blockIndex;
@@ -449,12 +463,6 @@ int vafs_stream_seek(
             return -1;
         }
 
-        status = vafs_streamdevice_seek(stream->Device, blockHeader->Offset, SEEK_SET);
-        if (status < 0) {
-            VAFS_ERROR("vafs_stream_seek: seek failed in stream device: %i\n", status);
-            return status;
-        }
-        
         // have we reached the target block, and does it contain our index?
         if (i == targetBlock) {
             // is the offset inside the current block?
@@ -491,6 +499,7 @@ static int __add_block_header(
 
     VAFS_DEBUG("__add_block_header: adding block mapping %u => %lu\n",
         stream->BlockBufferIndex, offset);
+    VAFS_DEBUG("__add_block_header: block length %u\n", blockLength);
 
     // perform the CRC on the uncompressed data
     crc = __get_blockbuffer_crc(stream, stream->BlockBufferOffset);
@@ -649,25 +658,6 @@ int vafs_stream_read(
     return 0;
 }
 
-int vafs_stream_flush(
-    struct VaFsStream* stream)
-{
-    int status;
-
-    VAFS_DEBUG("vafs_stream_flush()\n");
-    if (!stream) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    status = __flush_block(stream);
-    if (status) {
-        VAFS_ERROR("vafs_stream_flush: failed to flush block\n");
-        return status;
-    }
-    return 0;
-}
-
 static int __write_block_headers(
     struct VaFsStream* stream)
 {
@@ -689,6 +679,10 @@ static int __write_block_headers(
         return status;
     }
 
+    VAFS_DEBUG("__write_index_mapping: written %u bytes\n", written);
+    VAFS_DEBUG("__write_index_mapping: BlockHeadersOffset %ld\n", offset - stream->DeviceOffset);
+    VAFS_DEBUG("__write_index_mapping: BlockHeadersCount %i\n", stream->BlockHeaders.Count);
+
     // update the header
     stream->Header.BlockHeadersOffset = offset - stream->DeviceOffset;
     stream->Header.BlockHeadersCount  = stream->BlockHeaders.Count;
@@ -700,11 +694,16 @@ static int __update_stream_header(
 {
     size_t written;
     int    status;
+    long   original;
     long   position;
     VAFS_DEBUG("__update_stream_header()\n");
 
-    position = vafs_streamdevice_seek(stream->Device, 0, SEEK_CUR);
-    vafs_streamdevice_seek(stream->Device, stream->DeviceOffset, SEEK_SET);
+    original = vafs_streamdevice_seek(stream->Device, 0, SEEK_CUR);
+    position = (int)vafs_streamdevice_seek(stream->Device, stream->DeviceOffset, SEEK_SET);
+    if (position == -1) {
+        VAFS_ERROR("__update_stream_header: failed to seek to stream header\n");
+        return status;
+    }
 
     status = vafs_streamdevice_write(
         stream->Device,
@@ -717,7 +716,40 @@ static int __update_stream_header(
         return status;
     }
 
-    vafs_streamdevice_seek(stream->Device, position, SEEK_SET);
+    VAFS_DEBUG("__update_stream_header: written %u bytes at %lu\n", written, position);
+
+    vafs_streamdevice_seek(stream->Device, original, SEEK_SET);
+    return 0;
+}
+
+int vafs_stream_finish(
+    struct VaFsStream* stream)
+{
+    int status;
+
+    VAFS_DEBUG("vafs_stream_finish()\n");
+    if (!stream) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    status = __flush_block(stream);
+    if (status) {
+        VAFS_ERROR("vafs_stream_finish: failed to flush block\n");
+        return status;
+    }
+
+    status = __write_block_headers(stream);
+    if (status) {
+        VAFS_ERROR("vafs_stream_close: failed to write block headers\n");
+        return status;
+    }
+
+    status = __update_stream_header(stream);
+    if (status) {
+        VAFS_ERROR("vafs_stream_close: failed to update stream header\n");
+        return status;
+    }
     return 0;
 }
 
@@ -732,22 +764,8 @@ int vafs_stream_close(
         return -1;
     }
 
-    if (stream->FlushOnClose) {
-        status = __write_block_headers(stream);
-        if (status) {
-            VAFS_ERROR("vafs_stream_close: failed to write block headers\n");
-            return status;
-        }
-        free(stream->BlockHeaders.Headers);
-
-        status = __update_stream_header(stream);
-        if (status) {
-            VAFS_ERROR("vafs_stream_close: failed to update stream header\n");
-            return status;
-        }
-    }
-
     vafs_cache_destroy(stream->BlockCache);
+    free(stream->BlockHeaders.Headers);
     free(stream->BlockBuffer);
     free(stream);
     return 0;

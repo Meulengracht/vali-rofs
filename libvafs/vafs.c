@@ -566,13 +566,13 @@ static int __create_image(
 
     // flush streams
     VAFS_DEBUG("__create_image: flushing streams\n");
-    status = vafs_stream_flush(vafs->DescriptorStream);
+    status = vafs_stream_finish(vafs->DescriptorStream);
     if (status) {
         VAFS_ERROR("Failed to flush descriptor stream: %i\n", status);
         return -1;
     }
     
-    status = vafs_stream_flush(vafs->DataStream);
+    status = vafs_stream_finish(vafs->DataStream);
     if (status) {
         VAFS_ERROR("Failed to flush data stream: %i\n", status);
         return -1;

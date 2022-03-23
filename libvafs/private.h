@@ -304,7 +304,7 @@ extern int vafs_stream_read(
  * @param stream 
  * @return int 
  */
-extern int vafs_stream_flush(
+extern int vafs_stream_finish(
     struct VaFsStream* stream);
 
 /**
