@@ -55,12 +55,12 @@ typedef uint16_t vafsblock_t;
 #define VAFS_INFO(...)   vafs_log_message(VaFsLogLevel_Info, "libvafs: " __VA_ARGS__)
 #define VAFS_DEBUG(...)  vafs_log_message(VaFsLogLevel_Debug, "libvafs: " __VA_ARGS__)
 
-VAFS_STRUCT(VaFsBlockPosition, {
+VAFS_ONDISK_STRUCT(VaFsBlockPosition, {
     vafsblock_t Index;
     uint32_t    Offset;
 });
 
-VAFS_STRUCT(VaFsHeader, {
+VAFS_ONDISK_STRUCT(VaFsHeader, {
     uint32_t            Magic;
     uint32_t            Version;
     uint32_t            Architecture;
@@ -76,27 +76,27 @@ VAFS_STRUCT(VaFsHeader, {
 #define VA_FS_DESCRIPTOR_TYPE_DIRECTORY 0x02
 #define VA_FS_DESCRIPTOR_TYPE_SYMLINK   0x03
 
-VAFS_STRUCT(VaFsDescriptor, {
+VAFS_ONDISK_STRUCT(VaFsDescriptor, {
     uint16_t Type;
     uint16_t Length; // Length of the descriptor
 });
 
-VAFS_STRUCT(VaFsFileDescriptor, {
+VAFS_ONDISK_STRUCT(VaFsFileDescriptor, {
     VaFsDescriptor_t    Base;
     VaFsBlockPosition_t Data;
     uint32_t            FileLength;
 });
 
-VAFS_STRUCT(VaFsDirectoryDescriptor, {
+VAFS_ONDISK_STRUCT(VaFsDirectoryDescriptor, {
     VaFsDescriptor_t    Base;
     VaFsBlockPosition_t Descriptor;
 });
 
-VAFS_STRUCT(VaFsDirectoryHeader, {
+VAFS_ONDISK_STRUCT(VaFsDirectoryHeader, {
     int Count;
 });
 
-VAFS_STRUCT(VaFsSymlinkDescriptor, {
+VAFS_ONDISK_STRUCT(VaFsSymlinkDescriptor, {
     VaFsDescriptor_t    Base;
     uint32_t            NameLength;
     uint32_t            TargetLength;
