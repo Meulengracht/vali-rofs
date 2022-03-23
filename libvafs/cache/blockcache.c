@@ -66,7 +66,7 @@ struct VaFsBlockCache* __block_cache_new()
         return NULL;
     }
     
-    status = hashtable_construct(
+    status = vafs_hashtable_construct(
         cache->cache, 0, sizeof(struct vafs_block), 
         __cache_hash, __cache_cmp
     );
@@ -103,8 +103,8 @@ void vafs_cache_destroy(struct VaFsBlockCache* cache)
         return;
     }
     
-    hashtable_enumerate(cache->cache, __cache_enum_free, NULL);
-    hashtable_destroy(cache->cache);
+    vafs_hashtable_enumerate(cache->cache, __cache_enum_free, NULL);
+    vafs_hashtable_destroy(cache->cache);
     free(cache);
 }
 
@@ -117,7 +117,7 @@ int vafs_cache_get(struct VaFsBlockCache* cache, uint32_t index, void** bufferOu
         return -1;
     }
 
-    block = hashtable_get(cache->cache, &(struct vafs_block){ .index = index });
+    block = vafs_hashtable_get(cache->cache, &(struct vafs_block){ .index = index });
     if (!block) {
         errno = ENOENT;
         return -1;
@@ -138,12 +138,12 @@ static void __eject_lowuse(struct VaFsBlockCache* cache)
         return;
     }
 
-    hashtable_enumerate(cache->cache, __cache_enum, &context);
+    vafs_hashtable_enumerate(cache->cache, __cache_enum, &context);
     if (context.index == UINT_MAX) {
         return; // what?
     }
     
-    block = hashtable_remove(cache->cache, &(struct vafs_block){ .index = context.index });
+    block = vafs_hashtable_remove(cache->cache, &(struct vafs_block){ .index = context.index });
     if (!block) {
         return;
     }
@@ -174,13 +174,13 @@ int vafs_cache_set(struct VaFsBlockCache* cache, uint32_t index, void* buffer, s
         return -1;
     }
 
-    block = hashtable_get(cache->cache, &(struct vafs_block){ .index = index });
+    block = vafs_hashtable_get(cache->cache, &(struct vafs_block){ .index = index });
     if (!block) {
         // detect cases where we would like to eject an existing low-use
         // block
         __eject_lowuse(cache);
 
-        hashtable_set(cache->cache, &(struct vafs_block){ 
+        vafs_hashtable_set(cache->cache, &(struct vafs_block){ 
             .index  = index,
             .buffer = __memdup(buffer, size),
             .size   = size,
