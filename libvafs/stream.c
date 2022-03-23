@@ -34,13 +34,13 @@
 
 #define STREAM_CACHE_SIZE  32
 
-struct BlockHeader {
+VAFS_ONDISK_STRUCT(BlockHeader, {
     uint32_t LengthOnDisk;
     uint32_t Offset;
     uint32_t Crc;
     uint16_t Flags;
     uint16_t Reserved;
-};
+});
 
 struct VaFsStreamBlockHeaders {
     int                 Count;
@@ -48,12 +48,12 @@ struct VaFsStreamBlockHeaders {
     struct BlockHeader* Headers;
 };
 
-struct VaFsStreamHeader {
+VAFS_ONDISK_STRUCT(VaFsStreamHeader, {
     uint32_t Magic;
     uint32_t BlockSize;
     uint32_t BlockHeadersOffset;
     uint32_t BlockHeadersCount;
-};
+});
 
 struct VaFsStream {
     struct VaFsStreamHeader       Header;
@@ -67,9 +67,9 @@ struct VaFsStream {
     // The block buffer is used for staging data before
     // we flush it to the data stream. The staging buffer
     // is always the size of the block size.
-    void*  BlockBuffer;
-    size_t BlockBufferIndex;
-    size_t BlockBufferOffset;
+    void*       BlockBuffer;
+    vafsblock_t BlockBufferIndex;
+    size_t      BlockBufferOffset;
 };
 
 static int __new_stream(
@@ -319,7 +319,7 @@ int vafs_stream_position(
         return -1;
     }
 
-    *blockOut  = (vafsblock_t)stream->BlockBufferIndex;
+    *blockOut  = stream->BlockBufferIndex;
     *offsetOut = (uint32_t)stream->BlockBufferOffset;
     return 0;
 }
