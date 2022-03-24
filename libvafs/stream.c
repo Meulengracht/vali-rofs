@@ -638,6 +638,8 @@ int vafs_stream_read(
         bytesLeftInBlock = stream->Header.BlockSize - stream->BlockBufferOffset;
         byteCount = MIN(bytesToRead, bytesLeftInBlock);
 
+        VAFS_DEBUG("vafs_stream_read: reading %u bytes from block %u, offset %u\n",
+            byteCount, stream->BlockBufferIndex, stream->BlockBufferOffset);
         memcpy(data, stream->BlockBuffer + stream->BlockBufferOffset, byteCount);
         
         stream->BlockBufferOffset += byteCount;
@@ -645,7 +647,8 @@ int vafs_stream_read(
         bytesToRead               -= byteCount;
 
         if (stream->BlockBufferOffset == stream->Header.BlockSize) {
-            if (__load_blockbuffer(stream, stream->BlockBufferIndex)) {
+            VAFS_DEBUG("vafs_stream_read: loading block %u\n", stream->BlockBufferIndex);
+            if (__load_blockbuffer(stream, stream->BlockBufferIndex + 1)) {
                 VAFS_ERROR("vafs_stream_read: failed to load block\n");
                 return -1;
             }

@@ -379,22 +379,17 @@ int main(int argc, char *argv[])
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--arch") && (i + 1) < argc) {
             arch = argv[++i];
-        }
-        else if (!strcmp(argv[i], "--compression") && (i + 1) < argc) {
+        } else if (!strcmp(argv[i], "--compression") && (i + 1) < argc) {
             compressionName = argv[++i];
-        }
-        else if (!strcmp(argv[i], "--out") && (i + 1) < argc) {
+        } else if (!strcmp(argv[i], "--out") && (i + 1) < argc) {
             imagePath = argv[++i];
-        }
-        else if (!strcmp(argv[i], "--v")) {
+        } else if (!strcmp(argv[i], "--v")) {
             vafs_log_initalize(VaFsLogLevel_Info);
             progressContext.disabled = 1;
-        }
-        else if (!strcmp(argv[i], "--vv")) {
+        } else if (!strcmp(argv[i], "--vv")) {
             vafs_log_initalize(VaFsLogLevel_Debug);
             progressContext.disabled = 1;
-        }
-        else {
+        } else {
             paths[pathCount++] = argv[i];
         }
     }
