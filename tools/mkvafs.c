@@ -251,22 +251,24 @@ static int __write_file(
     }
 
     fseek(file, 0, SEEK_END);
-    fileSize   = ftell(file);
-    fileBuffer = malloc(fileSize);
-    if (fileBuffer == NULL) {
-        fprintf(stderr, "mkvafs: failed to allocate memory for file '%s'\n", filename);
-        fclose(file);
-        return -1;
-    }
+    fileSize = ftell(file);
+    if (fileSize) {
+        fileBuffer = malloc(fileSize);
+        if (fileBuffer == NULL) {
+            fprintf(stderr, "mkvafs: failed to allocate memory for file '%s'\n", filename);
+            fclose(file);
+            return -1;
+        }
 
-    rewind(file);
-    fread(fileBuffer, 1, fileSize, file);
+        rewind(file);
+        fread(fileBuffer, 1, fileSize, file);
+
+        // write the file to the VaFS file
+        status = vafs_file_write(fileHandle, fileBuffer, fileSize);
+        free(fileBuffer);
+    }
     fclose(file);
 
-    // write the file to the VaFS file
-    status = vafs_file_write(fileHandle, fileBuffer, fileSize);
-    free(fileBuffer);
-    
     if (status) {
         fprintf(stderr, "mkvafs: failed to write file '%s'\n", filename);
         return -1;
