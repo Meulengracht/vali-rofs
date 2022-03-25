@@ -84,12 +84,20 @@ static int __directory_exists(
 
 int __symlink(const char* path, const char* target)
 {
+    int status;
+
 	if (path == NULL || target == NULL) {
 		errno = EINVAL;
 		return -1;
 	}
 
-	if (symlink(path, target) == -1) {
+    status = symlink(target, path);
+	if (status) {
+        // ignore it if it exists, in theory we would like to 'update it' if 
+        // exists, but for now just ignore
+        if (errno == EEXIST) {
+            return 0;
+        }
 		return -1;
 	}
 	return 0;

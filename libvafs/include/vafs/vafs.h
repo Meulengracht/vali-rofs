@@ -70,13 +70,13 @@ struct VaFsFeatureHeader {
 
 struct VaFsFeatureOverview {
     struct VaFsFeatureHeader Header;
-    size_t                   TotalSizeUncompressed;
+    uint64_t                 TotalSizeUncompressed;
     
     // Individual entry counts
     struct {
-        size_t Files;
-        size_t Directories;
-        size_t Symlinks;
+        uint32_t Files;
+        uint32_t Directories;
+        uint32_t Symlinks;
     } Counts;
 };
 
