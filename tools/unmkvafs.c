@@ -27,11 +27,62 @@
 #include <vafs/vafs.h>
 
 #if defined(_WIN32) || defined(_WIN64)
-#include <dirent_win32.h>
+#include "dirent_win32.h"
+#include <direct.h>
+#include <WinBase.h>
+
+#define __mkdir _mkdir
+
+int __symlink(const char* path, const char* target)
+{
+    int status;
+
+    if (path == NULL || target == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    // SYMBOLIC_LINK_FLAG_DIRECTORY ??
+    status = CreateSymbolicLinkA(target, path, 0);
+    if (status == FALSE) {
+        // ignore it if it exists, in theory we would like to 'update it' if 
+        // exists, but for now just ignore
+        if (GetLastError() == ERROR_ALREADY_EXISTS) {
+            return 0;
+        }
+        return -1;
+    }
+    return 0;
+}
+
 #else
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#define __mkdir(path) mkdir(path, 0777)
+
+int __symlink(const char* path, const char* target)
+{
+    int status;
+
+    if (path == NULL || target == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    status = symlink(target, path);
+    if (status) {
+        // ignore it if it exists, in theory we would like to 'update it' if 
+        // exists, but for now just ignore
+        if (errno == EEXIST) {
+            return 0;
+        }
+        return -1;
+    }
+    return 0;
+}
+
 #endif
 
 struct progress_context {
@@ -82,35 +133,13 @@ static int __directory_exists(
     return S_ISDIR(st.st_mode);
 }
 
-int __symlink(const char* path, const char* target)
-{
-    int status;
-
-	if (path == NULL || target == NULL) {
-		errno = EINVAL;
-		return -1;
-	}
-
-    status = symlink(target, path);
-	if (status) {
-        // ignore it if it exists, in theory we would like to 'update it' if 
-        // exists, but for now just ignore
-        if (errno == EEXIST) {
-            return 0;
-        }
-		return -1;
-	}
-	return 0;
-}
-
 static int __extract_file(
     struct VaFsFileHandle* fileHandle,
     const char*            path)
 {
-    FILE* file;
-    long  fileSize;
-    void* fileBuffer;
-    int   status;
+    FILE*  file;
+    size_t fileSize;
+    void*  fileBuffer;
 
     if ((file = fopen(path, "wb+")) == NULL) {
         fprintf(stderr, "unmkvafs: unable to open file %s\n", path);
@@ -179,7 +208,7 @@ static int __extract_directory(
             return status;
         }
 
-        if (!status && mkdir(path, 0777)) {
+        if (!status && __mkdir(path)) {
             fprintf(stderr, "unmkvafs: unable to create directory %s\n", path);
             return -1;
         }
@@ -197,6 +226,11 @@ static int __extract_directory(
         }
 
         filepathBuffer = malloc(strlen(path) + strlen(dp.Name) + 2);
+        if (filepathBuffer == NULL) {
+            errno = ENOMEM;
+            return -1;
+        }
+
         sprintf(filepathBuffer, "%s/%s", path, dp.Name);
 
         __write_progress(dp.Name, progress);

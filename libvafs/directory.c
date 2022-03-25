@@ -311,7 +311,6 @@ static int __load_directory(
 {
     VaFsDirectoryHeader_t header;
     int                   status;
-    int                   i;
 
     VAFS_DEBUG("__load_directory(directory=%s)\n", reader->Base.Name);
 
@@ -353,8 +352,8 @@ static int __load_directory(
     }
 
     // read the directory entries
-    VAFS_INFO("__load_directory: reading %i entries\n", header.Count);
-    for (i = 0; i < header.Count; i++) {
+    VAFS_INFO("__load_directory: reading %u entries\n", header.Count);
+    for (uint32_t i = 0; i < header.Count; i++) {
         struct VaFsDirectoryEntry* entry;
         char                       buffer[64];
         char*                      extendedData = NULL;
@@ -610,7 +609,7 @@ static int __write_file_descriptor(
 
     // increase descriptor length by name, do not account
     // for the null terminator
-    entry->File->Descriptor.Base.Length += strlen(entry->File->Name);
+    entry->File->Descriptor.Base.Length += (uint16_t)strlen(entry->File->Name);
 
     status = vafs_stream_write(
         writer->Base.VaFs->DescriptorStream,
@@ -639,7 +638,7 @@ static int __write_directory_descriptor(
     
     // increase descriptor length by name, do not account
     // for the null terminator
-    entry->Directory->Descriptor.Base.Length += strlen(entry->Directory->Name);
+    entry->Directory->Descriptor.Base.Length += (uint16_t)strlen(entry->Directory->Name);
 
     status = vafs_stream_write(
         writer->Base.VaFs->DescriptorStream,
@@ -666,8 +665,8 @@ static int __write_symlink_descriptor(
     VAFS_DEBUG("__write_symlink_descriptor(name=%s)\n",
         entry->Symlink->Name);
 
-    entry->Symlink->Descriptor.NameLength = strlen(entry->Symlink->Name);
-    entry->Symlink->Descriptor.TargetLength = strlen(entry->Symlink->Target);
+    entry->Symlink->Descriptor.NameLength   = (uint16_t)strlen(entry->Symlink->Name);
+    entry->Symlink->Descriptor.TargetLength = (uint16_t)strlen(entry->Symlink->Target);
 
     // increase descriptor length by names, do not account
     // for the null terminator

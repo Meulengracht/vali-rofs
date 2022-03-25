@@ -27,7 +27,369 @@
 #include <vafs/vafs.h>
 
 #if defined(_WIN32) || defined(_WIN64)
-#include <dirent_win32.h>
+#include <assert.h>
+#include "dirent_win32.h"
+#include "ntifs_win32.h"
+#include <sys/stat.h>
+
+// Ntdll function pointers
+sRtlNtStatusToDosError pRtlNtStatusToDosError;
+sNtQueryInformationFile pNtQueryInformationFile;
+sNtQueryVolumeInformationFile pNtQueryVolumeInformationFile;
+
+int __win32_init() {
+    HMODULE ntModule;
+
+    ntModule = GetModuleHandleA("ntdll.dll");
+    if (ntModule == NULL) {
+        return -1;
+    }
+
+    pRtlNtStatusToDosError = (sRtlNtStatusToDosError)GetProcAddress(
+        ntModule,
+        "RtlNtStatusToDosError");
+    if (pRtlNtStatusToDosError == NULL) {
+        return -1;
+    }
+
+    pNtQueryInformationFile = (sNtQueryInformationFile)GetProcAddress(
+        ntModule,
+        "NtQueryInformationFile");
+    if (pNtQueryInformationFile == NULL) {
+        return -1;
+    }
+
+    pNtQueryVolumeInformationFile = (sNtQueryVolumeInformationFile)
+        GetProcAddress(ntModule, "NtQueryVolumeInformationFile");
+    if (pNtQueryVolumeInformationFile == NULL) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int __readlink_handle(HANDLE handle, char** symlinkBufferOut, uint64_t* symlinkLengthOut)
+{
+    char buffer[MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
+    REPARSE_DATA_BUFFER* reparse_data = (REPARSE_DATA_BUFFER*)buffer;
+    WCHAR* w_target;
+    DWORD w_target_len;
+    char* target;
+    int target_len;
+    DWORD bytes;
+
+    if (!DeviceIoControl(handle,
+        FSCTL_GET_REPARSE_POINT,
+        NULL,
+        0,
+        buffer,
+        sizeof buffer,
+        &bytes,
+        NULL)) {
+        return -1;
+    }
+
+    if (reparse_data->ReparseTag == IO_REPARSE_TAG_SYMLINK) {
+        w_target = reparse_data->SymbolicLinkReparseBuffer.PathBuffer +
+            (reparse_data->SymbolicLinkReparseBuffer.SubstituteNameOffset /
+                sizeof(WCHAR));
+        w_target_len =
+            reparse_data->SymbolicLinkReparseBuffer.SubstituteNameLength /
+            sizeof(WCHAR);
+
+        /* Real symlinks can contain pretty much everything, but the only thing */
+        /* we really care about is undoing the implicit conversion to an NT */
+        /* namespaced path that CreateSymbolicLink will perform on absolute */
+        /* paths. If the path is win32-namespaced then the user must have */
+        /* explicitly made it so, and we better just return the unmodified */
+        /* reparse data. */
+        if (w_target_len >= 4 &&
+            w_target[0] == L'\\' &&
+            w_target[1] == L'?' &&
+            w_target[2] == L'?' &&
+            w_target[3] == L'\\') {
+            /* Starts with \??\ */
+            if (w_target_len >= 6 &&
+                ((w_target[4] >= L'A' && w_target[4] <= L'Z') ||
+                    (w_target[4] >= L'a' && w_target[4] <= L'z')) &&
+                w_target[5] == L':' &&
+                (w_target_len == 6 || w_target[6] == L'\\')) {
+                /* \??\«drive»:\ */
+                w_target += 4;
+                w_target_len -= 4;
+
+            }
+            else if (w_target_len >= 8 &&
+                (w_target[4] == L'U' || w_target[4] == L'u') &&
+                (w_target[5] == L'N' || w_target[5] == L'n') &&
+                (w_target[6] == L'C' || w_target[6] == L'c') &&
+                w_target[7] == L'\\') {
+                /* \??\UNC\«server»\«share»\ - make sure the final path looks like */
+                /* \\«server»\«share»\ */
+                w_target += 6;
+                w_target[0] = L'\\';
+                w_target_len -= 6;
+            }
+        }
+    }
+    else {
+        SetLastError(ERROR_SYMLINK_NOT_SUPPORTED);
+        return -1;
+    }
+
+    /* If needed, compute the length of the target. */
+    if (symlinkBufferOut != NULL || symlinkLengthOut != NULL) {
+        /* Compute the length of the target. */
+        target_len = WideCharToMultiByte(CP_UTF8,
+            0,
+            w_target,
+            w_target_len,
+            NULL,
+            0,
+            NULL,
+            NULL);
+        if (target_len == 0) {
+            return -1;
+        }
+    }
+
+    /* If requested, allocate memory and convert to UTF8. */
+    if (symlinkBufferOut != NULL) {
+        int r;
+        target = (char*)malloc(target_len + 1);
+        if (target == NULL) {
+            SetLastError(ERROR_OUTOFMEMORY);
+            return -1;
+        }
+
+        r = WideCharToMultiByte(CP_UTF8,
+            0,
+            w_target,
+            w_target_len,
+            target,
+            target_len,
+            NULL,
+            NULL);
+        assert(r == target_len);
+        target[target_len] = '\0';
+
+        *symlinkBufferOut = target;
+    }
+
+    if (symlinkLengthOut != NULL) {
+        *symlinkLengthOut = target_len;
+    }
+
+    return 0;
+}
+
+static int __stat_handle(HANDLE handle, struct stat* statbuf) {
+    FILE_ALL_INFORMATION file_info;
+    FILE_FS_VOLUME_INFORMATION volume_info;
+    NTSTATUS nt_status;
+    IO_STATUS_BLOCK io_status;
+
+    nt_status = pNtQueryInformationFile(handle,
+        &io_status,
+        &file_info,
+        sizeof file_info,
+        FileAllInformation);
+
+    /* Buffer overflow (a warning status code) is expected here. */
+    if (NT_ERROR(nt_status)) {
+        SetLastError(pRtlNtStatusToDosError(nt_status));
+        return -1;
+    }
+
+    nt_status = pNtQueryVolumeInformationFile(handle,
+        &io_status,
+        &volume_info,
+        sizeof volume_info,
+        FileFsVolumeInformation);
+
+    /* Buffer overflow (a warning status code) is expected here. */
+    if (io_status.Status == STATUS_NOT_IMPLEMENTED) {
+        statbuf->st_dev = 0;
+    }
+    else if (NT_ERROR(nt_status)) {
+        SetLastError(pRtlNtStatusToDosError(nt_status));
+        return -1;
+    }
+    else {
+        statbuf->st_dev = volume_info.VolumeSerialNumber;
+    }
+
+    /* Todo: st_mode should probably always be 0666 for everyone. We might also
+     * want to report 0777 if the file is a .exe or a directory.
+     *
+     * Currently it's based on whether the 'readonly' attribute is set, which
+     * makes little sense because the semantics are so different: the 'read-only'
+     * flag is just a way for a user to protect against accidental deleteion, and
+     * serves no security purpose. Windows uses ACLs for that.
+     *
+     * Also people now use uv_fs_chmod() to take away the writable bit for good
+     * reasons. Windows however just makes the file read-only, which makes it
+     * impossible to delete the file afterwards, since read-only files can't be
+     * deleted.
+     *
+     * IOW it's all just a clusterfuck and we should think of something that
+     * makes slighty more sense.
+     *
+     * And uv_fs_chmod should probably just fail on windows or be a total no-op.
+     * There's nothing sensible it can do anyway.
+     */
+    statbuf->st_mode = 0;
+
+    if (file_info.BasicInformation.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+        statbuf->st_mode |= S_IFLNK;
+        if (__readlink_handle(handle, NULL, &statbuf->st_size) != 0)
+            return -1;
+    }
+    else if (file_info.BasicInformation.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        statbuf->st_mode |= _S_IFDIR;
+        statbuf->st_size = 0;
+    }
+    else {
+        statbuf->st_mode |= _S_IFREG;
+        statbuf->st_size = file_info.StandardInformation.EndOfFile.QuadPart;
+    }
+
+    if (file_info.BasicInformation.FileAttributes & FILE_ATTRIBUTE_READONLY)
+        statbuf->st_mode |= _S_IREAD | (_S_IREAD >> 3) | (_S_IREAD >> 6);
+    else
+        statbuf->st_mode |= (_S_IREAD | _S_IWRITE) | ((_S_IREAD | _S_IWRITE) >> 3) |
+        ((_S_IREAD | _S_IWRITE) >> 6);
+
+    statbuf->st_ino = file_info.InternalInformation.IndexNumber.QuadPart;
+
+    statbuf->st_nlink = file_info.StandardInformation.NumberOfLinks;
+
+    /* Windows has nothing sensible to say about these values, so they'll just
+     * remain empty.
+     */
+    statbuf->st_gid = 0;
+    statbuf->st_uid = 0;
+    statbuf->st_rdev = 0;
+
+    return 0;
+}
+
+static int __stat(const char* path, struct stat* statbuf, int do_lstat) {
+    HANDLE handle;
+    DWORD flags;
+
+    flags = FILE_FLAG_BACKUP_SEMANTICS;
+    if (do_lstat) {
+        flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+    }
+
+    handle = CreateFileA(path,
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL,
+        OPEN_EXISTING,
+        flags,
+        NULL);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return -1;
+    }
+
+    if (__stat_handle(handle, statbuf) != 0) {
+        DWORD error = GetLastError();
+        if (do_lstat && error == ERROR_SYMLINK_NOT_SUPPORTED) {
+            /* We opened a reparse point but it was not a symlink. Try again. */
+            return __stat(path, statbuf, 0);
+        }
+
+        CloseHandle(handle);
+        return -1;
+    }
+    CloseHandle(handle);
+    return 0;
+}
+
+static int __readlink(const char* path, char* linkBuffer, size_t maxLength)
+{
+    HANDLE   handle;
+    uint64_t targetLength = maxLength;
+
+    handle = CreateFileA(path,
+        0,
+        0,
+        NULL,
+        OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+        NULL);
+
+    if (handle == INVALID_HANDLE_VALUE) {
+        return -1;
+    }
+
+    if (__readlink_handle(handle, &linkBuffer, &targetLength) != 0) {
+        CloseHandle(handle);
+        return -1;
+    }
+    CloseHandle(handle);
+    return 0;
+}
+
+int __read_symlink(const char* path, char** bufferOut)
+{
+    char* buffer;
+
+    if (path == NULL || bufferOut == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    buffer = (char*)malloc(1024);
+    if (buffer == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    if (__readlink(path, buffer, 1024) == -1) {
+        free(buffer);
+        return -1;
+    }
+
+    *bufferOut = buffer;
+    return 0;
+}
+
+int __is_file(
+    const char* path)
+{
+    struct stat st;
+    if (__stat(path, &st, 0) != 0) {
+        fprintf(stderr, "mkvafs: stat failed for '%s'\n", path);
+        return 0;
+    }
+    return S_ISREG(st.st_mode);
+}
+
+int __is_symlink(
+    const char* path)
+{
+    struct stat st;
+    if (__stat(path, &st, 1) != 0) {
+        fprintf(stderr, "mkvafs: lstat failed for '%s'\n", path);
+        return 0;
+    }
+    return S_ISLNK(st.st_mode);
+}
+
+static int __is_directory(
+    const char* path)
+{
+    struct stat st;
+    if (__stat(path, &st, 0) != 0) {
+        fprintf(stderr, "mkvafs: stat failed for '%s'\n", path);
+        return 0;
+    }
+    return S_ISDIR(st.st_mode);
+}
+
 #else
 #include <dirent.h>
 #include <sys/stat.h>
@@ -264,15 +626,10 @@ static int __write_file(
         fread(fileBuffer, 1, fileSize, file);
 
         // write the file to the VaFS file
-        status = vafs_file_write(fileHandle, fileBuffer, fileSize);
+        vafs_file_write(fileHandle, fileBuffer, fileSize);
         free(fileBuffer);
     }
     fclose(file);
-
-    if (status) {
-        fprintf(stderr, "mkvafs: failed to write file '%s'\n", filename);
-        return -1;
-    }
 
     status = vafs_file_close(fileHandle);
     if (status) {
@@ -289,7 +646,7 @@ static int __write_directory(
 {
     struct dirent* dp;
     DIR*           dfd;
-    int            status;
+    int            status = 0;
     char*          filepathBuffer;
 
     if ((dfd = opendir(path)) == NULL) {
@@ -298,6 +655,12 @@ static int __write_directory(
     }
 
     filepathBuffer = malloc(1024);
+    if (filepathBuffer == NULL) {
+        closedir(dfd);
+        errno = ENOMEM;
+        return -1;
+    }
+
     while ((dp = readdir(dfd)) != NULL) {
         if (strcmp(dp->d_name, ".") == 0 || strcmp(dp->d_name, "..") == 0)
             continue;
@@ -330,7 +693,7 @@ static int __write_directory(
             }
             progress->directories++;
         } else if (__is_symlink(filepathBuffer)) {
-            char* linkpath;
+            char* linkpath = NULL;
             status = __read_symlink(filepathBuffer, &linkpath);
             if (status != 0) {
                 fprintf(stderr, "mkvafs: failed to read link %s\n", filepathBuffer);
@@ -401,6 +764,14 @@ int main(int argc, char *argv[])
         return -1;
     }
 
+#if defined(_WIN32) || defined(_WIN64)
+    status = __win32_init();
+    if (status) {
+        fprintf(stderr, "mkvafs: cannot load ntdll functions required on windows\n");
+        return -1;
+    }
+#endif
+
     vafs_config_initialize(&configuration);
     vafs_config_set_architecture(&configuration, __get_vafs_arch(arch));
     status = vafs_create(imagePath, &configuration, &vafsHandle);
@@ -455,7 +826,7 @@ int main(int argc, char *argv[])
             }
             progressContext.directories++;
         } else if (__is_symlink(paths[i])) {
-            char* linkpath;
+            char* linkpath = NULL;
             status = __read_symlink(paths[i], &linkpath);
             if (status != 0) {
                 fprintf(stderr, "mkvafs: failed to read link %s\n", paths[i]);
