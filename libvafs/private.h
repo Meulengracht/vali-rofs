@@ -30,7 +30,7 @@
 struct VaFsStream;
 struct VaFsStreamDevice;
 
-typedef uint16_t vafsblock_t;
+typedef uint32_t vafsblock_t;
 
 #define VA_FS_MAGIC       0x3144524D
 #define VA_FS_VERSION     0x00010000
@@ -93,7 +93,7 @@ VAFS_ONDISK_STRUCT(VaFsDirectoryDescriptor, {
 });
 
 VAFS_ONDISK_STRUCT(VaFsDirectoryHeader, {
-    int Count;
+    uint32_t Count;
 });
 
 VAFS_ONDISK_STRUCT(VaFsSymlinkDescriptor, {
