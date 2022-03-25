@@ -35,7 +35,7 @@ struct VaFsStreamDevice {
 
     union {
         struct {
-            void*  Buffer;
+            char*  Buffer;
             long   Capacity;
             long   Position;
             int    Owned;
@@ -274,9 +274,9 @@ int vafs_streamdevice_read(
         return 0;
     }
     else if (device->Type == STREAMDEVICE_MEMORY) {
-        size_t byteCount = MIN(length, device->Memory.Capacity - device->Memory.Position);
+        size_t byteCount = MIN(length, (size_t)(device->Memory.Capacity - device->Memory.Position));
         memcpy(buffer, device->Memory.Buffer + device->Memory.Position, byteCount);
-        device->Memory.Position += byteCount;
+        device->Memory.Position += (long)byteCount;
         *bytesRead = byteCount;
         return 0;
     }
@@ -292,7 +292,7 @@ static int __grow_buffer(
     void*  buffer;
     size_t newSize;
     
-    newSize = device->Memory.Capacity + length;
+    newSize = (size_t)device->Memory.Capacity + length;
     buffer = realloc(device->Memory.Buffer, newSize);
     if (!buffer) {
         errno = ENOMEM;
@@ -300,7 +300,7 @@ static int __grow_buffer(
     }
 
     device->Memory.Buffer   = buffer;
-    device->Memory.Capacity = newSize;
+    device->Memory.Capacity = (long)newSize;
     return 0;
 }
 
@@ -342,7 +342,7 @@ int vafs_streamdevice_write(
         }
 
         memcpy(device->Memory.Buffer + device->Memory.Position, buffer, length);
-        device->Memory.Position += length;
+        device->Memory.Position += (long)length;
         *bytesWritten = length;
     }
     return 0;

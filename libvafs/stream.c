@@ -43,8 +43,8 @@ VAFS_ONDISK_STRUCT(BlockHeader, {
 });
 
 struct VaFsStreamBlockHeaders {
-    int                 Count;
-    int                 Capacity; 
+    uint32_t            Count;
+    uint32_t            Capacity; 
     struct BlockHeader* Headers;
 };
 
@@ -67,9 +67,9 @@ struct VaFsStream {
     // The block buffer is used for staging data before
     // we flush it to the data stream. The staging buffer
     // is always the size of the block size.
-    void*       BlockBuffer;
+    char*       BlockBuffer;
     vafsblock_t BlockBufferIndex;
-    size_t      BlockBufferOffset;
+    uint32_t    BlockBufferOffset;
 };
 
 static int __new_stream(
@@ -78,7 +78,6 @@ static int __new_stream(
     struct VaFsStream**      streamOut)
 {
     struct VaFsStream* stream;
-    int                status;
 
     VAFS_DEBUG("__new_stream(offset=%lu)\n", deviceOffset);
     
@@ -268,7 +267,6 @@ int vafs_stream_open(
 {
     struct VaFsStream* stream;
     int                status;
-    size_t             read;
     VAFS_DEBUG("vafs_stream_open(offset=%lu)\n", deviceOffset);
 
     if (device == NULL || streamOut == NULL) {
@@ -334,7 +332,7 @@ int vafs_stream_position(
     }
 
     *blockOut  = stream->BlockBufferIndex;
-    *offsetOut = (uint32_t)stream->BlockBufferOffset;
+    *offsetOut = stream->BlockBufferOffset;
     return 0;
 }
 
@@ -404,7 +402,7 @@ static int __load_blockbuffer(
         uint32_t blockBufferSize = stream->Header.BlockSize;
 
         VAFS_DEBUG("__load_blockbuffer decoding buffer of size %zu\n", blockSize);
-        status = stream->Decode(blockData, blockSize, stream->BlockBuffer, &blockBufferSize);
+        status = stream->Decode(blockData, (uint32_t)blockSize, stream->BlockBuffer, &blockBufferSize);
         if (status) {
             VAFS_ERROR("__load_blockbuffer: failed to decode block, %i\n", errno);
             free(blockData);
@@ -506,7 +504,7 @@ static int __add_block_header(
 
     if (stream->BlockHeaders.Count == stream->BlockHeaders.Capacity) {
         struct BlockHeader* newHeaders;
-        size_t              newCapacity;
+        uint32_t            newCapacity;
 
         newCapacity = stream->BlockHeaders.Capacity * 2;
         if (newCapacity == 0) {
@@ -583,7 +581,6 @@ int vafs_stream_write(
     size_t             size)
 {
     uint8_t* data = (uint8_t*)buffer;
-    uint32_t bytesLeftInBlock;
     size_t   bytesToWrite = size;
     VAFS_DEBUG("vafs_stream_write(size=%u)\n", size);
 
@@ -595,13 +592,14 @@ int vafs_stream_write(
     // write the data to stream, taking care of block boundaries
     while (bytesToWrite) {
         size_t byteCount;
+        size_t bytesLeftInBlock;
 
         bytesLeftInBlock = stream->Header.BlockSize - (stream->BlockBufferOffset % stream->Header.BlockSize);
-        byteCount = MIN(bytesToWrite, bytesLeftInBlock);
+        byteCount        = MIN(bytesToWrite, bytesLeftInBlock);
 
         memcpy(stream->BlockBuffer + stream->BlockBufferOffset, data, byteCount);
         
-        stream->BlockBufferOffset += byteCount;
+        stream->BlockBufferOffset += (uint32_t)byteCount;
         data                      += byteCount;
         bytesToWrite              -= byteCount;
 
@@ -642,7 +640,7 @@ int vafs_stream_read(
             byteCount, stream->BlockBufferIndex, stream->BlockBufferOffset);
         memcpy(data, stream->BlockBuffer + stream->BlockBufferOffset, byteCount);
         
-        stream->BlockBufferOffset += byteCount;
+        stream->BlockBufferOffset += (uint32_t)byteCount;
         data                      += byteCount;
         bytesToRead               -= byteCount;
 
@@ -705,7 +703,7 @@ static int __update_stream_header(
     position = (int)vafs_streamdevice_seek(stream->Device, stream->DeviceOffset, SEEK_SET);
     if (position == -1) {
         VAFS_ERROR("__update_stream_header: failed to seek to stream header\n");
-        return status;
+        return -1;
     }
 
     status = vafs_streamdevice_write(
@@ -759,8 +757,6 @@ int vafs_stream_finish(
 int vafs_stream_close(
     struct VaFsStream* stream)
 {
-    int status;
-
     VAFS_DEBUG("vafs_stream_close()\n");
     if (!stream) {
         errno = EINVAL;

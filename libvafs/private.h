@@ -98,8 +98,8 @@ VAFS_ONDISK_STRUCT(VaFsDirectoryHeader, {
 
 VAFS_ONDISK_STRUCT(VaFsSymlinkDescriptor, {
     VaFsDescriptor_t    Base;
-    uint32_t            NameLength;
-    uint32_t            TargetLength;
+    uint16_t            NameLength;
+    uint16_t            TargetLength;
 });
 
 enum VaFsMode {

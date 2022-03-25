@@ -1001,7 +1001,7 @@ extern "C" {
         free(tmp);
 
         /* Release allocated memory on error */
-        if (result < 0) {
+        if (result < 0 && files) {
             for (i = 0; i < size; i++) {
                 free(files[i]);
             }
@@ -1118,7 +1118,7 @@ extern "C" {
         wcstr[n] = '\0';
 
         /* Return length of wide-character string with zero-terminator */
-        *pReturnValue = (size_t)(n + 1);
+        *pReturnValue = (size_t)(n) + 1;
 
         /* Return zero if conversion succeeded */
         if (n > 0) {
@@ -1203,7 +1203,7 @@ extern "C" {
         mbstr[n] = '\0';
 
         /* Return length of multi-byte string with zero-terminator */
-        *pReturnValue = (size_t)(n + 1);
+        *pReturnValue = (size_t)(n) + 1;
 
         /* Return zero if conversion succeeded without using default characters */
         if (n > 0 && flag == 0) {

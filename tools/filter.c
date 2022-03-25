@@ -50,7 +50,7 @@ static struct VaFsGuid g_filterOpsGuid = VA_FS_FEATURE_FILTER_OPS;
 # endif
 #endif
 
-static CB_CALLCONV int callback(unsigned int insize, unsigned int inpos,
+static int CB_CALLCONV callback(unsigned int insize, unsigned int inpos,
 	unsigned int outpos, void *cbparam)
 {
 	(void)insize;
@@ -95,7 +95,7 @@ static int __aplib_encode(void* Input, uint32_t InputLength, void** Output, uint
 
 static int __aplib_decode(void* Input, uint32_t InputLength, void* Output, uint32_t* OutputLength)
 {
-    size_t decompressedSize;
+    uint32_t decompressedSize;
 
     decompressedSize = aPsafe_get_orig_size(Input);
     if (decompressedSize == APLIB_ERROR) {
