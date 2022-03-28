@@ -421,13 +421,4 @@ typedef NTSTATUS(NTAPI* sNtQuerySystemInformation)
     ULONG SystemInformationLength,
     PULONG ReturnLength);
 
-
-// Ntdll function pointers
-extern sRtlNtStatusToDosError pRtlNtStatusToDosError;
-extern sNtDeviceIoControlFile pNtDeviceIoControlFile;
-extern sNtQueryInformationFile pNtQueryInformationFile;
-extern sNtSetInformationFile pNtSetInformationFile;
-extern sNtQueryVolumeInformationFile pNtQueryVolumeInformationFile;
-extern sNtQuerySystemInformation pNtQuerySystemInformation;
-
 #endif //!__NTIFS_WIN32_H__
