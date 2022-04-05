@@ -243,6 +243,15 @@ extern int vafs_directory_close(
     struct VaFsDirectoryHandle* handle);
 
 /**
+ * @brief 
+ * 
+ * @param handle 
+ * @return uint32_t 
+ */
+extern uint32_t vafs_directory_permissions(
+    struct VaFsDirectoryHandle* handle);
+
+/**
  * @brief Reads an entry from the directory handle.
  * 
  * @param[In]  handle The directory handle to read an entry from.
@@ -264,6 +273,21 @@ extern int vafs_directory_read(
 extern int vafs_directory_open_directory(
     struct VaFsDirectoryHandle*  handle,
     const char*                  name,
+    struct VaFsDirectoryHandle** handleOut);
+
+/**
+ * @brief 
+ * 
+ * @param handle 
+ * @param name 
+ * @param permissions
+ * @param handleOut 
+ * @return int 
+ */
+extern int vafs_directory_create_directory(
+    struct VaFsDirectoryHandle*  handle,
+    const char*                  name,
+    uint32_t                     permissions,
     struct VaFsDirectoryHandle** handleOut);
 
 /**
@@ -297,11 +321,27 @@ extern int vafs_directory_read_symlink(
  * 
  * @param handle 
  * @param name 
+ * @param handleOut
  * @return int 
  */
 extern int vafs_directory_open_file(
     struct VaFsDirectoryHandle* handle,
     const char*                 name,
+    struct VaFsFileHandle**     handleOut);
+
+/**
+ * @brief 
+ * 
+ * @param handle 
+ * @param name 
+ * @param permissions
+ * @param handleOut
+ * @return int 
+ */
+extern int vafs_directory_create_file(
+    struct VaFsDirectoryHandle* handle,
+    const char*                 name,
+    uint32_t                    permissions,
     struct VaFsFileHandle**     handleOut);
 
 /**
@@ -320,6 +360,15 @@ extern int vafs_file_close(
  * @return size_t 
  */
 extern size_t vafs_file_length(
+    struct VaFsFileHandle* handle);
+
+/**
+ * @brief 
+ * 
+ * @param handle 
+ * @return uint32_t 
+ */
+extern uint32_t vafs_file_permissions(
     struct VaFsFileHandle* handle);
 
 /**

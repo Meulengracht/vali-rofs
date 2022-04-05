@@ -58,7 +58,8 @@ struct VaFsDirectoryHandle {
 };
 
 static void __initialize_file_descriptor(
-    VaFsFileDescriptor_t* descriptor)
+    VaFsFileDescriptor_t* descriptor,
+    uint32_t              permissions)
 {
     descriptor->Base.Type = VA_FS_DESCRIPTOR_TYPE_FILE;
     descriptor->Base.Length = sizeof(VaFsFileDescriptor_t);
@@ -66,16 +67,19 @@ static void __initialize_file_descriptor(
     descriptor->Data.Index = VA_FS_INVALID_BLOCK;
     descriptor->Data.Offset = VA_FS_INVALID_OFFSET;
     descriptor->FileLength = 0;
+    descriptor->Permissions = permissions;
 }
 
 static void __initialize_directory_descriptor(
-    VaFsDirectoryDescriptor_t* descriptor)
+    VaFsDirectoryDescriptor_t* descriptor,
+    uint32_t                   permissions)
 {
     descriptor->Base.Type = VA_FS_DESCRIPTOR_TYPE_DIRECTORY;
     descriptor->Base.Length = sizeof(VaFsDirectoryDescriptor_t);
 
     descriptor->Descriptor.Index = VA_FS_INVALID_BLOCK;
     descriptor->Descriptor.Offset = VA_FS_INVALID_OFFSET;
+    descriptor->Permissions = permissions;
 }
 
 static void __initialize_symlink_descriptor(
@@ -108,7 +112,7 @@ int vafs_directory_create_root(
 
     directory->Base.VaFs = vafs;
     directory->Base.Name = strdup("root");
-    __initialize_directory_descriptor(&directory->Base.Descriptor);
+    __initialize_directory_descriptor(&directory->Base.Descriptor, 0777);
 
     *directoryOut = (struct VaFsDirectory*)directory;
     return 0;
@@ -768,6 +772,16 @@ int vafs_directory_flush(
     return 0;
 }
 
+uint32_t vafs_directory_permissions(
+    struct VaFsDirectoryHandle* handle)
+{
+    if (handle == NULL) {
+        errno = EINVAL;
+        return (uint32_t)-1;
+    }
+
+    return handle->Directory->Descriptor.Permissions;
+}
 
 int vafs_directory_read(
     struct VaFsDirectoryHandle* handle,
@@ -843,7 +857,8 @@ static int __add_file_entry(
 
 static int __create_file_entry(
     struct VaFsDirectoryWriter* writer,
-    const char*                 name)
+    const char*                 name,
+    uint32_t                    permissions)
 {
     struct VaFsFile* entry;
     int              status;
@@ -862,7 +877,7 @@ static int __create_file_entry(
         return -1;
     }
 
-    __initialize_file_descriptor(&entry->Descriptor);
+    __initialize_file_descriptor(&entry->Descriptor, permissions);
     status = __add_file_entry(writer, entry);
     if (status) {
         free((void*)entry->Name);
@@ -958,7 +973,8 @@ static int __add_directory_entry(
 
 static int __create_directory_entry(
     struct VaFsDirectoryWriter* writer,
-    const char*                 name)
+    const char*                 name,
+    uint32_t                    permissions)
 {
     struct VaFsDirectoryWriter* entry;
     int                         status;
@@ -979,7 +995,7 @@ static int __create_directory_entry(
         return -1;
     }
 
-    __initialize_directory_descriptor(&entry->Base.Descriptor);
+    __initialize_directory_descriptor(&entry->Base.Descriptor, permissions);
     status = __add_directory_entry(writer, &entry->Base);
     if (status) {
         free((void*)entry->Base.Name);
@@ -1022,6 +1038,11 @@ int vafs_directory_open_directory(
         return -1;
     }
 
+    if (handle->Directory->VaFs->Mode != VaFsMode_Read) {
+        errno = EACCES;
+        return -1;
+    }
+
     // do this to verify the incoming name
     if (!__get_path_token(name, token, sizeof(token))) {
         errno = ENOENT;
@@ -1031,26 +1052,61 @@ int vafs_directory_open_directory(
     // find the name in the directory
     entry = __find_entry(handle->Directory, token);
     if (entry == NULL) {
-        if (handle->Directory->VaFs->Mode == VaFsMode_Read) {
-            errno = ENOENT;
-            return -1;
-        }
-        else {
-            struct VaFsDirectoryWriter* writer = (struct VaFsDirectoryWriter*)handle->Directory;
-            int                         status;
-
-            status = __create_directory_entry(writer, token);
-            if (status != 0) {
-                return status;
-            }
-            entry = __find_entry(handle->Directory, token);
-        }
+        errno = ENOENT;
+        return -1;
     }
 
     if (entry->Type != VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
         errno = ENOTDIR;
         return -1;
     }
+
+    *handleOut = __create_handle(entry->Directory);
+    return 0;
+}
+
+int vafs_directory_create_directory(
+    struct VaFsDirectoryHandle*  handle,
+    const char*                  name,
+    uint32_t                     permissions,
+    struct VaFsDirectoryHandle** handleOut)
+{
+
+    struct VaFsDirectoryWriter* writer;
+    int                         status;
+    struct VaFsDirectoryEntry*  entry;
+    char                        token[128];
+    VAFS_DEBUG("vafs_directory_create_directory(handle=%p, name=%s, handleOut=%p)\n", handle, name, handleOut);
+
+    if (handle == NULL || name == NULL || handleOut == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (handle->Directory->VaFs->Mode != VaFsMode_Write) {
+        errno = EACCES;
+        return -1;
+    }
+
+    // do this to verify the incoming name
+    if (!__get_path_token(name, token, sizeof(token))) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    // find the name in the directory
+    entry = __find_entry(handle->Directory, token);
+    if (entry != NULL) {
+        errno = EEXIST;
+        return -1;
+    }
+
+    writer = (struct VaFsDirectoryWriter*)handle->Directory;
+    status = __create_directory_entry(writer, token, permissions);
+    if (status != 0) {
+        return status;
+    }
+    entry = __find_entry(handle->Directory, token);
 
     *handleOut = __create_handle(entry->Directory);
     return 0;
@@ -1070,6 +1126,12 @@ int vafs_directory_open_file(
         return -1;
     }
 
+    // verify read mode
+    if (handle->Directory->VaFs->Mode != VaFsMode_Read) {
+        errno = EACCES;
+        return -1;
+    }
+
     // do this to verify the incoming name
     if (!__get_path_token(name, token, sizeof(token))) {
         errno = ENOENT;
@@ -1077,23 +1139,10 @@ int vafs_directory_open_file(
     }
 
     // find the name in the directory
-    VAFS_DEBUG("vafs_directory_open_file: locating %s\n", token);
     entry = __find_entry(handle->Directory, token);
     if (entry == NULL) {
-        if (handle->Directory->VaFs->Mode == VaFsMode_Read) {
-            errno = ENOENT;
-            return -1;
-        }
-        else {
-            struct VaFsDirectoryWriter* writer = (struct VaFsDirectoryWriter*)handle->Directory;
-            int                         status;
-
-            status = __create_file_entry(writer, token);
-            if (status != 0) {
-                return status;
-            }
-            entry = __find_entry(handle->Directory, token);
-        }
+        errno = ENOENT;
+        return -1;
     }
 
     if (entry->Type != VA_FS_DESCRIPTOR_TYPE_FILE) {
@@ -1101,6 +1150,53 @@ int vafs_directory_open_file(
         return -1;
     }
 
+    *handleOut = vafs_file_create_handle(entry->File);
+    return 0;
+}
+
+int vafs_directory_create_file(
+    struct VaFsDirectoryHandle* handle,
+    const char*                 name,
+    uint32_t                    permissions,
+    struct VaFsFileHandle**     handleOut)
+{
+    struct VaFsDirectoryWriter* writer;
+    int                         status;
+    struct VaFsDirectoryEntry*  entry;
+    char                        token[128];
+    VAFS_DEBUG("vafs_directory_create_file(name=%s)\n", name);
+
+    if (handle == NULL || name == NULL || handleOut == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    // verify write mode
+    if (handle->Directory->VaFs->Mode != VaFsMode_Write) {
+        errno = EACCES;
+        return -1;
+    }
+
+    // do this to verify the incoming name
+    if (!__get_path_token(name, token, sizeof(token))) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    // find the name in the directory
+    entry = __find_entry(handle->Directory, token);
+    if (entry != NULL) {
+        errno = EEXIST;
+        return -1;
+    }
+
+    writer = (struct VaFsDirectoryWriter*)handle->Directory;
+    status = __create_file_entry(writer, token, permissions);
+    if (status != 0) {
+        return status;
+    }
+    entry = __find_entry(handle->Directory, token);
+    
     *handleOut = vafs_file_create_handle(entry->File);
     return 0;
 }

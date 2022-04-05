@@ -85,11 +85,13 @@ VAFS_ONDISK_STRUCT(VaFsFileDescriptor, {
     VaFsDescriptor_t    Base;
     VaFsBlockPosition_t Data;
     uint32_t            FileLength;
+    uint32_t            Permissions;
 });
 
 VAFS_ONDISK_STRUCT(VaFsDirectoryDescriptor, {
     VaFsDescriptor_t    Base;
     VaFsBlockPosition_t Descriptor;
+    uint32_t            Permissions;
 });
 
 VAFS_ONDISK_STRUCT(VaFsDirectoryHeader, {

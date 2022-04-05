@@ -411,42 +411,26 @@ int __read_symlink(const char* path, char** bufferOut)
     return 0;
 }
 
-int __is_file(
-    const char* path)
+int __ministat(
+    const char* path,
+    uint32_t*   filemode)
 {
     struct stat st;
-    if (__stat(path, &st, 0) != 0) {
-        fprintf(stderr, "mkvafs: stat failed for '%s'\n", path);
-        return 0;
+    if (__stat(path, &st) != 0) {
+        return -1;
     }
-    return S_ISREG(st.st_mode);
+    *filemode = st.st_mode;
+    return 0;
 }
 
-int __is_symlink(
-    const char* path)
-{
-    struct stat st;
-    if (__stat(path, &st, 1) != 0) {
-        fprintf(stderr, "mkvafs: lstat failed for '%s'\n", path);
-        return 0;
-    }
-    return S_ISLNK(st.st_mode);
-}
-
-static int __is_directory(
-    const char* path)
-{
-    struct stat st;
-    if (__stat(path, &st, 0) != 0) {
-        fprintf(stderr, "mkvafs: stat failed for '%s'\n", path);
-        return 0;
-    }
-    return S_ISDIR(st.st_mode);
-}
-
+#define __is_file(mode) S_ISREG(mode)
+#define __is_symlink(mode) S_ISLNK(mode)
+#define __is_directory(mode) S_ISDIR(mode)
+#define __perms(mode) (mode & 0777)
 #else
 #include <dirent.h>
 #include <sys/stat.h>
+#include <linux/limits.h>
 #include <unistd.h>
 
 int __read_symlink(const char* path, char** bufferOut)
@@ -458,13 +442,12 @@ int __read_symlink(const char* path, char** bufferOut)
         return -1;
     }
 
-    buffer = (char*)malloc(1024);
+    buffer = (char*)calloc(1, PATH_MAX);
     if (buffer == NULL) {
         errno = ENOMEM;
-        return -1;
     }
 
-    if (readlink(path, buffer, 1024) == -1) {
+    if (readlink(path, buffer, PATH_MAX - 1) == -1) {
         free(buffer);
         return -1;
     }
@@ -473,39 +456,22 @@ int __read_symlink(const char* path, char** bufferOut)
     return 0;
 }
 
-int __is_file(
-    const char* path)
-{
-    struct stat st;
-    if (lstat(path, &st) != 0) {
-        fprintf(stderr, "mkvafs: stat failed for '%s'\n", path);
-        return 0;
-    }
-    return S_ISREG(st.st_mode);
-}
-
-int __is_symlink(
-    const char* path)
-{
-    struct stat st;
-    if (lstat(path, &st) != 0) {
-        fprintf(stderr, "mkvafs: stat failed for '%s'\n", path);
-        return 0;
-    }
-    return S_ISLNK(st.st_mode);
-}
-
-static int __is_directory(
-    const char* path)
+int __ministat(
+    const char* path,
+    uint32_t*   filemode)
 {
     struct stat st;
     if (stat(path, &st) != 0) {
-        fprintf(stderr, "mkvafs: stat failed for '%s'\n", path);
-        return 0;
+        return -1;
     }
-    return S_ISDIR(st.st_mode);
+    *filemode = st.st_mode;
+    return 0;
 }
 
+#define __is_file(mode) S_ISREG(mode)
+#define __is_symlink(mode) S_ISLNK(mode)
+#define __is_directory(mode) S_ISDIR(mode)
+#define __perms(mode) (mode & 0777)
 #endif
 
 struct progress_context {
@@ -646,7 +612,8 @@ static void __write_progress(const char* prefix, struct progress_context* contex
 static int __write_file(
     struct VaFsDirectoryHandle* directoryHandle,
     const char*                 path,
-    const char*                 filename)
+    const char*                 filename,
+    uint32_t                    permissions)
 {
     struct VaFsFileHandle* fileHandle;
     FILE*                  file;
@@ -655,7 +622,7 @@ static int __write_file(
     int                    status;
 
     // create the VaFS file
-    status = vafs_directory_open_file(directoryHandle, filename, &fileHandle);
+    status = vafs_directory_create_file(directoryHandle, filename, permissions, &fileHandle);
     if (status) {
         fprintf(stderr, "mkvafs: failed to create file '%s'\n", filename);
         return -1;
@@ -716,6 +683,7 @@ static int __write_directory(
     }
 
     while ((dp = readdir(dfd)) != NULL) {
+        uint32_t filemode;
         if (strcmp(dp->d_name, ".") == 0 || strcmp(dp->d_name, "..") == 0)
             continue;
 
@@ -726,9 +694,15 @@ static int __write_directory(
             sprintf(filepathBuffer, "%s%s", path, dp->d_name);
         
         __write_progress(dp->d_name, progress);
-        if (__is_directory(filepathBuffer)) {
+        status = __ministat(filepathBuffer, &filemode);
+        if (status) {
+            fprintf(stderr, "mkvafs: failed to stat file/directory '%s'\n", filepathBuffer);
+            break;
+        }
+
+        if (__is_directory(filemode)) {
             struct VaFsDirectoryHandle* subdirectoryHandle;
-            status = vafs_directory_open_directory(directoryHandle, dp->d_name, &subdirectoryHandle);
+            status = vafs_directory_create_directory(directoryHandle, dp->d_name, __perms(filemode), &subdirectoryHandle);
             if (status) {
                 fprintf(stderr, "mkvafs: failed to create directory '%s'\n", dp->d_name);
                 continue;
@@ -746,7 +720,7 @@ static int __write_directory(
                 break;
             }
             progress->directories++;
-        } else if (__is_symlink(filepathBuffer)) {
+        } else if (__is_symlink(filemode)) {
             char* linkpath = NULL;
             status = __read_symlink(filepathBuffer, &linkpath);
             if (status != 0) {
@@ -762,8 +736,8 @@ static int __write_directory(
                 break;
             }
             progress->symlinks++;
-        } else if (__is_file(filepathBuffer)) {
-            status = __write_file(directoryHandle, filepathBuffer, dp->d_name);
+        } else if (__is_file(filemode)) {
+            status = __write_file(directoryHandle, filepathBuffer, dp->d_name, __perms(filemode));
             if (status != 0) {
                 fprintf(stderr, "mkvafs: unable to write file %s\n", dp->d_name);
                 break;
@@ -851,16 +825,23 @@ int main(int argc, char *argv[])
 
     printf("mkvafs: counting files\n");
     for (int i = 0; i < pathCount; i++) {
-        if (__is_directory(paths[i])) {
+        uint32_t filemode;
+        status = __ministat(paths[i], &filemode);
+        if (status) {
+            fprintf(stderr, "mkvafs: cannot stat file/directory: %s\n", paths[i]);
+            return -1;
+        }
+
+        if (__is_directory(filemode)) {
             progressContext.directories_total++;
             __get_count_recursive(paths[i],
                 &progressContext.files_total,
                 &progressContext.symlinks_total, 
                 &progressContext.directories_total
             );
-        } else if (__is_symlink(paths[i])) {
+        } else if (__is_symlink(filemode)) {
             progressContext.symlinks_total++;
-        } else if (__is_file(paths[i])) {
+        } else if (__is_file(filemode)) {
             progressContext.files_total++;
         }
     }
@@ -871,15 +852,23 @@ int main(int argc, char *argv[])
         progressContext.symlinks_total
     );
     for (int i = 0; i < pathCount; i++) {
+        uint32_t filemode;
+
         __write_progress(paths[i], &progressContext);
-        if (__is_directory(paths[i])) {
+        status = __ministat(paths[i], &filemode);
+        if (status) {
+            fprintf(stderr, "mkvafs: cannot stat file/directory: %s\n", paths[i]);
+            return -1;
+        }
+
+        if (__is_directory(filemode)) {
             status = __write_directory(&progressContext, directoryHandle, paths[i]);
             if (status != 0) {
                 fprintf(stderr, "mkvafs: unable to write directory %s\n", paths[i]);
                 break;
             }
             progressContext.directories++;
-        } else if (__is_symlink(paths[i])) {
+        } else if (__is_symlink(filemode)) {
             char* linkpath = NULL;
             status = __read_symlink(paths[i], &linkpath);
             if (status != 0) {
@@ -895,8 +884,8 @@ int main(int argc, char *argv[])
                 break;
             }
             progressContext.symlinks++;
-        } else if (__is_file(paths[i])) {
-            status = __write_file(directoryHandle, paths[i], __get_filename(paths[i]));
+        } else if (__is_file(filemode)) {
+            status = __write_file(directoryHandle, paths[i], __get_filename(paths[i]), __perms(filemode));
             if (status != 0) {
                 fprintf(stderr, "mkvafs: unable to write file %s\n", paths[i]);
                 break;

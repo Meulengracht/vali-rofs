@@ -31,7 +31,8 @@
 #include <direct.h>
 #include <WinBase.h>
 
-#define __mkdir _mkdir
+#define __mkdir(path, perms) _mkdir(path)
+#define chmod _chmod
 
 int __symlink(const char* path, const char* target)
 {
@@ -60,7 +61,7 @@ int __symlink(const char* path, const char* target)
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define __mkdir(path) mkdir(path, 0777)
+#define __mkdir(path, perms) mkdir(path, perms)
 
 int __symlink(const char* path, const char* target)
 {
@@ -160,7 +161,9 @@ static int __extract_file(
         free(fileBuffer);
     }
     fclose(file);
-    return 0;
+
+    // update permissions on file
+    return chmod(path, vafs_file_permissions(fileHandle));
 }
 
 static void __write_progress(const char* prefix, struct progress_context* context)
@@ -208,7 +211,8 @@ static int __extract_directory(
             return status;
         }
 
-        if (!status && __mkdir(path)) {
+        // always create directories initially with 0777
+        if (!status && __mkdir(path, 0777)) {
             fprintf(stderr, "unmkvafs: unable to create directory %s\n", path);
             return -1;
         }
@@ -296,6 +300,8 @@ static int __extract_directory(
         __write_progress(dp.Name, progress);
         free(filepathBuffer);
     } while(1);
+
+    // todo change permissions on directory
 
     return 0;
 }
