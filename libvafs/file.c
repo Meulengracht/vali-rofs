@@ -81,6 +81,17 @@ size_t vafs_file_length(
     return handle->File->Descriptor.FileLength;
 }
 
+uint32_t vafs_file_permissions(
+    struct VaFsFileHandle* handle)
+{
+    if (!handle) {
+        errno = EINVAL;
+        return (uint32_t)-1;
+    }
+
+    return handle->File->Descriptor.Permissions;
+}
+
 int vafs_file_seek(
     struct VaFsFileHandle* handle,
     long                   offset,
