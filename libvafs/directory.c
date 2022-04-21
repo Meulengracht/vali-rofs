@@ -1097,8 +1097,8 @@ int vafs_directory_create_directory(
     // find the name in the directory
     entry = __find_entry(handle->Directory, token);
     if (entry != NULL) {
-        errno = EEXIST;
-        return -1;
+        *handleOut = __create_handle(entry->Directory);
+        return 0;
     }
 
     writer = (struct VaFsDirectoryWriter*)handle->Directory;
