@@ -30,6 +30,7 @@
 #endif
 
 #if defined(_WIN32) || defined(_WIN64)
+#include <sys/stat.h>
 #include <windows.h>
 
 typedef CRITICAL_SECTION mtx_t;
@@ -60,7 +61,11 @@ static inline int mtx_unlock(mtx_t* mtx) {
     return thrd_success;
 }
 
+#if !defined S_ISDIR
+    #define S_ISDIR(m) (((m) & _S_IFDIR) == _S_IFDIR)
+#endif
 #else
+#include <sys/stat.h>
 #include <threads.h>
 #endif
 

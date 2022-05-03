@@ -23,6 +23,7 @@
 #include "private.h"
 #include <stdlib.h>
 #include <string.h>
+#include <vafs/file.h>
 
 enum VaFsFileState {
     VaFsFileState_Open,
@@ -35,6 +36,89 @@ struct VaFsFileHandle {
     enum VaFsFileState State;
     uint32_t           Position;
 };
+
+
+int vafs_file_open(
+    struct VaFs*            vafs,
+    const char*             path,
+    struct VaFsFileHandle** handleOut)
+{
+    struct VaFsDirectoryEntry* entries;
+    const char*                remainingPath = path;
+    char                       token[VAFS_NAME_MAX + 1];
+
+    if (vafs == NULL || path == NULL || handleOut == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (__vafs_is_root_path(path)) {
+        errno = EISDIR;
+        return -1;
+    }
+
+    entries = __vafs_directory_entries(vafs->RootDirectory);
+    do {
+        int charsConsumed = __vafs_pathtoken(remainingPath, token, sizeof(token));
+        if (!charsConsumed) {
+            break;
+        }
+        remainingPath += charsConsumed;
+
+        // find the name in the directory
+        while (entries != NULL) {
+            if (!strcmp(__vafs_directory_entry_name(entries), token)) {
+                if (entries->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
+                    // If we encounter a directory in this case, we must not
+                    // be at the end of the path
+                    if (remainingPath[0] == '\0') {
+                        errno = EISDIR;
+                        return -1;
+                    }
+
+                    // fall through this entire if/else
+                } else if (entries->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
+                    char* pathBuffer = malloc(VAFS_PATH_MAX);
+                    int   written;
+                    int   status;
+                    if (!pathBuffer) {
+                        VAFS_ERROR("vafs_directory_open: failed to allocate path buffer\n");
+                        errno = ENOMEM;
+                        return -1;
+                    }
+
+                    written = __vafs_resolve_symlink(pathBuffer, VAFS_PATH_MAX, path, remainingPath - path, entries->Symlink->Target);
+                    if (written < 0) {
+                        VAFS_ERROR("vafs_directory_open: failed to resolve symlink %s\n", entries->Symlink->Target);
+                        free(pathBuffer);
+                        return -1;
+                    }
+
+                    status = vafs_file_open(vafs, pathBuffer, handleOut);
+                    free(pathBuffer);
+                    return status;
+                } else if (entries->Type == VA_FS_DESCRIPTOR_TYPE_FILE) {
+                    // If we encounter a file in this case, we must be at the end of the path
+                    if (remainingPath[0] != '\0') {
+                        errno = EISDIR;
+                        return -1;
+                    }
+
+                    *handleOut = vafs_file_create_handle(entries->File);
+                    return 0;
+                } else {
+                    errno = ENOENT;
+                    return -1;
+                }
+
+                entries = __vafs_directory_entries(entries->Directory);
+                break;
+            }
+            entries = entries->Link;
+        }
+    } while (1);
+    return -1;
+}
 
 struct VaFsFileHandle* vafs_file_create_handle(
     struct VaFsFile* fileEntry)

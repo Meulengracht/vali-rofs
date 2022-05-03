@@ -1,0 +1,45 @@
+# project information, packaging data
+project: 
+  summary: Simple Application Recipe
+  description: A simple application recipe
+  author: who made it
+  email: contact@me.com
+  version: 0.1.0
+  license: MIT
+
+# There are a number of keywords that can be used in the recipe
+# steps during generate, build, install and package.
+recipes:
+  - name: vafs
+    path: /
+    steps:
+    # The generate step is run first, and the folder generation is run
+    # from is denoted by ${BAKE_BUILD_DIR}.  Bake expects all artifacts that
+    # should be included in the package to be placed in ${BAKE_ARTIFACT_DIR}.
+    - type: generate
+      system: cmake
+      arguments: [-G, '"Unix Makefiles"']
+    # The build step is executed from ${BAKE_BUILD_DIR}
+    - type: build
+      depends: [generate]
+      system: make
+
+packs:
+- name: libvafs
+  type: ingredient
+  filters:
+    - lib
+    - include
+- name: vafs
+  type: application
+  filters:
+    - bin
+  commands:
+    - name: mkvafs
+      path: bin/mkvafs
+      type: executable
+      description: Utility for building vafs images
+    - name: unmkvafs
+      path: bin/unmkvafs
+      type: executable
+      description: Utility for extracting vafs images

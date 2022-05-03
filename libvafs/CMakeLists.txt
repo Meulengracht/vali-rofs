@@ -9,9 +9,10 @@ add_library(vafs STATIC
     directory.c
     file.c
     log.c
-    vafs.c
     stream.c
     streamdevice.c
+    utils.c
+    vafs.c
 )
 target_include_directories(vafs PRIVATE include/vafs)
 target_include_directories(vafs PUBLIC include)
