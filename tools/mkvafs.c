@@ -25,6 +25,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <vafs/vafs.h>
+#include <vafs/directory.h>
+#include <vafs/file.h>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <assert.h>

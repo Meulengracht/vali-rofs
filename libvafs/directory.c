@@ -23,34 +23,7 @@
 #include "private.h"
 #include <stdlib.h>
 #include <string.h>
-
-struct VaFsDirectoryEntry;
-
-enum VaFsDirectoryState {
-    VaFsDirectoryState_Open,
-    VaFsDirectoryState_Loaded
-};
-
-struct VaFsDirectoryReader {
-    struct VaFsDirectory       Base;
-    enum VaFsDirectoryState    State;
-    struct VaFsDirectoryEntry* Entries;
-};
-
-struct VaFsDirectoryWriter {
-    struct VaFsDirectory       Base;
-    struct VaFsDirectoryEntry* Entries;
-};
-
-struct VaFsDirectoryEntry {
-    int Type;
-    union {
-        struct VaFsFile*      File;
-        struct VaFsDirectory* Directory;
-        struct VaFsSymlink*   Symlink;
-    };
-    struct VaFsDirectoryEntry* Link;
-};
+#include <vafs/directory.h>
 
 struct VaFsDirectoryHandle {
     struct VaFsDirectory* Directory;
@@ -429,58 +402,15 @@ int vafs_directory_open_root(
     return 0;
 }
 
-static int __get_path_token(
-    const char* path,
-    char*       token,
-    size_t      tokenSize)
-{
-    size_t i;
-    size_t j;
-    size_t remainingLength;
-
-    if (path == NULL || token == NULL) {
-        errno = EINVAL;
-        return 0;
-    }
-
-    remainingLength = strlen(path);
-    if (remainingLength == 0) {
-        errno = ENOENT;
-        return 0;
-    }
-
-    // skip leading slashes
-    for (i = 0; i < remainingLength; i++) {
-        if (path[i] != '/') {
-            break;
-        }
-    }
-
-    // copy over token untill \0 or /
-    for (j = 0; i < remainingLength; i++, j++) {
-        if (path[i] == '/' || path[i] == '\0') {
-            break;
-        }
-
-        if (j >= tokenSize) {
-            errno = ENAMETOOLONG;
-            return 0;
-        }
-        token[j] = path[i];
-    }
-    token[j] = '\0';
-    return (int)i;
-}
-
-static struct VaFsDirectoryEntry* __get_first_entry(
+struct VaFsDirectoryEntry* __vafs_directory_entries(
     struct VaFsDirectory* directory)
 {
-    VAFS_INFO("__get_first_entry(directory=%s)\n", directory->Name);
+    VAFS_INFO("__vafs_directory_entries(directory=%s)\n", directory->Name);
     if (directory->VaFs->Mode == VaFsMode_Read) {
         struct VaFsDirectoryReader* reader = (struct VaFsDirectoryReader*)directory;
         if (reader->State != VaFsDirectoryState_Loaded) {
             if (__load_directory(reader)) {
-                VAFS_ERROR("__get_first_entry: directory not loaded\n");
+                VAFS_ERROR("__vafs_directory_entries: directory not loaded\n");
                 return NULL;
             }
         }
@@ -492,20 +422,7 @@ static struct VaFsDirectoryEntry* __get_first_entry(
     }
 }
 
-static int __is_root(
-    const char* path)
-{
-    size_t len = strlen(path);
-    if (len == 1 && path[0] == '/') {
-        return 1;
-    }
-    if (len == 0) {
-        return 1;
-    }
-    return 0;
-}
-
-static const char* __get_entry_name(
+const char* __vafs_directory_entry_name(
     struct VaFsDirectoryEntry* entry)
 {
     if (entry->Type == VA_FS_DESCRIPTOR_TYPE_FILE) {
@@ -541,24 +458,21 @@ int vafs_directory_open(
 {
     struct VaFsDirectoryEntry* entries;
     const char*                remainingPath = path;
-    char                       token[128];
+    char                       token[VAFS_NAME_MAX + 1];
 
     if (vafs == NULL || path == NULL || handleOut == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    if (__is_root(path)) {
+    if (__vafs_is_root_path(path)) {
         *handleOut = __create_handle(vafs->RootDirectory);
         return 0;
     }
 
-    // get initial entry
-    entries = __get_first_entry(vafs->RootDirectory);
-
+    entries = __vafs_directory_entries(vafs->RootDirectory);
     do {
-        // get the next token
-        int charsConsumed = __get_path_token(remainingPath, token, sizeof(token));
+        int charsConsumed = __vafs_pathtoken(remainingPath, token, sizeof(token));
         if (!charsConsumed) {
             break;
         }
@@ -566,8 +480,28 @@ int vafs_directory_open(
 
         // find the name in the directory
         while (entries != NULL) {
-            if (!strcmp(__get_entry_name(entries), token)) {
-                if (entries->Type != VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
+            if (!strcmp(__vafs_directory_entry_name(entries), token)) {
+                if (entries->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
+                    char* pathBuffer = malloc(VAFS_PATH_MAX);
+                    int   written;
+                    int   status;
+                    if (!pathBuffer) {
+                        VAFS_ERROR("vafs_directory_open: failed to allocate path buffer\n");
+                        errno = ENOMEM;
+                        return -1;
+                    }
+
+                    written = __vafs_resolve_symlink(pathBuffer, VAFS_PATH_MAX, path, remainingPath - path, entries->Symlink->Target);
+                    if (written < 0) {
+                        VAFS_ERROR("vafs_directory_open: failed to resolve symlink %s\n", entries->Symlink->Target);
+                        free(pathBuffer);
+                        return -1;
+                    }
+
+                    status = vafs_directory_open(vafs, pathBuffer, handleOut);
+                    free(pathBuffer);
+                    return status;
+                } else if (entries->Type != VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
                     errno = ENOTDIR;
                     return -1;
                 }
@@ -578,7 +512,7 @@ int vafs_directory_open(
                     return 0;
                 }
 
-                entries = __get_first_entry(entries->Directory);
+                entries = __vafs_directory_entries(entries->Directory);
                 break;
             }
             entries = entries->Link;
@@ -797,7 +731,7 @@ int vafs_directory_read(
     }
 
     VAFS_DEBUG("vafs_directory_read: locate index %i\n", handle->Index);
-    entry = __get_first_entry(handle->Directory);
+    entry = __vafs_directory_entries(handle->Directory);
     i       = 0;
     while (entry != NULL) {
         if (i == handle->Index) {
@@ -818,7 +752,7 @@ int vafs_directory_read(
     handle->Index++;
 
     // initialize the entry structure
-    entryOut->Name = __get_entry_name(entry);
+    entryOut->Name = __vafs_directory_entry_name(entry);
     entryOut->Type = (enum VaFsEntryType)entry->Type;
     return 0;
 }
@@ -1014,9 +948,9 @@ static struct VaFsDirectoryEntry* __find_entry(
     struct VaFsDirectoryEntry* entries;
 
     // find the name in the directory
-    entries = __get_first_entry(directory);
+    entries = __vafs_directory_entries(directory);
     while (entries != NULL) {
-        if (!strcmp(__get_entry_name(entries), token)) {
+        if (!strcmp(__vafs_directory_entry_name(entries), token)) {
             return entries;
         }
         entries = entries->Link;
@@ -1030,7 +964,7 @@ int vafs_directory_open_directory(
     struct VaFsDirectoryHandle** handleOut)
 {
     struct VaFsDirectoryEntry* entry;
-    char                       token[128];
+    char                       token[VAFS_NAME_MAX + 1];
     VAFS_DEBUG("vafs_directory_open_directory(handle=%p, name=%s, handleOut=%p)\n", handle, name, handleOut);
 
     if (handle == NULL || name == NULL || handleOut == NULL) {
@@ -1044,7 +978,7 @@ int vafs_directory_open_directory(
     }
 
     // do this to verify the incoming name
-    if (!__get_path_token(name, token, sizeof(token))) {
+    if (!__vafs_pathtoken(name, token, sizeof(token))) {
         errno = ENOENT;
         return -1;
     }
@@ -1075,7 +1009,7 @@ int vafs_directory_create_directory(
     struct VaFsDirectoryWriter* writer;
     int                         status;
     struct VaFsDirectoryEntry*  entry;
-    char                        token[128];
+    char                        token[VAFS_NAME_MAX + 1];
     VAFS_DEBUG("vafs_directory_create_directory(handle=%p, name=%s, handleOut=%p)\n", handle, name, handleOut);
 
     if (handle == NULL || name == NULL || handleOut == NULL) {
@@ -1089,7 +1023,7 @@ int vafs_directory_create_directory(
     }
 
     // do this to verify the incoming name
-    if (!__get_path_token(name, token, sizeof(token))) {
+    if (!__vafs_pathtoken(name, token, sizeof(token))) {
         errno = ENOENT;
         return -1;
     }
@@ -1118,7 +1052,7 @@ int vafs_directory_open_file(
     struct VaFsFileHandle**     handleOut)
 {
     struct VaFsDirectoryEntry* entry;
-    char                       token[128];
+    char                       token[VAFS_NAME_MAX + 1];
     VAFS_DEBUG("vafs_directory_open_file(name=%s)\n", name);
 
     if (handle == NULL || name == NULL || handleOut == NULL) {
@@ -1133,7 +1067,7 @@ int vafs_directory_open_file(
     }
 
     // do this to verify the incoming name
-    if (!__get_path_token(name, token, sizeof(token))) {
+    if (!__vafs_pathtoken(name, token, sizeof(token))) {
         errno = ENOENT;
         return -1;
     }
@@ -1163,7 +1097,7 @@ int vafs_directory_create_file(
     struct VaFsDirectoryWriter* writer;
     int                         status;
     struct VaFsDirectoryEntry*  entry;
-    char                        token[128];
+    char                        token[VAFS_NAME_MAX + 1];
     VAFS_DEBUG("vafs_directory_create_file(name=%s)\n", name);
 
     if (handle == NULL || name == NULL || handleOut == NULL) {
@@ -1178,7 +1112,7 @@ int vafs_directory_create_file(
     }
 
     // do this to verify the incoming name
-    if (!__get_path_token(name, token, sizeof(token))) {
+    if (!__vafs_pathtoken(name, token, sizeof(token))) {
         errno = ENOENT;
         return -1;
     }
@@ -1207,7 +1141,7 @@ int vafs_directory_create_symlink(
     const char*                 target)
 {
     struct VaFsDirectoryEntry* entry;
-    char                       token[128];
+    char                       token[VAFS_NAME_MAX + 1];
     VAFS_DEBUG("vafs_directory_create_symlink(name=%s, target=%s)\n", name, target);
 
     if (handle == NULL || name == NULL || target == NULL) {
@@ -1221,7 +1155,7 @@ int vafs_directory_create_symlink(
     }
 
     // do this to verify the incoming name
-    if (!__get_path_token(name, token, sizeof(token))) {
+    if (!__vafs_pathtoken(name, token, sizeof(token))) {
         errno = ENOENT;
         return -1;
     }
@@ -1244,7 +1178,7 @@ int vafs_directory_read_symlink(
     const char**                targetOut)
 {
     struct VaFsDirectoryEntry* entry;
-    char                       token[128];
+    char                       token[VAFS_NAME_MAX + 1];
     VAFS_DEBUG("vafs_directory_read_symlink(name=%s)\n", name);
 
     if (handle == NULL || name == NULL || targetOut == NULL) {
@@ -1258,7 +1192,7 @@ int vafs_directory_read_symlink(
     }
 
     // do this to verify the incoming name
-    if (!__get_path_token(name, token, sizeof(token))) {
+    if (!__vafs_pathtoken(name, token, sizeof(token))) {
         errno = ENOENT;
         return -1;
     }

@@ -22,7 +22,7 @@
 #ifndef __VAFS_PRIVATE_H__
 #define __VAFS_PRIVATE_H__
 
-#include <vafs_platform.h>
+#include <platform.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <vafs.h>
@@ -391,5 +391,40 @@ extern void vafs_log_message(
     enum VaFsLogLevel level,
     const char*       format,
     ...);
+
+// Utility functions
+struct VaFsDirectoryEntry;
+
+enum VaFsDirectoryState {
+    VaFsDirectoryState_Open,
+    VaFsDirectoryState_Loaded
+};
+
+struct VaFsDirectoryReader {
+    struct VaFsDirectory       Base;
+    enum VaFsDirectoryState    State;
+    struct VaFsDirectoryEntry* Entries;
+};
+
+struct VaFsDirectoryWriter {
+    struct VaFsDirectory       Base;
+    struct VaFsDirectoryEntry* Entries;
+};
+
+struct VaFsDirectoryEntry {
+    int Type;
+    union {
+        struct VaFsFile*      File;
+        struct VaFsDirectory* Directory;
+        struct VaFsSymlink*   Symlink;
+    };
+    struct VaFsDirectoryEntry* Link;
+};
+
+extern int __vafs_is_root_path(const char* path);
+extern int __vafs_pathtoken(const char* path, char* token, size_t tokenSize);
+extern int __vafs_resolve_symlink(char* buffer, size_t bufferLength, const char* baseStart, size_t baseLength, const char* symlinkTarget);
+extern struct VaFsDirectoryEntry* __vafs_directory_entries(struct VaFsDirectory* directory);
+extern const char* __vafs_directory_entry_name(struct VaFsDirectoryEntry* entry);
 
 #endif // __VAFS_PRIVATE_H__
