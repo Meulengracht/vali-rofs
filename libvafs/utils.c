@@ -182,9 +182,9 @@ int vafs_path_stat(
         // find the name in the directory
         while (entries != NULL) {
             if (!strcmp(__vafs_directory_entry_name(entries), token)) {
-                if (entries->Type == VA_FS_DESCRIPTOR_TYPE_FILE) {
+                if (entries->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
                     if (remainingPath[0] == '\0') {
-                        stat->mode = S_IFREG | entries->Directory->Descriptor.Permissions;
+                        stat->mode = S_IFDIR | entries->Directory->Descriptor.Permissions;
                         stat->size = 0;
                         return 0;
                     }
