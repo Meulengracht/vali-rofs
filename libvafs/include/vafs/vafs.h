@@ -31,6 +31,7 @@
 struct VaFs;
 struct VaFsDirectoryHandle;
 struct VaFsFileHandle;
+struct VaFsSymlinkHandle;
 
 struct VaFsGuid {
     uint32_t Data1;

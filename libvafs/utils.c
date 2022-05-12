@@ -154,6 +154,7 @@ int __vafs_resolve_symlink(
 int vafs_path_stat(
     struct VaFs*      vafs,
     const char*       path,
+    int               followLinks,
     struct vafs_stat* stat)
 {
     struct VaFsDirectoryEntry* entries;
@@ -194,6 +195,17 @@ int vafs_path_stat(
 
                     // otherwise fall-through and continue
                 } else if (entries->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
+                    if (!followLinks) {
+                        if (remainingPath[0] == '\0') {
+                            stat->mode = S_IFLNK | 0777;
+                            stat->size = strlen(entries->Symlink->Target);
+                            return 0;
+                        } else {
+                            errno = ENOTDIR;
+                            return -1;
+                        }
+                    }
+
                     char* pathBuffer = malloc(VAFS_PATH_MAX);
                     int   written;
                     int   status;
@@ -216,7 +228,7 @@ int vafs_path_stat(
                         return -1;
                     }
 
-                    status = vafs_path_stat(vafs, pathBuffer, stat);
+                    status = vafs_path_stat(vafs, pathBuffer, followLinks, stat);
                     free(pathBuffer);
                     return status;
                 } else if (entries->Type == VA_FS_DESCRIPTOR_TYPE_FILE) {
