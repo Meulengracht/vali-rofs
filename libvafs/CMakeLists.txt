@@ -11,6 +11,7 @@ add_library(vafs STATIC
     log.c
     stream.c
     streamdevice.c
+    symlink.c
     utils.c
     vafs.c
 )

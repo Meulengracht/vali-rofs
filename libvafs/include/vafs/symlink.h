@@ -19,30 +19,44 @@
  *   This filesystem is used to store the initrd of the kernel.
  */
 
-#ifndef __VAFS_STAT_H__
-#define __VAFS_STAT_H__
+#ifndef __VAFS_SYMLINK_H__
+#define __VAFS_SYMLINK_H__
 
 #include <vafs/vafs.h>
-#include <vafs/platform.h>
-
-struct vafs_stat {
-    uint32_t mode;
-    size_t   size;
-};
 
 /**
  * @brief 
  * 
  * @param vafs 
- * @param path
- * @param followLinks
- * @param stat 
+ * @param path 
+ * @param handleOut 
  * @return int 
  */
-extern int vafs_path_stat(
-    struct VaFs*      vafs,
-    const char*       path,
-    int               followLinks,
-    struct vafs_stat* stat);
+extern int vafs_symlink_open(
+    struct VaFs*               vafs,
+    const char*                path,
+    struct VaFsSymlinkHandle** handleOut);
 
-#endif //!__VAFS_STAT_H__
+/**
+ * @brief 
+ * 
+ * @param handle 
+ * @return int 
+ */
+extern int vafs_symlink_close(
+    struct VaFsSymlinkHandle* handle);
+
+/**
+ * @brief 
+ * 
+ * @param handle 
+ * @param buffer 
+ * @param size 
+ * @return int
+ */
+extern int vafs_symlink_target(
+    struct VaFsSymlinkHandle* handle,
+    void*                     buffer,
+    size_t                    size);
+
+#endif //!__VAFS_SYMLINK_H__
