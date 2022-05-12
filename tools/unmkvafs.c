@@ -63,7 +63,7 @@ int __symlink(const char* path, const char* target)
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define __mkdir(path, perms) mkdir(path, perms)
+#define __mkdir(path, perms) mkdir(path, (int)perms)
 
 int __symlink(const char* path, const char* target)
 {
@@ -213,8 +213,7 @@ static int __extract_directory(
             return status;
         }
 
-        // always create directories initially with 0777
-        if (!status && __mkdir(path, 0777)) {
+        if (!status && __mkdir(path, vafs_directory_permissions(directoryHandle))) {
             fprintf(stderr, "unmkvafs: unable to create directory %s\n", path);
             return -1;
         }

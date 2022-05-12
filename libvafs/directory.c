@@ -85,7 +85,9 @@ int vafs_directory_create_root(
 
     directory->Base.VaFs = vafs;
     directory->Base.Name = strdup("root");
-    __initialize_directory_descriptor(&directory->Base.Descriptor, 0777);
+
+    // rwxrwxr-x
+    __initialize_directory_descriptor(&directory->Base.Descriptor, 0775);
 
     *directoryOut = (struct VaFsDirectory*)directory;
     return 0;
