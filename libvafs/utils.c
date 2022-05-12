@@ -82,11 +82,11 @@ int __vafs_pathtoken(
 }
 
 int __vafs_resolve_symlink(
-    char*       buffer,
-    size_t      bufferLength,
-    const char* baseStart,
-    size_t      baseLength,
-    const char* symlinkTarget)
+        char*       buffer,
+        size_t      bufferLength,
+        const char* baseStart,
+        size_t      baseLength,
+        const char* symlinkTarget)
 {
     size_t i, j;
 
@@ -101,7 +101,7 @@ int __vafs_resolve_symlink(
         // skip double separators, this way we minimize the final path
         // and also make things neater.
         if (baseStart[i] == '/') {
-            if (j > 0 && buffer[j - 1] != '/') {
+            if (j == 0 || (j > 0 && buffer[j - 1] != '/')) {
                 buffer[j++] = '/';
             }
         } else {
@@ -110,7 +110,7 @@ int __vafs_resolve_symlink(
     }
 
     // now we resolve the final path by appending the symlink target,
-    // while canonicalizing the final path
+    // while canonicalization of the final path
     for (i = 0; i < strlen(symlinkTarget) && j < bufferLength; i++) {
         if (symlinkTarget[i] == '/') {
             if (j > 0 && buffer[j - 1] != '/') {
@@ -136,6 +136,8 @@ int __vafs_resolve_symlink(
                     }
                 }
                 continue;
+            } else {
+                buffer[j++] = symlinkTarget[i];
             }
         } else {
             buffer[j++] = symlinkTarget[i];
@@ -173,7 +175,8 @@ int vafs_path_stat(
 
     entries = __vafs_directory_entries(vafs->RootDirectory);
     do {
-        int charsConsumed = __vafs_pathtoken(remainingPath, token, sizeof(token));
+        const char* previousPath = remainingPath;
+        int         charsConsumed = __vafs_pathtoken(remainingPath, token, sizeof(token));
         if (!charsConsumed) {
             break;
         }
@@ -200,7 +203,13 @@ int vafs_path_stat(
                         return -1;
                     }
 
-                    written = __vafs_resolve_symlink(pathBuffer, VAFS_PATH_MAX, path, remainingPath - path, entries->Symlink->Target);
+                    written = __vafs_resolve_symlink(
+                            pathBuffer,
+                            VAFS_PATH_MAX,
+                            path,
+                            previousPath - path,
+                            entries->Symlink->Target
+                    );
                     if (written < 0) {
                         VAFS_ERROR("vafs_directory_open: failed to resolve symlink %s\n", entries->Symlink->Target);
                         free(pathBuffer);
