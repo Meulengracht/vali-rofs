@@ -64,6 +64,9 @@ static inline int mtx_unlock(mtx_t* mtx) {
 #if !defined S_ISDIR
     #define S_ISDIR(m) (((m) & _S_IFDIR) == _S_IFDIR)
 #endif
+#elif defined(VALI)
+#include <io.h>
+#include <threads.h>
 #else
 #include <sys/stat.h>
 #include <threads.h>
