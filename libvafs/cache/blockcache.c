@@ -205,7 +205,7 @@ int __cache_cmp(const void* lh, const void* rh)
 {
     const struct vafs_block* lblock = lh;
     const struct vafs_block* rblock = rh;
-    return lblock->index == rblock->index;
+    return lblock->index == rblock->index ? 0 : -1;
 }
 
 void __cache_enum(int index, const void* element, void* userContext)
