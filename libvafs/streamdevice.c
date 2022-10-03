@@ -304,31 +304,6 @@ int vafs_streamdevice_read(
     return device->Operations.read(device->UserData, buffer, length, bytesRead);
 }
 
-static int __grow_buffer(
-    struct VaFsStreamDevice* device,
-    size_t                   length)
-{
-    void*  buffer;
-    size_t newSize;
-    
-    newSize = (size_t)device->Memory.Capacity + length;
-    buffer = realloc(device->Memory.Buffer, newSize);
-    if (!buffer) {
-        errno = ENOMEM;
-        return -1;
-    }
-
-    device->Memory.Buffer   = buffer;
-    device->Memory.Capacity = (long)newSize;
-    return 0;
-}
-
-static inline int __memsize_available(
-    struct VaFsStreamDevice* device)
-{
-    return device->Memory.Capacity - device->Memory.Position;
-}
-
 int vafs_streamdevice_write(
     struct VaFsStreamDevice* device,
     void*                    buffer,
@@ -355,6 +330,7 @@ int vafs_streamdevice_copy(
     char*  transferBuffer;
     int    status = 0;
     size_t bytesRead;
+    VAFS_DEBUG("vafs_streamdevice_copy()\n");
 
     if (destination == NULL || source == NULL) {
         errno = EINVAL;
@@ -374,6 +350,7 @@ int vafs_streamdevice_copy(
     // seek source back to start
     status = source->Operations.seek(source->UserData, 0, SEEK_SET);
     if (status) {
+        VAFS_ERROR("vafs_streamdevice_copy failed to seek source back to beginning\n");
         return -1;
     }
 
@@ -383,11 +360,13 @@ int vafs_streamdevice_copy(
         size_t bytesWritten;
 
         status = source->Operations.read(source->UserData, transferBuffer, __TRANSFER_BUFFER_SIZE, &bytesRead);
+        VAFS_DEBUG("vafs_streamdevice_copy read %zu bytes\n", bytesRead);
         if (status || bytesRead == 0) {
             break;
         }
 
         status = destination->Operations.write(destination->UserData, transferBuffer, bytesRead, &bytesWritten);
+        VAFS_DEBUG("vafs_streamdevice_copy wrote %zu bytes\n", bytesWritten);
         if (status) {
             break;
         }
@@ -459,12 +438,38 @@ static int __file_write(void* data, const void* buffer, size_t length, size_t* b
     if (*bytesWritten != length) {
         return -1;
     }
+    return 0;
 }
 
 static int __file_close(void* data)
 {
     struct VaFsStreamDevice* device = data;
     return fclose(device->File);
+}
+
+static int __grow_buffer(
+    struct VaFsStreamDevice* device,
+    size_t                   length)
+{
+    void*  buffer;
+    size_t newSize;
+    
+    newSize = (size_t)device->Memory.Capacity + length;
+    buffer = realloc(device->Memory.Buffer, newSize);
+    if (!buffer) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    device->Memory.Buffer   = buffer;
+    device->Memory.Capacity = (long)newSize;
+    return 0;
+}
+
+static inline int __memsize_available(
+    struct VaFsStreamDevice* device)
+{
+    return device->Memory.Capacity - device->Memory.Position;
 }
 
 static long __memory_seek(void* data, long offset, int whence)
@@ -527,4 +532,5 @@ static int __memory_close(void* data)
     if (device->Memory.Owned) {
         free(device->Memory.Buffer);
     }
+    return 0;
 }
