@@ -148,9 +148,49 @@ extern void vafs_config_set_block_size(struct VaFsConfiguration* configuration, 
  * properly disposed after the call to vafs_close.
  */
 struct VaFsOperations {
-    long (*seek)(void*, long offset, int whence);
-    int  (*read)(void*, void*, size_t, size_t*);
-    int  (*write)(void*, const void*, size_t, size_t*);
+    /**
+     * @brief Seek to a specific position on the storage. If offset is 0
+     * and whence is SEEK_CUR, then it will return the current position.
+     * The seek operation is required, and must be provided by the implementation.
+     * @param userData The user-supplied pointer that was given to vafs_open_ops
+     * @param offset   The offset, described by <whence> on the storage.
+     * @param whence   The origion of the offset.
+     * @return The position on the storage after the seek.
+     */
+    long (*seek)(void* userData, long offset, int whence);
+
+    /**
+     * @brief Read bytes from the storage at the current position. The position will
+     * advance by <bytesRead> if the operation returns 0.
+     * The read function is required, and must be provided by the implementation.
+     * @param userData  The user-supplied pointer that was given to vafs_open_ops
+     * @param buffer    The buffer that will be used to store the data.
+     * @param length    The number of bytes which will be read from the storage.
+     * @param bytesRead The actual number of bytes read, up to max <length>.
+     * @return int 0 on success, -1 on failure. See errno for more details.
+     */
+    int (*read)(void* userData, void*, size_t, size_t*);
+
+    /**
+     * @brief Write bytes to the storage at the current position. The position will
+     * advance by <bytesWritten> if the operation returns 0.
+     * The write function is only required if the image is opened by a *_create function.
+     * @param userData     The user-supplied pointer that was given to vafs_open_ops
+     * @param buffer       The buffer which contains the data to be written.
+     * @param length       The number of bytes which will be written to the storage.
+     * @param bytesWritten The actual number of bytes written, up to max <length>.
+     * @return int 0 on success, -1 on failure. See errno for more details.
+     */
+    int (*write)(void* userData, const void*, size_t, size_t*);
+
+    /**
+     * @brief When closing the stream, if this function was provided it will be 
+     * called to indicate the vafs library is done with the underlying storage.
+     * The close function is optional, and can be set to NULL.
+     * @param userData The user-supplied pointer that was given to vafs_open_ops
+     * @return int 0 on success, -1 on failure. See errno for more details.
+     */
+    int (*close)(void* userData);
 };
 
 /**
