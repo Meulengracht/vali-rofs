@@ -490,6 +490,23 @@ int vafs_open_memory(
     return __new_vafs(VaFsMode_Read, imageDevice, 0, vafsOut);
 }
 
+int vafs_open_ops(
+        struct VaFsOperations* operations,
+        void*                  userData,
+        struct VaFs**          vafsOut)
+{
+    struct VaFsStreamDevice* imageDevice;
+    int                      status;
+    VAFS_INFO("vafs_open_ops: parsing image buffer\n");
+
+    status = vafs_streamdevice_open_ops(operations, userData, &imageDevice);
+    if (status) {
+        VAFS_ERROR("vafs_open_ops: failed to parse image buffer: %i\n", status);
+        return status;
+    }
+    return __new_vafs(VaFsMode_Read, imageDevice, 0, vafsOut);
+}
+
 static int __write_vafs_features(
     struct VaFs* vafs)
 {

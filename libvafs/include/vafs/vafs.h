@@ -140,6 +140,20 @@ extern void vafs_config_set_architecture(struct VaFsConfiguration* configuration
 extern void vafs_config_set_block_size(struct VaFsConfiguration* configuration, uint32_t blockSize);
 
 /**
+ * @brief Allows custom backends as vafs images. The default API for vafs only supports
+ * the standard C file, and memory backed images. To allow scenario's that differ from this
+ * we allow the user to supply it's own seek/read/write which can then be used in conjunction
+ * with vafs_create_ops/vafs_open_ops. It is the users responsibility to make sure that the implementation
+ * of these functions are properly initialized before calling vafs_create_ops/vafs_open_ops, and
+ * properly disposed after the call to vafs_close.
+ */
+struct VaFsOperations {
+    long (*seek)(void*, long offset, int whence);
+    int  (*read)(void*, void*, size_t, size_t*);
+    int  (*write)(void*, const void*, size_t, size_t*);
+};
+
+/**
  * @brief Control the log level of the library. This is useful for debugging. The default
  * log level is set to VaFsLogLevel_Warning.
  * 
@@ -188,6 +202,22 @@ extern int vafs_open_memory(
         const void*   buffer,
         size_t        size,
         struct VaFs** vafsOut);
+
+/**
+ * @brief Provides the user with the ability to supply their own underlying storage
+ * implementation to be used, like a raw device, or a loop-back interface. This could
+ * also be any other file implementation. The caller is responsible for cleaning up after
+ * the call to vafs_close.
+ * 
+ * @param operations A pointer to the function table providing minimum seek+read.
+ * @param userData   A pointer to user-supplied data which will be passed to operations.
+ * @param vafsOut    A pointer where the handle of the filesystem instance will be stored.
+ * @return int 0 on success, -1 on failure. See errno for more details
+ */
+extern int vafs_open_ops(
+        struct VaFsOperations* operations,
+        void*                  userData,
+        struct VaFs**          vafsOut);
 
 /**
  * @brief Closes the filesystem handle. If the image was just created, the data streams are kept in 
