@@ -169,6 +169,12 @@ extern int vafs_streamdevice_open_memory(
     size_t                    length,
     struct VaFsStreamDevice** deviceOut);
 
+
+extern int vafs_streamdevice_open_ops(
+    struct VaFsOperations*    operations,
+    void*                     userData,
+    struct VaFsStreamDevice** deviceOut);
+
 extern int vafs_streamdevice_create_file(
     const char*               path,
     struct VaFsStreamDevice** deviceOut);
