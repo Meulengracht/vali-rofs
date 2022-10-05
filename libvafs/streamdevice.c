@@ -58,10 +58,16 @@ struct VaFsStreamDevice {
 
     union {
         struct {
-            char*  Buffer;
-            long   Capacity;
-            long   Position;
-            int    Owned;
+            char* Buffer;
+            // Current byte capacity of Buffer
+            long Capacity;
+            // The number of valid bytes in Buffer
+            long Size;
+            // The current position into buffer. This can not
+            // be beyond Size.
+            long Position;
+            // Whether the streamdevice owns Buffer.
+            int Owned;
         } Memory;
         FILE* File;
     };
@@ -103,6 +109,7 @@ static int __new_streamdevice(
         errno = ENOMEM;
         return -1;
     }
+
     memset(device, 0, sizeof(struct VaFsStreamDevice));
     memcpy(&device->Operations, operations, sizeof(struct VaFsOperations));
 
@@ -166,6 +173,7 @@ int vafs_streamdevice_open_memory(
     device->UserData        = device;
     device->Memory.Buffer   = (void*)buffer;
     device->Memory.Capacity = (long)length;
+    device->Memory.Size     = (long)length;
     device->Memory.Position = 0;
     device->Memory.Owned    = 0;
     
@@ -254,6 +262,7 @@ int vafs_streamdevice_create_memory(
     device->UserData = device;
     device->Memory.Buffer = buffer;
     device->Memory.Capacity = (long)blockSize;
+    device->Memory.Size = 0;
     device->Memory.Position = 0;
     device->Memory.Owned = 1;
     
@@ -367,7 +376,7 @@ int vafs_streamdevice_copy(
 
         status = destination->Operations.write(destination->UserData, transferBuffer, bytesRead, &bytesWritten);
         VAFS_DEBUG("vafs_streamdevice_copy wrote %zu bytes\n", bytesWritten);
-        if (status) {
+        if (status || bytesWritten != bytesRead) {
             break;
         }
     } while (1);
@@ -488,20 +497,20 @@ static long __memory_seek(void* data, long offset, int whence)
             device->Memory.Position += offset;
             break;
         case SEEK_END:
-            device->Memory.Position = device->Memory.Capacity + offset;
+            device->Memory.Position = device->Memory.Size + offset;
             break;
         default:
             errno = EINVAL;
             return -1;
     }
-    device->Memory.Position = MIN(MAX(device->Memory.Position, 0), device->Memory.Capacity);
+    device->Memory.Position = MIN(MAX(device->Memory.Position, 0), device->Memory.Size);
     return device->Memory.Position;
 }
 
 static int __memory_read(void* data, void* buffer, size_t length, size_t* bytesRead)
 {
     struct VaFsStreamDevice* device = data;
-    size_t byteCount = MIN(length, (size_t)(device->Memory.Capacity - device->Memory.Position));
+    size_t byteCount = MIN(length, (size_t)(device->Memory.Size - device->Memory.Position));
     memcpy(buffer, device->Memory.Buffer + device->Memory.Position, byteCount);
     device->Memory.Position += (long)byteCount;
     *bytesRead = byteCount;
@@ -521,6 +530,12 @@ static int __memory_write(void* data, const void* buffer, size_t length, size_t*
 
     memcpy(device->Memory.Buffer + device->Memory.Position, buffer, length);
     device->Memory.Position += (long)length;
+
+    // Keep track of the number of valid bytes in the memory stream.
+    if (device->Memory.Position > device->Memory.Size) {
+        device->Memory.Size = device->Memory.Position;
+    }
+
     *bytesWritten = length;
     return 0;
 }
