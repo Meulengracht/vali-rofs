@@ -399,6 +399,7 @@ int vafs_directory_open_root(
     reader->Base.Descriptor.Base.Type   = VA_FS_DESCRIPTOR_TYPE_DIRECTORY;
     reader->Base.Descriptor.Descriptor.Index = position->Index;
     reader->Base.Descriptor.Descriptor.Offset = position->Offset;
+    reader->Base.Descriptor.Permissions = 0775;
 
     *directoryOut = (struct VaFsDirectory*)reader;
     return 0;
@@ -748,7 +749,8 @@ int vafs_directory_read(
         errno = ENOENT;
         return -1;
     }
-    VAFS_DEBUG("vafs_directory_read: found entry %s\n", entry->File->Name);
+    VAFS_DEBUG("vafs_directory_read: found entry %s\n",
+        __vafs_directory_entry_name(entry));
 
     // we found an entry, move to next
     handle->Index++;
@@ -947,15 +949,15 @@ static struct VaFsDirectoryEntry* __find_entry(
     struct VaFsDirectory* directory,
     const char*           token)
 {
-    struct VaFsDirectoryEntry* entries;
+    struct VaFsDirectoryEntry* i;
 
     // find the name in the directory
-    entries = __vafs_directory_entries(directory);
-    while (entries != NULL) {
-        if (!strcmp(__vafs_directory_entry_name(entries), token)) {
-            return entries;
+    i = __vafs_directory_entries(directory);
+    while (i != NULL) {
+        if (!strcmp(__vafs_directory_entry_name(i), token)) {
+            return i;
         }
-        entries = entries->Link;
+        i = i->Link;
     }
     return NULL;
 }
