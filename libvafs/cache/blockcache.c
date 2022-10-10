@@ -174,7 +174,7 @@ int vafs_cache_get(struct VaFsBlockCache* cache, uint32_t index, void** bufferOu
 static void __eject_lowuse(struct VaFsBlockCache* cache)
 {
     struct cache_enum_context context = { .index = UINT_MAX, .uses = INT_MAX };
-    struct __block_entry*        block;
+    struct __block_entry*     block;
 
     if (cache->cache.element_count < cache->max_blocks) {
         return;

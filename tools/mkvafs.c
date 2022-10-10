@@ -901,7 +901,16 @@ int main(int argc, char *argv[])
     if (!progressContext.disabled) {
         printf("\n");
     }
+
+    status = vafs_directory_close(directoryHandle);
+    if (status) {
+        fprintf(stderr, "mkvafs: failed to close root directory handle\n");
+    }
+
     status = vafs_close(vafsHandle);
+    if (status) {
+        fprintf(stderr, "mkvafs: failed to finalize image\n");
+    }
 
 #if defined(_WIN32) || defined(_WIN64)
     __win32_cleanup();

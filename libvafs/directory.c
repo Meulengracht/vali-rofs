@@ -76,7 +76,7 @@ int vafs_directory_create_root(
         return -1;
     }
     
-    directory = (struct VaFsDirectoryWriter*)malloc(sizeof(struct VaFsDirectoryWriter));
+    directory = malloc(sizeof(struct VaFsDirectoryWriter));
     if (!directory) {
         errno = ENOMEM;
         return -1;
@@ -91,6 +91,63 @@ int vafs_directory_create_root(
 
     *directoryOut = (struct VaFsDirectory*)directory;
     return 0;
+}
+
+static void __directory_entry_destroy(struct VaFsDirectoryEntry* entry)
+{
+    switch (entry->Type) {
+        case VaFsEntryType_Directory:
+            vafs_directory_destroy(entry->Directory);
+            break;
+        case VaFsEntryType_File:
+            vafs_file_destroy(entry->File);
+            break;
+        case VaFsEntryType_Symlink:
+            vafs_symlink_destroy(entry->Symlink);
+            break;
+    }
+    free(entry);
+}
+
+static void __cleanup_directory_entries(struct VaFsDirectoryEntry* entries)
+{
+    struct VaFsDirectoryEntry* i = entries;
+    while (i) {
+        struct VaFsDirectoryEntry* next = i->Link;
+        __directory_entry_destroy(i);
+        i = next;
+    }
+}
+
+static void __directory_reader_destroy(struct VaFsDirectoryReader* reader)
+{
+    __cleanup_directory_entries(reader->Entries);
+}
+
+static void __directory_writer_destroy(struct VaFsDirectoryWriter* writer)
+{
+    __cleanup_directory_entries(writer->Entries);
+}
+
+void vafs_directory_destroy(struct VaFsDirectory* directory)
+{
+    if (directory == NULL) {
+        return;
+    }
+
+    // A directory instance can either be a reader or a writer. They
+    // need different kinds of cleanup, but only one can be instanced
+    // at the time. When reading images, we only use directory readers, and
+    // when we write, we only use directory writers
+    if (directory->VaFs->Mode == VaFsMode_Read) {
+        __directory_reader_destroy((struct VaFsDirectoryReader*)directory);
+    } else if (directory->VaFs->Mode == VaFsMode_Write) {
+        __directory_writer_destroy((struct VaFsDirectoryWriter*)directory);
+    }
+
+    // free common resources
+    free((void*)directory->Name);
+    free(directory);
 }
 
 static int __get_descriptor_size(
@@ -443,9 +500,8 @@ static struct VaFsDirectoryHandle* __create_handle(
 {
     struct VaFsDirectoryHandle* handle;
 
-    handle = (struct VaFsDirectoryHandle*)malloc(sizeof(struct VaFsDirectoryHandle));
+    handle = malloc(sizeof(struct VaFsDirectoryHandle));
     if (!handle) {
-        errno = ENOMEM;
         return NULL;
     }
 

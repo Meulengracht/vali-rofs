@@ -360,6 +360,14 @@ extern int vafs_directory_create_root(
  * @brief 
  * 
  * @param directory 
+ */
+extern void vafs_directory_destroy(
+    struct VaFsDirectory* directory);
+
+/**
+ * @brief 
+ * 
+ * @param directory 
  * @return int 
  */
 extern int vafs_directory_flush(
@@ -385,6 +393,22 @@ extern int vafs_directory_open_root(
  */
 extern struct VaFsFileHandle* vafs_file_create_handle(
     struct VaFsFile* fileEntry);
+
+/**
+ * @brief 
+ * 
+ * @param file 
+ */
+extern void vafs_file_destroy(
+    struct VaFsFile* file);
+
+/**
+ * @brief 
+ * 
+ * @param symlink 
+ */
+extern void vafs_symlink_destroy(
+    struct VaFsSymlink* symlink);
 
 /**
  * @brief 

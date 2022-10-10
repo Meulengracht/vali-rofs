@@ -232,14 +232,12 @@ void* vafs_hashtable_remove(hashtable_t* hashtable, const void* key)
 
 void vafs_hashtable_enumerate(hashtable_t* hashtable, hashtable_enumfn enumFunction, void* context)
 {
-    size_t i;
-
     if (!hashtable || !enumFunction) {
         errno = EINVAL;
         return;
     }
 
-    for (i = 0; i < hashtable->capacity; i++) {
+    for (size_t i = 0; i < hashtable->capacity; i++) {
         struct hashtable_element* current = GET_ELEMENT(hashtable, i);
         if (current->probeCount) {
             enumFunction((int)i, &current->payload[0], context);
