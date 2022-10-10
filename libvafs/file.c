@@ -138,6 +138,17 @@ struct VaFsFileHandle* vafs_file_create_handle(
     return handle;
 }
 
+void vafs_file_destroy(
+    struct VaFsFile* file)
+{
+    if (file == NULL) {
+        return;
+    }
+
+    free((void*)file->Name);
+    free(file);
+}
+
 int vafs_file_close(
     struct VaFsFileHandle* handle)
 {

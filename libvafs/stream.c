@@ -516,6 +516,7 @@ static int __add_block_header(
             errno = ENOMEM;
             return -1;
         }
+        memset(newHeaders, 0, (newCapacity - stream->BlockHeaders.Capacity) * sizeof(struct BlockHeader));
 
         stream->BlockHeaders.Headers  = newHeaders;
         stream->BlockHeaders.Capacity = newCapacity;

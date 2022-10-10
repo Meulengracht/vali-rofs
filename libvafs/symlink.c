@@ -106,6 +106,18 @@ int vafs_symlink_open(
     return -1;
 }
 
+void vafs_symlink_destroy(
+    struct VaFsSymlink* symlink)
+{
+    if (symlink == NULL) {
+        return;
+    }
+
+    free((void*)symlink->Name);
+    free((void*)symlink->Target);
+    free(symlink);
+}
+
 int vafs_symlink_close(
         struct VaFsSymlinkHandle* handle)
 {

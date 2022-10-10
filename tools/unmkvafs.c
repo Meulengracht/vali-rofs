@@ -326,10 +326,11 @@ static int __handle_overview(struct VaFs* vafsHandle, struct progress_context* p
 
 int main(int argc, char *argv[])
 {
-    struct VaFsDirectoryHandle* directoryHandle;
+    struct VaFsDirectoryHandle* directoryHandle = NULL;
     struct VaFs*                vafsHandle;
     int                         status;
     struct progress_context     progressContext = { 0 };
+    int                         exitCode = 0;
 
     char* imagePath = NULL;
     char* destinationPath = "vafs-root";
@@ -365,35 +366,45 @@ int main(int argc, char *argv[])
 
     status = __handle_overview(vafsHandle, &progressContext);
     if (status) {
-        vafs_close(vafsHandle);
         fprintf(stderr, "unmkvafs: failed to handle image overview\n");
-        return -1;
+        goto error;
     }
 
     status = __handle_filter(vafsHandle);
     if (status) {
-        vafs_close(vafsHandle);
         fprintf(stderr, "unmkvafs: failed to handle image filter\n");
-        return -1;
+        goto error;
     }
 
     status = vafs_directory_open(vafsHandle, "/", &directoryHandle);
     if (status) {
-        vafs_close(vafsHandle);
         fprintf(stderr, "unmkvafs: cannot open root directory: /\n");
-        return -1;
+        goto error;
     }
 
     status = __extract_directory(&progressContext, directoryHandle, destinationPath, destinationPath);
     if (status != 0) {
-        vafs_close(vafsHandle);
         fprintf(stderr, "unmkvafs: unable to extract to directory %s\n", destinationPath);
-        return -1;
+        goto error;
     }
 
     if (!progressContext.disabled) {
         printf("\n");
     }
 
-    return vafs_close(vafsHandle);
+error:
+    exitCode = -1;
+
+exit:
+    if (directoryHandle) {
+        status = vafs_directory_close(directoryHandle);
+        if (status) {
+            fprintf(stderr, "unmkvafs: failed to close root directory handle\n");
+        }
+    }
+    status = vafs_close(vafsHandle);
+    if (status) {
+        fprintf(stderr, "unmkvafs: failed to close image handle\n");
+    }
+    return exitCode;
 }

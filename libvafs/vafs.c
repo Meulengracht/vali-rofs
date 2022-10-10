@@ -670,6 +670,9 @@ static void vafs_destroy(
         free(vafs->Features[i]);
     }
     free(vafs->Features);
+
+    // cleanup directory instances
+    vafs_directory_destroy(vafs->RootDirectory);
     
     // cleanup the base instance
     free(vafs);
