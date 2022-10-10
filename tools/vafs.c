@@ -513,7 +513,7 @@ int main(int argc, char *argv[])
     }
 
 run_main:
-	status = fuse_main(argc, argv, &operations, vafs);
+	status = fuse_main(args.argc, args.argv, &operations, vafs);
     if (vafs != NULL) {
         vafs_close(vafs);
     }
