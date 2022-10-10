@@ -66,7 +66,6 @@ int vafs_hashtable_construct(hashtable_t* hashtable, size_t requestCapacity, siz
 
     elementStorage = malloc(initialCapacity * totalElementSize);
     if (!elementStorage) {
-        errno = ENOMEM;
         return -1;
     }
     memset(elementStorage, 0, initialCapacity * totalElementSize);
@@ -74,7 +73,6 @@ int vafs_hashtable_construct(hashtable_t* hashtable, size_t requestCapacity, siz
     swapElement = malloc(totalElementSize);
     if (!swapElement) {
         free(elementStorage);
-        errno = ENOMEM;
         return -1;
     }
 
@@ -118,7 +116,6 @@ void* vafs_hashtable_set(hashtable_t* hashtable, const void* element)
 
     // Only resize on entry - that way we avoid any unneccessary resizing
     if (SHOULD_GROW(hashtable) && hashtable_resize(hashtable, hashtable->capacity << 1)) {
-        errno = ENOMEM;
         return NULL;
     }
 
@@ -136,8 +133,7 @@ void* vafs_hashtable_set(hashtable_t* hashtable, const void* element)
             memcpy(current, iterElement, hashtable->element_size);
             hashtable->element_count++;
             return NULL;
-        }
-        else {
+        } else {
             // If the slot is taken, we either replace it or we move fit in between
             // Just because something shares hash these is no guarantee that it's an element we want
             // to replace - instead let the user decide. Another strategy here is to use double hashing
@@ -206,7 +202,6 @@ void* vafs_hashtable_remove(hashtable_t* hashtable, const void* key)
 
     // Only resize on entry to avoid any unncessary resizes
     if (SHOULD_SHRINK(hashtable) && hashtable_resize(hashtable, hashtable->capacity >> 1)) {
-        errno = ENOMEM;
         return NULL;
     }
 
@@ -252,13 +247,14 @@ static void vafs_hashtable_remove_and_bump(hashtable_t* hashtable, struct hashta
     // Remove is a little bit more extensive, we have to bump up all elements that
     // share the hash
     memcpy(hashtable->swap, element, hashtable->element_size);
-    element->probeCount = 0;
 
     index = (index + 1) & (hashtable->capacity - 1);
     while (1) {
         struct hashtable_element* current = GET_ELEMENT(hashtable, index);
         if (current->probeCount <= 1) {
-            // this element is the first in a new chain or a free element
+            // this element is the first in a new chain or a free element.
+            // we still need to reset the last entry to 0 in proble count
+            previous->probeCount = 0;
             break;
         }
         
@@ -274,11 +270,23 @@ static void vafs_hashtable_remove_and_bump(hashtable_t* hashtable, struct hashta
     hashtable->element_count--;
 }
 
+static void __hashtable_clone(hashtable_t* dst, hashtable_t* src, void* elements, size_t capacity)
+{
+    dst->capacity      = capacity;
+    dst->element_count = 0;
+    dst->grow_count    = (capacity * HASHTABLE_LOADFACTOR_GROW) / 100;
+    dst->shrink_count  = (capacity * HASHTABLE_LOADFACTOR_SHRINK) / 100;
+    dst->element_size  = src->element_size;
+    dst->elements      = elements;
+    dst->swap          = src->swap;
+    dst->hash          = src->hash;
+    dst->cmp           = src->cmp;
+}
+
 static int hashtable_resize(hashtable_t* hashtable, size_t newCapacity)
 {
-    size_t updatedIndex;
-    void*  resizedStorage;
-    size_t i;
+    hashtable_t temporaryTable;
+    void*       resizedStorage;
 
     // potentially there can be a too big resize - but practically very unlikely...
     if (newCapacity < HASHTABLE_MINIMUM_CAPACITY) {
@@ -287,45 +295,31 @@ static int hashtable_resize(hashtable_t* hashtable, size_t newCapacity)
 
     resizedStorage = malloc(newCapacity * hashtable->element_size);
     if (!resizedStorage) {
-        errno = ENOMEM;
         return -1;
     }
+    memset(resizedStorage, 0, newCapacity * hashtable->element_size);
+
+    // initialize the temporary hashtable we'll use to rebuild storage with
+    // the new storage and capacity
+    __hashtable_clone(&temporaryTable, hashtable, resizedStorage, newCapacity);
     
     // transfer objects and reset their probeCount
-    memset(resizedStorage, 0, newCapacity * hashtable->element_size);
-    for (i = 0; i < hashtable->capacity; i++) {
+    for (size_t i = 0; i < hashtable->capacity; i++) {
         struct hashtable_element* current = GET_ELEMENT(hashtable, i);
-        struct hashtable_element* newCurrent;
-        if (current->probeCount) {
-            current->probeCount = 1;
-            updatedIndex        = current->hash & (newCapacity - 1);
-            
-            while (1) {
-                newCurrent = GET_ELEMENT_ARRAY(hashtable, resizedStorage, updatedIndex);
-                if (!newCurrent->probeCount) {
-                    memcpy(newCurrent, current, hashtable->element_size);
-                    break;
-                }
-                else {
-                    if (newCurrent->probeCount < current->probeCount) {
-                        memcpy(hashtable->swap, newCurrent, hashtable->element_size);
-                        memcpy(newCurrent, current, hashtable->element_size);
-                        memcpy(current, hashtable->swap, hashtable->element_size);
-                    }
-                }
-
-                current->probeCount++;
-                updatedIndex = (updatedIndex + 1) & (newCapacity - 1);
-            }
+        if (!current->probeCount) {
+            continue;
         }
+        vafs_hashtable_set(&temporaryTable, &current->payload[0]);
     }
 
+    // free the original storage, we are done with that now
     free(hashtable->elements);
 
-    hashtable->elements      = resizedStorage;
-    hashtable->capacity      = newCapacity;
-    hashtable->grow_count    = (newCapacity * HASHTABLE_LOADFACTOR_GROW) / 100;
-    hashtable->shrink_count  = (newCapacity * HASHTABLE_LOADFACTOR_SHRINK) / 100;
-
+    // transfer the relevant data from the temporary hashtable to
+    // the original one, we are now done
+    hashtable->elements      = temporaryTable.elements;
+    hashtable->capacity      = temporaryTable.capacity;
+    hashtable->grow_count    = temporaryTable.grow_count;
+    hashtable->shrink_count  = temporaryTable.shrink_count;
     return 0;
 }
