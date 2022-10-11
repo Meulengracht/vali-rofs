@@ -387,13 +387,14 @@ static int __load_blockbuffer(
 
     position = vafs_streamdevice_seek(stream->Device, stream->DeviceOffset + blockHeader->Offset, SEEK_SET);
     if (position == -1) {
-        VAFS_ERROR("__load_blockbuffer: failed to seek to block: %i\n", blockIndex);
+        VAFS_ERROR("__load_blockbuffer: failed to seek to block: %u\n", blockIndex);
         free(blockData);
         return -1;
     }
 
     status = vafs_streamdevice_read(stream->Device, blockData, blockSize, &read);
     if (status) {
+        VAFS_ERROR("__load_blockbuffer: failed to read block: %u\n", blockIndex);
         return status;
     }
 
@@ -516,7 +517,11 @@ static int __add_block_header(
             errno = ENOMEM;
             return -1;
         }
-        memset(newHeaders, 0, (newCapacity - stream->BlockHeaders.Capacity) * sizeof(struct BlockHeader));
+        memset(
+            &newHeaders[stream->BlockHeaders.Capacity],
+            0, 
+            (newCapacity - stream->BlockHeaders.Capacity) * sizeof(struct BlockHeader)
+        );
 
         stream->BlockHeaders.Headers  = newHeaders;
         stream->BlockHeaders.Capacity = newCapacity;
