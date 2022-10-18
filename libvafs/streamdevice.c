@@ -134,7 +134,7 @@ int vafs_streamdevice_open_file(
         return -1;
     }
 
-    handle = fopen(path, "r");
+    handle = fopen(path, "rb");
     if (!handle) {
         return -1;
     }

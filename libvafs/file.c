@@ -234,18 +234,19 @@ size_t vafs_file_read(
 
     if (!handle) {
         errno = EINVAL;
-        return -1;
+        return 0;
     }
 
     // this is not valid when writing files
     if (handle->File->VaFs->Mode == VaFsMode_Write) {
         errno = ENOTSUP;
-        return -1;
+        return 0;
     }
 
     status = vafs_stream_lock(handle->File->VaFs->DataStream);
     if (status) {
-        return -1;
+        errno = EBUSY;
+        return 0;
     }
 
     status = vafs_stream_seek(
@@ -255,12 +256,11 @@ size_t vafs_file_read(
     );
     if (status) {
         vafs_stream_unlock(handle->File->VaFs->DataStream);
-        return -1;
+        return 0;
     }
 
-    read = vafs_stream_read(handle->File->VaFs->DataStream, buffer, size);
+    (void)vafs_stream_read(handle->File->VaFs->DataStream, buffer, size, &read);
     vafs_stream_unlock(handle->File->VaFs->DataStream);
-    
     return read;
 }
 

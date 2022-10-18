@@ -80,10 +80,14 @@ extern int vafs_file_seek(
 /**
  * @brief 
  * 
- * @param handle 
- * @param buffer 
- * @param size 
- * @return size_t 
+ * @param[In] handle
+ * @param[In] buffer
+ * @param[In] size
+ * @return size_t Returns the number of bytes read. If 0 is returned it's important to further see
+ *                the error code set in errno.
+ *                ENODATA - Not enough data to fill the buffer.
+ *                EBUSY - Failed to get a lock on the file.
+ *                EINVAL - Invalid parameters supplied.
  */
 extern size_t vafs_file_read(
     struct VaFsFileHandle* handle,
