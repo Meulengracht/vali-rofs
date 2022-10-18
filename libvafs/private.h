@@ -304,7 +304,8 @@ extern int vafs_stream_write(
 extern int vafs_stream_read(
     struct VaFsStream* stream,
     void*              buffer,
-    size_t             size);
+    size_t             size,
+    size_t*            bytesRead);
 
 /**
  * @brief 

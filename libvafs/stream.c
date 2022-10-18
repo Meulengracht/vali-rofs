@@ -623,7 +623,8 @@ int vafs_stream_write(
 int vafs_stream_read(
     struct VaFsStream* stream,
     void*              buffer,
-    size_t             size)
+    size_t             size,
+    size_t*            bytesRead)
 {
     uint8_t* data        = (uint8_t*)buffer;
     size_t   bytesToRead = size;
@@ -631,6 +632,7 @@ int vafs_stream_read(
     VAFS_DEBUG("vafs_stream_read(size=%u)\n", size);
 
     if (stream == NULL || buffer == NULL || size == 0) {
+        *bytesRead = 0;
         errno = EINVAL;
         return -1;
     }
@@ -654,6 +656,8 @@ int vafs_stream_read(
             VAFS_DEBUG("vafs_stream_read: loading block %u\n", stream->BlockBufferIndex);
             if (__load_blockbuffer(stream, stream->BlockBufferIndex + 1)) {
                 VAFS_ERROR("vafs_stream_read: failed to load block\n");
+                *bytesRead = (size - bytesToRead);
+                errno = ENODATA;
                 return -1;
             }
 
@@ -662,6 +666,7 @@ int vafs_stream_read(
         }
     }
 
+    *bytesRead = (size - bytesToRead);
     return 0;
 }
 

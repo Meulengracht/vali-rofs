@@ -174,6 +174,7 @@ static int __read_descriptor(
     char*             ext  = (char*)buffer + sizeof(VaFsDescriptor_t);
     int               status;
     int               size;
+    size_t            read;
 
     if (buffer == NULL || extendedBufferOut == NULL) {
         errno = EINVAL;
@@ -182,7 +183,8 @@ static int __read_descriptor(
 
     status = vafs_stream_read(
         reader->Base.VaFs->DescriptorStream, 
-        buffer, sizeof(VaFsDescriptor_t)
+        buffer, sizeof(VaFsDescriptor_t),
+        &read
     );
     if (status) {
         VAFS_ERROR("__read_descriptor: failed to read base descriptor: %i\n", status);
@@ -205,7 +207,8 @@ static int __read_descriptor(
 
         status = vafs_stream_read(
             reader->Base.VaFs->DescriptorStream, 
-            ext, size - sizeof(VaFsDescriptor_t)
+            ext, size - sizeof(VaFsDescriptor_t),
+            &read
         );
         if (status) {
             VAFS_ERROR("__read_descriptor: failed to read extension descriptor: %i\n", status);
@@ -226,7 +229,8 @@ static int __read_descriptor(
 
             status = vafs_stream_read(
                 reader->Base.VaFs->DescriptorStream, 
-                extendedBuffer, base->Length - size
+                extendedBuffer, base->Length - size,
+                &read
             );
             if (status) {
                 VAFS_ERROR("__read_descriptor: failed to read extended data: %i\n", status);
@@ -347,6 +351,7 @@ static int __load_directory(
 {
     VaFsDirectoryHeader_t header;
     int                   status;
+    size_t                read;
 
     VAFS_DEBUG("__load_directory(directory=%s)\n", reader->Base.Name);
 
@@ -379,7 +384,8 @@ static int __load_directory(
     // read the directory descriptor
     status = vafs_stream_read(
         reader->Base.VaFs->DescriptorStream,
-        &header, sizeof(VaFsDirectoryHeader_t)
+        &header, sizeof(VaFsDirectoryHeader_t),
+        &read
     );
     if (status) {
         VAFS_ERROR("__load_directory: failed to read directory header\n");
