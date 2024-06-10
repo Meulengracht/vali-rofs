@@ -17,7 +17,6 @@ typedef DWORD NTSTATUS;
 # define STATUS_NOT_IMPLEMENTED ((NTSTATUS) 0xC0000002L)
 #endif
 
-
 /* MinGW already has it, mingw-w64 does not. */
 #if defined(_MSC_VER) || defined(__MINGW64_VERSION_MAJOR)
 typedef struct _REPARSE_DATA_BUFFER {
@@ -41,10 +40,89 @@ typedef struct _REPARSE_DATA_BUFFER {
             WCHAR PathBuffer[1];
         } MountPointReparseBuffer;
         struct {
+            ULONG Version;	// Currently version 3
+            WCHAR StringList[1];	// Multistring (Consecutive strings each ending with a NULL)
+            /* There are normally 4 strings here. Ex:
+              Package ID:	L"Microsoft.WindowsTerminal_8wekyb3d8bbwe"
+              Entry Point:	L"Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"
+              Executable:	L"C:\Program Files\WindowsApps\Microsoft.WindowsTerminal_1.4.3243.0_x64__8wekyb3d8bbwe\wt.exe"
+              Applic. Type:	l"0"	// Integer as ASCII. "0" = Desktop bridge application; Else sandboxed UWP application
+            */
+        } AppExecLinkReparseBuffer;
+        struct {
             UCHAR  DataBuffer[1];
         } GenericReparseBuffer;
     } DUMMYUNIONNAME;
 } REPARSE_DATA_BUFFER, * PREPARSE_DATA_BUFFER;
+
+typedef struct _REPARSE_READ_BUFFER {
+    DWORD  ReparseTag;
+    WORD   ReparseDataLength;
+    WORD   Reserved;
+    UCHAR  DataBuffer[1];
+} REPARSE_READ_BUFFER, * PREPARSE_READ_BUFFER;
+#define REPARSE_READ_BUFFER_HEADER_SIZE (sizeof(REPARSE_READ_BUFFER) - sizeof(UCHAR))
+
+typedef struct _REPARSE_SYMLINK_READ_BUFFER { // For tag IO_REPARSE_TAG_SYMLINK
+    DWORD  ReparseTag;
+    WORD   ReparseDataLength;
+    WORD   Reserved;
+    WORD   SubstituteNameOffset;
+    WORD   SubstituteNameLength;
+    WORD   PrintNameOffset;
+    WORD   PrintNameLength;
+    ULONG  Flags;
+    WCHAR  PathBuffer[1];
+} SYMLINK_READ_BUFFER, * PSYMLINK_READ_BUFFER;
+#define SYMLINK_READ_BUFFER_HEADER_SIZE (sizeof(SYMLINK_READ_BUFFER) - sizeof(WCHAR))
+
+typedef struct _REPARSE_MOUNTPOINT_READ_BUFFER { // For tag IO_REPARSE_TAG_MOUNT_POINT, aka. junctions
+    DWORD  ReparseTag;
+    WORD   ReparseDataLength;
+    WORD   Reserved;
+    WORD   SubstituteNameOffset;
+    WORD   SubstituteNameLength;
+    WORD   PrintNameOffset;
+    WORD   PrintNameLength;
+    WCHAR  PathBuffer[1];
+} MOUNTPOINT_READ_BUFFER, * PMOUNTPOINT_READ_BUFFER;
+#define MOUNTPOINT_READ_BUFFER_HEADER_SIZE (sizeof(MOUNTPOINT_READ_BUFFER) - sizeof(WCHAR))
+
+typedef struct _REPARSE_MOUNTPOINT_WRITE_BUFFER {
+    DWORD  ReparseTag;
+    DWORD  ReparseDataLength;
+    WORD   Reserved;
+    WORD   ReparseTargetLength;
+    WORD   ReparseTargetMaximumLength;
+    WORD   Reserved1;
+    WCHAR  ReparseTarget[1];
+} MOUNTPOINT_WRITE_BUFFER, * PMOUNTPOINT_WRITE_BUFFER;
+#define MOUNTPOINT_WRITE_BUFFER_HEADER_SIZE (sizeof(MOUNTPOINT_WRITE_BUFFER) - sizeof(WCHAR))
+
+// Universal Windows Platform (UWP) Application Execution Links
+// Ref: https://www.tiraniddo.dev/2019/09/overview-of-windows-execution-aliases.html
+typedef struct _REPARSE_APPEXECLINK_READ_BUFFER { // For tag IO_REPARSE_TAG_APPEXECLINK
+    DWORD  ReparseTag;
+    WORD   ReparseDataLength;
+    WORD   Reserved;
+    ULONG  Version;	// Currently version 3
+    WCHAR  StringList[1];	// Multistring (Consecutive strings each ending with a NUL)
+    /* There are normally 4 strings here. Ex:
+      Package ID:	L"Microsoft.WindowsTerminal_8wekyb3d8bbwe"
+      Entry Point:	L"Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"
+      Executable:	L"C:\Program Files\WindowsApps\Microsoft.WindowsTerminal_1.4.3243.0_x64__8wekyb3d8bbwe\wt.exe"
+      Applic. Type:	l"0"	// Integer as ASCII. "0" = Desktop bridge application; Else sandboxed UWP application
+    */
+} APPEXECLINK_READ_BUFFER, * PAPPEXECLINK_READ_BUFFER;
+
+// Linux Sub-System (LXSS) Symbolic Links
+typedef struct _REPARSE_LX_SYMLINK_BUFFER {
+    DWORD  ReparseTag;
+    WORD	 ReparseDataLength;
+    WORD	 Reserved;
+    DWORD  FileType; 	// Value is apparently always 2 for symlinks.
+    char   PathBuffer[1];	// POSIX path of symlink. UTF-8. Not \0 terminated.
+} LX_SYMLINK_READ_BUFFER, * PLX_SYMLINK_READ_BUFFER;
 #endif
 
 typedef struct _IO_STATUS_BLOCK {

@@ -25,6 +25,12 @@
 #include <string.h>
 #include <vafs/stat.h>
 
+#if defined(_WIN32) || defined(_WIN64)
+#  if !defined(S_IFLNK)
+#     define S_IFLNK 0
+#  endif
+#endif //!#if defined(_WIN32) || defined(_WIN64)
+
 int __vafs_is_root_path(
     const char* path)
 {

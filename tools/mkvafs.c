@@ -173,20 +173,16 @@ static int __readlink_handle(HANDLE handle, char** symlinkBufferOut, uint64_t* s
         w_target_len -= 4;
     } else if (reparse_data->ReparseTag == IO_REPARSE_TAG_APPEXECLINK) {
         /* String #3 in the list has the target filename. */
-        if (reparse_data->AppExecLinkReparseBuffer.StringCount < 3) {
-            errno = ENOTSUP;
-            goto cleanup;
-        }
         w_target = reparse_data->AppExecLinkReparseBuffer.StringList;
         /* The StringList buffer contains a list of strings separated by "\0",   */
         /* with "\0\0" terminating the list. Move to the 3rd string in the list: */
-        for (i = 0; i < 2; ++i) {
-        len = wcslen(w_target);
-        if (len == 0) {
-            errno = ENOTSUP;
-            goto cleanup;
-        }
-        w_target += len + 1;
+        for (int i = 0; i < 2; ++i) {
+            size_t len = wcslen(w_target);
+            if (len == 0) {
+                errno = ENOTSUP;
+                goto cleanup;
+            }
+            w_target += len + 1;
         }
         w_target_len = wcslen(w_target);
         if (w_target_len == 0) {
@@ -373,6 +369,7 @@ static int __readlink(const char* path, char* linkBuffer, size_t maxLength)
     HANDLE   handle;
     uint64_t targetLength = maxLength;
     int      status;
+    char*    linkBufferResult;
 
     handle = CreateFileA(path, 0, 0, NULL,
         OPEN_EXISTING,
@@ -384,7 +381,11 @@ static int __readlink(const char* path, char* linkBuffer, size_t maxLength)
         return -1;
     }
 
-    status = __readlink_handle(handle, linkBuffer, &targetLength);
+    status = __readlink_handle(handle, &linkBufferResult, &targetLength);
+    if (!status) {
+        strncpy(linkBuffer, linkBufferResult, maxLength);
+        free(linkBufferResult);
+    }
     CloseHandle(handle);
     return status;
 }
@@ -418,7 +419,7 @@ int __ministat(
     uint32_t*   filemode)
 {
     struct stat st;
-    if (__stat(path, &st) != 0) {
+    if (__stat(path, &st, 0) != 0) {
         return -1;
     }
     *filemode = st.st_mode;
