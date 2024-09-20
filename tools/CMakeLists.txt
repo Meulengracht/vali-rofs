@@ -28,6 +28,9 @@ if (NOT WIN32 AND NOT MOLLENOS)
 endif ()
 
 add_executable(mkvafs
+    utils/getfiles.c
+    utils/strfilter.c
+
     mkvafs.c
     filter.c
 )
