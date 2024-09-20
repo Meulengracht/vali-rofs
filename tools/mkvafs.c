@@ -823,12 +823,14 @@ static int __discover_files(struct progress_context* progress, const char** path
     );
 }
 
-static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, const char* relative)
+static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, const char* base, const char* relative)
 {
     struct VaFsDirectoryHandle* handle;
     
     char        temp[4096] = { 0 };
+    char        full[4096] = { 0 };
     char*       last;
+    char*       st;
     const char* token = relative;
 
     if (vafs_directory_open(vafs, "/", &handle)) {
@@ -841,11 +843,53 @@ static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, con
         return handle;
     }
 
-    while (token != last) {
-        struct VaFsDirectoryHandle* next;
-
-        if (vafs_directory_create_directory(handle, &temp[0], 0, &next));
+    // setup full
+    strcpy(&full[0], base);
+    if (full[strlen(base)] != __PATH_SEPARATOR) {
+        full[strlen(base)] = __PATH_SEPARATOR;
     }
+
+    // copy first token
+    st = strchr(token, __PATH_SEPARATOR);
+    memcpy(&temp[0], token, (size_t)(st - token));
+    temp[(size_t)(st - token)] = 0;
+    strcat(&full[0], &temp[0]);
+
+    for (;;) {
+        struct VaFsDirectoryHandle* next;
+        uint32_t                    filemode;
+        int                         status;
+
+        if (vafs_directory_open_directory(handle, &temp[0], &next)) {
+            status = __ministat(&full[0], &filemode);
+            if (status) {
+                fprintf(stderr, "mkvafs: failed to stat %s\n", &full[0]);
+                return NULL;
+            }
+
+            status = vafs_directory_create_directory(handle, &temp[0], __perms(filemode), &next);
+            if (status) {
+                fprintf(stderr, "mkvafs: failed to create directory %s\n", &temp[0]);
+                return NULL;
+            }
+        }
+
+        // yay, next token
+        handle = next;
+        token = st + 1;
+
+        st = strchr(token, __PATH_SEPARATOR);
+        if (st == NULL) {
+            // no more, this is the last directory
+            break;
+        }
+
+        memcpy(&temp[0], token, (size_t)(st - token));
+        temp[(size_t)(st - token)] = 0;
+        strcat(&full[0], "/");
+        strcat(&full[0], &temp[0]);
+    }
+    return handle;
 }
 
 static int __create_image(struct __options* opts)
@@ -906,7 +950,7 @@ static int __create_image(struct __options* opts)
 
         __write_progress(entry->path, &progressContext);
 
-        directoryHandle = __get_directory_handle(vafsHandle, entry->sub_path);
+        directoryHandle = __get_directory_handle(vafsHandle, "", entry->sub_path);
         if (directoryHandle == NULL) {
             fprintf(stderr, "mkvafs: failed to get internal directory handle for %s\n", entry->sub_path);
             break;
