@@ -27,6 +27,7 @@
 #include <vafs/vafs.h>
 #include <vafs/directory.h>
 #include <vafs/file.h>
+#include "utils/platform.h"
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <assert.h>
@@ -478,7 +479,8 @@ int __ministat(
 #endif
 
 struct progress_context {
-    int disabled;
+    struct list file_list;
+    int         disabled;
 
     int files;
     int directories;
@@ -522,66 +524,12 @@ static enum VaFsArchitecture __get_vafs_arch(
 static const char* __get_filename(
     const char* path)
 {
-    const char* filename = (const char*)strrchr(path, '/');
+    const char* filename = (const char*)strrchr(path, __PATH_SEPARATOR);
     if (filename == NULL)
         filename = path;
     else
         filename++;
     return filename;
-}
-
-int __get_count_recursive(char *path, int* fileCountOut, int* SymlinkCountOut, int* dirCountOut)
-{
-    struct dirent* direntp;
-    DIR*           dir_ptr = NULL;
-
-    if (!path) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    if ((dir_ptr = opendir(path)) == NULL) {
-        return -1;
-    }
-
-    while ((direntp = readdir(dir_ptr))) {
-        if (strcmp(direntp->d_name,".") == 0 || strcmp(direntp->d_name,"..") == 0) {
-             continue;
-        }
-
-        switch (direntp->d_type) {
-            case DT_REG:
-                (*fileCountOut)++;
-                break;
-            case DT_DIR: {
-                char* npath;
-
-                (*dirCountOut)++;
-                
-                npath = malloc(strlen(path) + strlen(direntp->d_name) + 2);
-                if (npath == NULL) {
-                    errno = ENOMEM;
-                    return -1;
-                }
-                
-                sprintf(npath, "%s/%s", path, direntp->d_name);
-                
-                if (__get_count_recursive(npath, fileCountOut, SymlinkCountOut, dirCountOut) == -1) {
-                    free(npath);
-                    return -1;
-                }
-
-                free(npath);
-            } break;
-            case DT_LNK:
-                (*SymlinkCountOut)++;
-                break;
-            default:
-                break;
-        }
-    }
-    closedir(dir_ptr);
-    return 0;
 }
 
 static void __write_progress(const char* prefix, struct progress_context* context)
@@ -755,67 +703,201 @@ static int __write_directory(
     return status;
 }
 
-int main(int argc, char *argv[])
+struct __options {
+    const char*       paths[32];
+    int               paths_count;
+    const char*       image_path;
+    const char*       arch;
+    const char*       compression;
+    int               git_ignore;
+    enum VaFsLogLevel level;
+};
+
+static int __read_ignore_file(struct list* filters, const char* path)
 {
-    struct VaFsDirectoryHandle* directoryHandle;
-    struct VaFs*                vafsHandle;
-    int                         status;
-    struct progress_context     progressContext = { 0 };
-    struct VaFsConfiguration    configuration;
 
-    // parameters
-    char* paths[32];
-    char  pathCount = 0;
-    char* arch = NULL;
-    char* imagePath = "image.vafs"; 
-    char* compressionName = NULL;
+}
 
-    // Validate the number of arguments
-    // compression
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--arch") && (i + 1) < argc) {
-            arch = argv[++i];
-        } else if (!strcmp(argv[i], "--compression") && (i + 1) < argc) {
-            compressionName = argv[++i];
-        } else if (!strcmp(argv[i], "--out") && (i + 1) < argc) {
-            imagePath = argv[++i];
-        } else if (!strcmp(argv[i], "--v")) {
-            vafs_log_initalize(VaFsLogLevel_Info);
-            progressContext.disabled = 1;
-        } else if (!strcmp(argv[i], "--vv")) {
-            vafs_log_initalize(VaFsLogLevel_Debug);
-            progressContext.disabled = 1;
-        } else {
-            paths[pathCount++] = argv[i];
+static int __is_excluded(struct list* filters, const char* path)
+{
+
+}
+
+static int __add_platform_file_entry(struct list* to, const char* name, enum platform_filetype type, const char* subPath, const char* path)
+{
+    struct platform_file_entry* entry;
+
+    entry = calloc(1, sizeof(struct platform_file_entry));
+    if (entry == NULL) {
+        return -1;
+    }
+
+    entry->name = strdup(name);
+    entry->type = type;
+    entry->sub_path = strdup(subPath != NULL ? subPath : name);
+    entry->path = strdup(path);
+
+    list_add(to, &entry->list_header);
+    return 0;
+}
+
+static int __platform_file_entry_copy_to(struct platform_file_entry* entry, struct list* to)
+{
+    return __add_platform_file_entry(
+        to,
+        entry->name,
+        entry->type,
+        entry->sub_path,
+        entry->path
+    );
+}
+
+static int __discover_files_in_directory(struct progress_context* progress, const char* path, int gitIgnore)
+{
+    int               status;
+    struct list       files = LIST_INIT;
+    struct list       filters = LIST_INIT;
+    struct list_item* it;
+
+    status = platform_getfiles(path, 1, &files);
+    if (status) {
+        fprintf(stderr, "mkvafs: failed to get files for %s\n", path);
+        return -1;
+    }
+
+    // first of all, is there a .gitignore in the current path?
+    if (gitIgnore) {
+        list_foreach(&files, it) {
+            struct platform_file_entry* entry = (struct platform_file_entry*)it;
+            if (!strcmp(entry->sub_path, ".gitignore")) {
+                status = __read_ignore_file(&filters, entry->path);
+                if (status) {
+                    fprintf(stderr, "mkvafs: failed to read ignore file %s\n", entry->path);
+                    platform_getfiles_destroy(&files);
+                    return status;
+                }
+                break;
+            }
         }
     }
 
-    if (arch == NULL || !pathCount) {
-        __show_help();
-        return -1;
+    // now go through each and count them up, removing as we see fit
+    list_foreach(&files, it) {
+        struct platform_file_entry* entry = (struct platform_file_entry*)it;
+        if (__is_excluded(&filters, entry->sub_path)) {
+            continue;
+        }
+
+        status = __platform_file_entry_copy_to(entry, &progress->file_list);
+        if (status) {
+            fprintf(stderr, "mkvafs: failed to allocate memory for file list\n");
+            platform_getfiles_destroy(&files);
+            return status;
+        }
+
+        switch (entry->type) {
+            case PLATFORM_FILETYPE_DIRECTORY:
+                progress->directories_total++;
+                break;
+            case PLATFORM_FILETYPE_FILE:
+                progress->files_total++;
+                break;
+            case PLATFORM_FILETYPE_SYMLINK:
+                progress->symlinks_total++;
+                break;
+            default:
+                break;
+        }
+    }
+    platform_getfiles_destroy(&files);
+    return 0;
+}
+
+static int __discover_files(struct progress_context* progress, const char** paths, int count, int gitIgnore)
+{
+    printf("mkvafs: discovering files\n");
+    for (int i = 0; i < count; i++) {
+        int      status;
+        uint32_t filemode;
+
+        status = __ministat(paths[i], &filemode);
+        if (status) {
+            fprintf(stderr, "mkvafs: failed to stat %s\n", paths[i]);
+            return status;
+        }
+
+        if (__is_directory(filemode)) {
+            status = __discover_files_in_directory(progress, paths[i], gitIgnore);
+            if (status) {
+                fprintf(stderr, "mkvafs: failed to discover files in %s\n", paths[i]);
+                return status;
+            }
+            progress->directories_total++;
+        } else if (__is_symlink(filemode)) {
+            status = __add_platform_file_entry(
+                &progress->file_list, __get_filename(paths[i]),
+                PLATFORM_FILETYPE_SYMLINK, NULL, paths[i]
+            );
+            if (status) {
+                fprintf(stderr, "mkvafs: failed to allocate memory for %s\n", paths[i]);
+                return status;
+            }
+            progress->symlinks_total++;
+        } else if (__is_file(filemode)) {
+            status = __add_platform_file_entry(
+                &progress->file_list, __get_filename(paths[i]),
+                PLATFORM_FILETYPE_FILE, NULL, paths[i]
+            );
+            if (status) {
+                fprintf(stderr, "mkvafs: failed to allocate memory for %s\n", paths[i]);
+                return status;
+            }
+            progress->files_total++;
+        }
     }
 
-#if defined(_WIN32) || defined(_WIN64)
-    status = __win32_init();
-    if (status) {
-        fprintf(stderr, "mkvafs: cannot load ntdll functions required on windows\n");
-        return -1;
+    printf("mkvafs: %i directories, %i files and %i symlinks\n",
+        progress->directories_total,
+        progress->files_total,
+        progress->symlinks_total
+    );
+}
+
+static int __create_image(struct __options* opts)
+{
+    struct VaFsDirectoryHandle* directoryHandle;
+    struct VaFs*                vafsHandle;
+    struct VaFsConfiguration    configuration;
+    int                         status;
+    struct progress_context     progressContext = { 
+        LIST_INIT,
+        0
+    };
+
+    // disable progress if we have debug output
+    if (opts->level > VaFsLogLevel_Warning) {
+        progressContext.disabled = 1;
     }
-#endif
+
+    status = __discover_files(&progressContext, &opts->paths[0], opts->paths_count, opts->git_ignore);
+    if (status) {
+        fprintf(stderr, "mkvafs: cannot create image\n");
+        return status;
+    }
 
     vafs_config_initialize(&configuration);
-    vafs_config_set_architecture(&configuration, __get_vafs_arch(arch));
-    status = vafs_create(imagePath, &configuration, &vafsHandle);
+    vafs_config_set_architecture(&configuration, __get_vafs_arch(opts->arch));
+    status = vafs_create(opts->image_path, &configuration, &vafsHandle);
     if (status) {
-        fprintf(stderr, "mkvafs: cannot create vafs output file: %s\n", imagePath);
+        fprintf(stderr, "mkvafs: cannot create vafs output file: %s\n", opts->image_path);
         return -1;
     }
 
     // Was a compression requested?
-    if (compressionName != NULL) {
-        status = __install_filter(vafsHandle, compressionName);
+    if (opts->compression != NULL) {
+        status = __install_filter(vafsHandle, opts->compression);
         if (status) {
-            fprintf(stderr, "mkvafs: cannot set compression: %s\n", compressionName);
+            fprintf(stderr, "mkvafs: cannot set compression: %s\n", opts->compression);
             return -1;
         }
     }
@@ -826,34 +908,6 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    printf("mkvafs: counting files\n");
-    for (int i = 0; i < pathCount; i++) {
-        uint32_t filemode;
-        status = __ministat(paths[i], &filemode);
-        if (status) {
-            fprintf(stderr, "mkvafs: cannot stat file/directory: %s\n", paths[i]);
-            return -1;
-        }
-
-        if (__is_directory(filemode)) {
-            progressContext.directories_total++;
-            __get_count_recursive(paths[i],
-                &progressContext.files_total,
-                &progressContext.symlinks_total, 
-                &progressContext.directories_total
-            );
-        } else if (__is_symlink(filemode)) {
-            progressContext.symlinks_total++;
-        } else if (__is_file(filemode)) {
-            progressContext.files_total++;
-        }
-    }
-
-    printf("mkvafs: writing %i directories, %i files and %i symlinks\n",
-        progressContext.directories_total,
-        progressContext.files_total,
-        progressContext.symlinks_total
-    );
     for (int i = 0; i < pathCount; i++) {
         uint32_t filemode;
 
@@ -912,6 +966,60 @@ int main(int argc, char *argv[])
     if (status) {
         fprintf(stderr, "mkvafs: failed to finalize image\n");
     }
+}
+
+static void __parse_options(struct __options* opts, int argc, char *argv[])
+{
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--arch") && (i + 1) < argc) {
+            opts->arch = argv[++i];
+        } else if (!strcmp(argv[i], "--compression") && (i + 1) < argc) {
+            opts->compression = argv[++i];
+        } else if (!strcmp(argv[i], "--out") && (i + 1) < argc) {
+            opts->image_path = argv[++i];
+        } else if (!strcmp(argv[i], "--v")) {
+            opts->level = VaFsLogLevel_Info;
+        } else if (!strcmp(argv[i], "--vv")) {
+            opts->level = VaFsLogLevel_Debug;
+        } else if (!strcmp(argv[i], "--git-ignore")) {
+            opts->git_ignore = 1;
+        } else {
+            opts->paths[opts->paths_count++] = argv[i];
+        }
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    int status;
+
+    struct __options opts = { 
+        { NULL },
+        0,
+        NULL,
+        NULL,
+        NULL,
+        0,
+        VaFsLogLevel_Warning
+    };
+    __parse_options(&opts, argc, argv);
+
+    // validate parameters
+    if (opts.arch == NULL || !opts.paths_count) {
+        __show_help();
+        return -1;
+    }
+    vafs_log_initalize(opts.level);
+
+#if defined(_WIN32) || defined(_WIN64)
+    status = __win32_init();
+    if (status) {
+        fprintf(stderr, "mkvafs: cannot load ntdll functions required on windows\n");
+        return -1;
+    }
+#endif
+
+    status = __create_image(&opts);
 
 #if defined(_WIN32) || defined(_WIN64)
     __win32_cleanup();
