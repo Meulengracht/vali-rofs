@@ -611,98 +611,6 @@ static int __write_file(
     return 0;
 }
 
-static int __write_directory(
-    struct progress_context*    progress,
-    struct VaFsDirectoryHandle* directoryHandle,
-    const char*                 path)
-{
-    struct dirent* dp;
-    DIR*           dfd;
-    int            status = 0;
-    char*          filepathBuffer;
-
-    if ((dfd = opendir(path)) == NULL) {
-        fprintf(stderr, "mkvafs: can't open initrd folder\n");
-        return -1;
-    }
-
-    filepathBuffer = malloc(1024);
-    if (filepathBuffer == NULL) {
-        closedir(dfd);
-        errno = ENOMEM;
-        return -1;
-    }
-
-    while ((dp = readdir(dfd)) != NULL) {
-        uint32_t filemode;
-        if (strcmp(dp->d_name, ".") == 0 || strcmp(dp->d_name, "..") == 0)
-            continue;
-
-        // only append a '/' if not provided
-        if (path[strlen(path) - 1] != '/')
-            sprintf(filepathBuffer, "%s/%s", path, dp->d_name);
-        else
-            sprintf(filepathBuffer, "%s%s", path, dp->d_name);
-        
-        __write_progress(dp->d_name, progress);
-        status = __ministat(filepathBuffer, &filemode);
-        if (status) {
-            fprintf(stderr, "mkvafs: failed to stat file/directory '%s'\n", filepathBuffer);
-            break;
-        }
-
-        if (__is_directory(filemode)) {
-            struct VaFsDirectoryHandle* subdirectoryHandle;
-            status = vafs_directory_create_directory(directoryHandle, dp->d_name, __perms(filemode), &subdirectoryHandle);
-            if (status) {
-                fprintf(stderr, "mkvafs: failed to create directory '%s'\n", dp->d_name);
-                continue;
-            }
-
-            status = __write_directory(progress, subdirectoryHandle, filepathBuffer);
-            if (status != 0) {
-                fprintf(stderr, "mkvafs: unable to write directory %s\n", filepathBuffer);
-                break;
-            }
-
-            status = vafs_directory_close(subdirectoryHandle);
-            if (status) {
-                fprintf(stderr, "mkvafs: failed to close directory '%s'\n", filepathBuffer);
-                break;
-            }
-            progress->directories++;
-        } else if (__is_symlink(filemode)) {
-            char* linkpath = NULL;
-            status = __read_symlink(filepathBuffer, &linkpath);
-            if (status != 0) {
-                fprintf(stderr, "mkvafs: failed to read link %s\n", filepathBuffer);
-                break;
-            }
-
-            status = vafs_directory_create_symlink(directoryHandle, dp->d_name, linkpath);
-            free(linkpath);
-
-            if (status != 0) {
-                fprintf(stderr, "mkvafs: failed to create symlink %s\n", filepathBuffer);
-                break;
-            }
-            progress->symlinks++;
-        } else if (__is_file(filemode)) {
-            status = __write_file(directoryHandle, filepathBuffer, dp->d_name, __perms(filemode));
-            if (status != 0) {
-                fprintf(stderr, "mkvafs: unable to write file %s\n", dp->d_name);
-                break;
-            }
-            progress->files++;
-        }
-        __write_progress(dp->d_name, progress);
-    }
-
-    free(filepathBuffer);
-    closedir(dfd);
-    return status;
-}
-
 struct __options {
     const char*       paths[32];
     int               paths_count;
@@ -713,14 +621,66 @@ struct __options {
     enum VaFsLogLevel level;
 };
 
+static int __add_filter(struct list* filters, const char* filter)
+{
+    struct platform_string_item* item;
+
+    item = calloc(1, sizeof(struct platform_string_item));
+    if (item == NULL) {
+        return -1;
+    }
+    item->value = strdup(filter);
+    list_add(filters, &item->list_header);
+    return 0;
+}
+
 static int __read_ignore_file(struct list* filters, const char* path)
 {
+    FILE* ignore;
+    char  line[1024];
+    int   status = 0;
 
+    ignore = fopen(path, "r");
+    if (ignore == NULL) {
+        fprintf(stderr, "mkvafs: failed to open %s for reading\n", path);
+        return -1;
+    }
+
+    while (fgets(&line[0], sizeof(line), ignore) != NULL) {
+        // the filter is newline terminated
+        size_t len = strlen(&line[0]);
+
+        // ignore empty lines, or lines that start with a comment
+        if (len == 0 || line[0] == '\n' || line[0] == '#') {
+            continue;
+        }
+
+        if (line[len - 1] == '\n') {
+            line[len - 1] = '\0';
+        }
+
+        status = __add_filter(filters, &line[0]);
+        if (status) {
+            fprintf(stderr, "mkvafs: failed to add filter %s\n", &line[0]);
+            break;
+        }
+    }
+    fclose(ignore);
+    return status;
 }
 
 static int __is_excluded(struct list* filters, const char* path)
 {
+    struct list_item* i;
 
+    list_foreach(filters, i) {
+        struct platform_string_item* filter = (struct platform_string_item*)i;
+        if (strfilter(filter->value, path, 0) == 0) {
+            // its a match
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static int __add_platform_file_entry(struct list* to, const char* name, enum platform_filetype type, const char* subPath, const char* path)
@@ -863,13 +823,38 @@ static int __discover_files(struct progress_context* progress, const char** path
     );
 }
 
+static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, const char* relative)
+{
+    struct VaFsDirectoryHandle* handle;
+    
+    char        temp[4096] = { 0 };
+    char*       last;
+    const char* token = relative;
+
+    if (vafs_directory_open(vafs, "/", &handle)) {
+        fprintf(stderr, "mkvafs: failed to open image root directory\n");
+        return NULL;
+    }
+
+    last = strrchr(relative, __PATH_SEPARATOR);
+    if (last == NULL || last == relative) {
+        return handle;
+    }
+
+    while (token != last) {
+        struct VaFsDirectoryHandle* next;
+
+        if (vafs_directory_create_directory(handle, &temp[0], 0, &next));
+    }
+}
+
 static int __create_image(struct __options* opts)
 {
-    struct VaFsDirectoryHandle* directoryHandle;
-    struct VaFs*                vafsHandle;
-    struct VaFsConfiguration    configuration;
-    int                         status;
-    struct progress_context     progressContext = { 
+    struct VaFs*             vafsHandle;
+    struct VaFsConfiguration configuration;
+    int                      status;
+    struct list_item*        it;
+    struct progress_context  progressContext = { 
         LIST_INIT,
         0
     };
@@ -885,12 +870,18 @@ static int __create_image(struct __options* opts)
         return status;
     }
 
+    // ensure there will be content to actually write
+    if (progressContext.files_total == 0 && progressContext.symlinks_total == 0) {
+        fprintf(stderr, "mkvafs: skipping image creation due to no files being created\n");
+        return -1;
+    }
+
     vafs_config_initialize(&configuration);
     vafs_config_set_architecture(&configuration, __get_vafs_arch(opts->arch));
     status = vafs_create(opts->image_path, &configuration, &vafsHandle);
     if (status) {
         fprintf(stderr, "mkvafs: cannot create vafs output file: %s\n", opts->image_path);
-        return -1;
+        return status;
     }
 
     // Was a compression requested?
@@ -898,74 +889,71 @@ static int __create_image(struct __options* opts)
         status = __install_filter(vafsHandle, opts->compression);
         if (status) {
             fprintf(stderr, "mkvafs: cannot set compression: %s\n", opts->compression);
-            return -1;
+            vafs_close(vafsHandle);
+            return status;
         }
     }
 
-    status = vafs_directory_open(vafsHandle, "/", &directoryHandle);
-    if (status) {
-        fprintf(stderr, "mkvafs: cannot open root directory: /\n");
-        return -1;
-    }
-
-    for (int i = 0; i < pathCount; i++) {
-        uint32_t filemode;
-
-        __write_progress(paths[i], &progressContext);
-        status = __ministat(paths[i], &filemode);
-        if (status) {
-            fprintf(stderr, "mkvafs: cannot stat file/directory: %s\n", paths[i]);
-            return -1;
-        }
-
-        if (__is_directory(filemode)) {
-            status = __write_directory(&progressContext, directoryHandle, paths[i]);
-            if (status != 0) {
-                fprintf(stderr, "mkvafs: unable to write directory %s\n", paths[i]);
-                break;
-            }
+    list_foreach(&progressContext.file_list, it) {
+        struct platform_file_entry* entry = (struct platform_file_entry*)it;
+        struct VaFsDirectoryHandle* directoryHandle;
+        
+        if (entry->type == PLATFORM_FILETYPE_DIRECTORY) {
+            // we do squad for directories, they get created automatically
+            // if there is any content in them
             progressContext.directories++;
-        } else if (__is_symlink(filemode)) {
+        }
+
+        __write_progress(entry->path, &progressContext);
+
+        directoryHandle = __get_directory_handle(vafsHandle, entry->sub_path);
+        if (directoryHandle == NULL) {
+            fprintf(stderr, "mkvafs: failed to get internal directory handle for %s\n", entry->sub_path);
+            break;
+        }
+
+        if (entry->type == PLATFORM_FILETYPE_SYMLINK) {
             char* linkpath = NULL;
-            status = __read_symlink(paths[i], &linkpath);
+            status = __read_symlink(entry->path, &linkpath);
             if (status != 0) {
-                fprintf(stderr, "mkvafs: failed to read link %s\n", paths[i]);
+                fprintf(stderr, "mkvafs: failed to read link %s\n", entry->path);
                 break;
             }
 
-            status = vafs_directory_create_symlink(directoryHandle, paths[i], linkpath);
+            status = vafs_directory_create_symlink(directoryHandle, entry->path, linkpath);
             free(linkpath);
 
             if (status != 0) {
-                fprintf(stderr, "mkvafs: failed to create symlink %s\n", paths[i]);
+                fprintf(stderr, "mkvafs: failed to create symlink %s\n", entry->path);
                 break;
             }
             progressContext.symlinks++;
-        } else if (__is_file(filemode)) {
-            status = __write_file(directoryHandle, paths[i], __get_filename(paths[i]), __perms(filemode));
+        } else if (entry->type == PLATFORM_FILETYPE_FILE) {
+            uint32_t filemode;
+            status = __ministat(entry->path, &filemode);
+            if (status) {
+                fprintf(stderr, "mkvafs: cannot stat file/directory: %s\n", entry->path);
+                break;
+            }
+
+            status = __write_file(directoryHandle, entry->path, __get_filename(entry->path), __perms(filemode));
             if (status != 0) {
-                fprintf(stderr, "mkvafs: unable to write file %s\n", paths[i]);
+                fprintf(stderr, "mkvafs: unable to write file %s\n", entry->path);
                 break;
             }
             progressContext.files++;
         }
-        __write_progress(paths[i], &progressContext);
-
+        __write_progress(entry->path, &progressContext);
     }
     
     if (!progressContext.disabled) {
         printf("\n");
     }
 
-    status = vafs_directory_close(directoryHandle);
-    if (status) {
-        fprintf(stderr, "mkvafs: failed to close root directory handle\n");
-    }
-
-    status = vafs_close(vafsHandle);
-    if (status) {
+    if (vafs_close(vafsHandle)) {
         fprintf(stderr, "mkvafs: failed to finalize image\n");
     }
+    return status;
 }
 
 static void __parse_options(struct __options* opts, int argc, char *argv[])

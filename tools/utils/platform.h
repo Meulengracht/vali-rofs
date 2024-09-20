@@ -28,6 +28,11 @@
 #define __PATH_SEPARATOR '/'
 #endif
 
+struct platform_string_item {
+    struct list_item list_header;
+    const char*      value;
+};
+
 enum platform_filetype {
     PLATFORM_FILETYPE_DIRECTORY,
     PLATFORM_FILETYPE_FILE,
