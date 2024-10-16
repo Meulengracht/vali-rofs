@@ -18,8 +18,9 @@
 
 #include <errno.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
-#include "platform.h"
+#include "utils.h"
 
 // include dirent.h for directory operations
 #if defined(_WIN32) || defined(_WIN64)
@@ -27,6 +28,67 @@
 #else
 #include <dirent.h>
 #endif
+
+static char* __safe_strdup(const char* str)
+{
+    char* copy;
+    if (str == NULL) {
+        return NULL;
+    }
+
+    copy = malloc(strlen(str) + 1);
+    if (copy == NULL) {
+        return NULL;
+    }
+
+    strcpy(copy, str);
+    return copy;
+}
+
+static char* __combine_paths(const char* path1, const char* path2)
+{
+    char*  combined;
+    int    status;
+    size_t path1Length;
+    size_t path2Length;
+
+    if (path1 == NULL) {
+        return __safe_strdup(path2);
+    } else if (path2 == NULL) {
+        return __safe_strdup(path1);
+    }
+
+    path1Length = strlen(path1);
+    path2Length = strlen(path2);
+
+    if (path1Length == 0) {
+        return __safe_strdup(path2);
+    } else if (path2Length == 0) {
+        return __safe_strdup(path1);
+    }
+
+    if (path2[0] == __PATH_SEPARATOR) {
+        path2++;
+        path2Length--;
+    };
+
+    combined = malloc(path1Length + path2Length + 2);
+    if (combined == NULL) {
+        return NULL;
+    }
+
+    if (path1[path1Length - 1] != __PATH_SEPARATOR) {
+        status = sprintf(combined, "%s%c%s", path1, __PATH_SEPARATOR, path2);
+    } else {
+        status = sprintf(combined, "%s%s", path1, path2);
+    }
+
+    if (status < 0) {
+        free(combined);
+        return NULL;
+    }
+    return combined;
+}
 
 static int __add_file(const struct dirent* dp, const char* path, const char* subPath, struct list* files)
 {
@@ -37,9 +99,9 @@ static int __add_file(const struct dirent* dp, const char* path, const char* sub
         return -1;
     }
 
-    entry->name     = platform_strdup(dp->d_name);
-    entry->path     = platform_strdup(path);
-    entry->sub_path = subPath != NULL ? platform_strdup(subPath) : NULL;
+    entry->name     = __safe_strdup(dp->d_name);
+    entry->path     = __safe_strdup(path);
+    entry->sub_path = __safe_strdup(subPath);
     if (entry->name == NULL || entry->path == NULL) {
         free(entry->name);
         free(entry->path);
@@ -93,8 +155,8 @@ static int __read_directory(const char* path, const char* subPath, int recursive
              continue;
         }
 
-        combinedPath    = strpathcombine(path, dp->d_name);
-        combinedSubPath = strpathcombine(subPath, dp->d_name);
+        combinedPath    = __combine_paths(path, dp->d_name);
+        combinedSubPath = __combine_paths(subPath, dp->d_name);
         if (!combinedPath || !combinedSubPath) {
             free((void*)combinedPath);
             break;
@@ -117,7 +179,7 @@ static int __read_directory(const char* path, const char* subPath, int recursive
     return status;
 }
 
-int platform_getfiles(const char* path, int recursive, struct list* files)
+int utils_getfiles(const char* path, int recursive, struct list* files)
 {
     if (!path || !files) {
         errno = EINVAL;
@@ -127,7 +189,7 @@ int platform_getfiles(const char* path, int recursive, struct list* files)
     return __read_directory(path, NULL, recursive, files);
 }
 
-int platform_getfiles_destroy(struct list* files)
+int utils_getfiles_destroy(struct list* files)
 {
     struct list_item* item;
 
