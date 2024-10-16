@@ -27,7 +27,7 @@
 #include <vafs/vafs.h>
 #include <vafs/directory.h>
 #include <vafs/file.h>
-#include "utils/platform.h"
+#include "utils/utils.h"
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <assert.h>
@@ -712,47 +712,204 @@ static int __platform_file_entry_copy_to(struct platform_file_entry* entry, stru
     );
 }
 
+// Maybe rearrange code a bit nicer instead, for now we just need it inline
+// here for a single purpose. If we need it somewhere else definitely do this first
+#include "../libvafs/cache/hashtable.h"
+
+struct _ignoremap_entry {
+    uint64_t    hash;
+    const char* path;
+    struct list filters;
+};
+
+static uint64_t __hash_key(const char* key)
+{
+    uint32_t    hash = 5381;
+    size_t      i    = 0;
+
+    if (key == NULL) {
+        return 0;
+    }
+
+    while (key[i]) {
+        hash = ((hash << 5) + hash) + key[i++];
+    }
+    return (uint64_t)hash;
+}
+
+static uint64_t __ignoremap_hash(const void* elem)
+{
+    const struct _ignoremap_entry* entry = elem;
+    return entry->hash;
+}
+
+static int __ignoremap_cmp(const void* lh, const void* rh)
+{
+    const struct _ignoremap_entry* lent = lh;
+    const struct _ignoremap_entry* rent = rh;
+    return lent->hash == rent->hash ? 0 : -1;
+}
+
+
+static void __filters_destroy(struct list* filters)
+{
+    struct list_item* i;
+    for (i = filters->head; i != NULL;) {
+        struct platform_string_item* item = (struct platform_string_item*)i;
+        i = i->next;
+        free((char*)item->value);
+        free(item);
+    }
+}
+
+void __ignoremap_free(int index, const void* elem, void* userContext)
+{
+    struct _ignoremap_entry* entry = (struct _ignoremap_entry*)elem;
+    __filters_destroy(&entry->filters);
+    free((char*)entry->path);
+}
+
+static char* __safe_strdup(const char* str)
+{
+    char* copy;
+    if (str == NULL) {
+        return NULL;
+    }
+
+    copy = malloc(strlen(str) + 1);
+    strcpy(copy, str);
+    return copy;
+}
+
+static char* __dirpath(const char* str)
+{
+    char* p;
+    char* t;
+    
+    p = __safe_strdup(str);
+    if (p == NULL) {
+        return NULL;
+    }
+
+    t = strrchr(p, __PATH_SEPARATOR);
+    if (t == NULL) {
+        return p;
+    }
+
+    // terminate it there
+    t[0] = '\0';
+    return p;
+}
+
+static int __discover_filters(hashtable_t* ignoreMap, struct list* files)
+{
+    struct list_item* it;
+    int               status;
+
+    list_foreach(files, it) {
+        struct platform_file_entry* entry = (struct platform_file_entry*)it;
+
+        // XXX: support more filters?
+        if (!strcmp(entry->name, ".gitignore")) {
+            struct _ignoremap_entry ign = { 
+                .filters = LIST_INIT
+            };
+
+            // For the key, we want to only use the folder part
+            ign.path = __dirpath(entry->path);
+            ign.hash = __hash_key(ign.path);
+
+            // read all the filters in the ignore file
+            status = __read_ignore_file(&ign.filters, entry->path);
+            if (status) {
+                fprintf(stderr, "mkvafs: failed to read ignore file %s\n", entry->path);
+                return status;
+            }
+
+            // add to ignore map
+            vafs_hashtable_set(ignoreMap, entry);
+            break;
+        }
+    }
+    return 0;
+}
+
+static struct _ignoremap_entry* __find_filter(hashtable_t* ignoreMap, const char* path)
+{
+    struct _ignoremap_entry* filter = NULL;
+    char*                    pitr = __dirpath(path);
+
+    // find matching ignore file
+    while (pitr != NULL) {
+        char* tmp;
+        void* lookup = vafs_hashtable_get(ignoreMap, &(struct _ignoremap_entry) { 
+            .hash = __hash_key(pitr),
+        });
+        if (lookup != NULL) {
+            filter = lookup;
+            break;
+        }
+
+        tmp = __dirpath(pitr);
+        if (tmp == NULL) {
+            break;
+        }
+        free(pitr);
+        pitr = tmp;
+    }
+    free(pitr);
+    return filter;
+}
+
 static int __discover_files_in_directory(struct progress_context* progress, const char* path, int gitIgnore)
 {
-    int               status;
+    int               status = 0;
     struct list       files = LIST_INIT;
-    struct list       filters = LIST_INIT;
     struct list_item* it;
+    hashtable_t       ignoreMap;
 
-    status = platform_getfiles(path, 1, &files);
+    // Initialize the hashtable for ignore files. We do this whether we
+    // need it or not.
+    status = vafs_hashtable_construct(
+        &ignoreMap, 0, sizeof(struct _ignoremap_entry), 
+        __ignoremap_hash, __ignoremap_cmp
+    );
+    if (status) {
+        return status;
+    }
+
+    status = utils_getfiles(path, 1, &files);
     if (status) {
         fprintf(stderr, "mkvafs: failed to get files for %s\n", path);
         return -1;
     }
 
-    // first of all, is there a .gitignore in the current path?
+    // If requested, fill the ignore map with filters based on any .ignore file
+    // we find.
     if (gitIgnore) {
-        list_foreach(&files, it) {
-            struct platform_file_entry* entry = (struct platform_file_entry*)it;
-            if (!strcmp(entry->sub_path, ".gitignore")) {
-                status = __read_ignore_file(&filters, entry->path);
-                if (status) {
-                    fprintf(stderr, "mkvafs: failed to read ignore file %s\n", entry->path);
-                    platform_getfiles_destroy(&files);
-                    return status;
-                }
-                break;
-            }
+        status = __discover_filters(&ignoreMap, &files);
+        if (status) {
+            goto cleanup;
         }
     }
 
-    // now go through each and count them up, removing as we see fit
+    // now go through each and filter them against any matching ignore file
     list_foreach(&files, it) {
         struct platform_file_entry* entry = (struct platform_file_entry*)it;
-        if (__is_excluded(&filters, entry->sub_path)) {
-            continue;
+        struct _ignoremap_entry*    ignent;
+        
+        // is it allowed by the ignore map?
+        ignent = __find_filter(&ignoreMap, entry->sub_path);
+        if (ignent != NULL) {
+            if (__is_excluded(&ignent->filters, entry->sub_path)) {
+                continue;
+            }
         }
 
         status = __platform_file_entry_copy_to(entry, &progress->file_list);
         if (status) {
             fprintf(stderr, "mkvafs: failed to allocate memory for file list\n");
-            platform_getfiles_destroy(&files);
-            return status;
+            goto cleanup;
         }
 
         switch (entry->type) {
@@ -769,8 +926,12 @@ static int __discover_files_in_directory(struct progress_context* progress, cons
                 break;
         }
     }
-    platform_getfiles_destroy(&files);
-    return 0;
+
+cleanup:
+    utils_getfiles_destroy(&files);
+    vafs_hashtable_enumerate(&ignoreMap, __ignoremap_free, NULL);
+    vafs_hashtable_destroy(&ignoreMap);
+    return status;
 }
 
 static int __discover_files(struct progress_context* progress, const char** paths, int count, int gitIgnore)

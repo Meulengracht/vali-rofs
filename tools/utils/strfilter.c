@@ -18,7 +18,7 @@
 
 #include <ctype.h>
 #include <string.h>
-#include "platform.h"
+#include "utils.h"
 
 #define FOLD(c) ((flags & FILTER_FOLDCASE) != 0 ? tolower((c)) : (c))
 

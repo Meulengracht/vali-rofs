@@ -16,8 +16,8 @@
  * 
  */
 
-#ifndef __VAFS_PLATFORM_H__
-#define __VAFS_PLATFORM_H__
+#ifndef __VAFS_UTILS_H__
+#define __VAFS_UTILS_H__
 
 #include "list.h"
 
@@ -62,7 +62,7 @@ extern int strfilter(const char* filter, const char* text, int flags);
  * Call platform_getfiles_destroy() on the list to clean it up and correctly
  * free resources allocated with the call.
  */
-extern int platform_getfiles(const char* path, int recursive, struct list* files);
-extern int platform_getfiles_destroy(struct list* files);
+extern int utils_getfiles(const char* path, int recursive, struct list* files);
+extern int utils_getfiles_destroy(struct list* files);
 
-#endif //!__VAFS_PLATFORM_H__
+#endif //!__VAFS_UTILS_H__
