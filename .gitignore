@@ -13,3 +13,4 @@ build/
 .fridge/
 .oven/
 /.vs
+.vscode/
