@@ -496,10 +496,12 @@ extern int __install_filter(struct VaFs* vafs, const char* filterName);
 // Prints usage format of this program
 static void __show_help(void)
 {
-    printf("usage: mkvafs [options] dir/files ...\n"
+    printf("Usage: mkvafs [options] dir/files ...\n\n"
+           "Options\n"
            "    --arch              {i386,amd64,arm,arm64,rv32,rv64}\n"
            "    --compression       {aplib}\n"
            "    --out               A path to where the disk image should be written to\n"
+           "    --git-ignore        Enable discovery of ignore files and apply to file discovery\n"
            "    --v,vv              Enables extra tracing output for debugging\n");
 }
 
@@ -793,6 +795,7 @@ static char* __dirpath(const char* str)
 
     t = strrchr(p, __PATH_SEPARATOR);
     if (t == NULL) {
+        p[0] = '\0';
         return p;
     }
 
@@ -827,7 +830,7 @@ static int __discover_filters(hashtable_t* ignoreMap, struct list* files)
             }
 
             // add to ignore map
-            vafs_hashtable_set(ignoreMap, entry);
+            vafs_hashtable_set(ignoreMap, &ign);
             break;
         }
     }
@@ -840,7 +843,7 @@ static struct _ignoremap_entry* __find_filter(hashtable_t* ignoreMap, const char
     char*                    pitr = __dirpath(path);
 
     // find matching ignore file
-    while (pitr != NULL) {
+    while (pitr != NULL && *pitr) {
         char* tmp;
         void* lookup = vafs_hashtable_get(ignoreMap, &(struct _ignoremap_entry) { 
             .hash = __hash_key(pitr),
@@ -899,7 +902,7 @@ static int __discover_files_in_directory(struct progress_context* progress, cons
         struct _ignoremap_entry*    ignent;
         
         // is it allowed by the ignore map?
-        ignent = __find_filter(&ignoreMap, entry->sub_path);
+        ignent = __find_filter(&ignoreMap, entry->path);
         if (ignent != NULL) {
             if (__is_excluded(&ignent->filters, entry->sub_path)) {
                 continue;
