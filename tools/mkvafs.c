@@ -427,6 +427,25 @@ int __ministat(
     return 0;
 }
 
+
+char* __abspath(const char* path)
+{
+    char* fullPath;
+    DWORD result;
+
+    fullPath = calloc(1, MAX_PATH);
+    if (fullPath == NULL) {
+        return NULL;
+    }
+
+    result = GetFullPathName(path, MAX_PATH, fullPath, NULL);
+    if (!result) {
+        free(fullPath);
+        return NULL;
+    }
+    return fullPath;
+}
+
 #define __is_file(mode) S_ISREG(mode)
 #define __is_symlink(mode) S_ISLNK(mode)
 #define __is_directory(mode) S_ISDIR(mode)
@@ -472,6 +491,11 @@ int __ministat(
     return 0;
 }
 
+char* __abspath(const char* path)
+{
+    return realpath(path, NULL);
+}
+
 #define __is_file(mode) S_ISREG(mode)
 #define __is_symlink(mode) S_ISLNK(mode)
 #define __is_directory(mode) S_ISDIR(mode)
@@ -483,11 +507,9 @@ struct progress_context {
     int         disabled;
 
     int files;
-    int directories;
     int symlinks;
 
     int files_total;
-    int directories_total;
     int symlinks_total;
 };
 
@@ -545,20 +567,11 @@ static void __write_progress(const char* prefix, struct progress_context* contex
         return;
     }
 
-    total   = context->files_total + context->directories_total + context->symlinks_total;
-    current = context->files + context->directories + context->symlinks;
+    total   = context->files_total + context->symlinks_total;
+    current = context->files + context->symlinks;
     progress = (current * 100) / total;
 
-    printf("\33[2K\r%-20.20s [%d%%]", prefix, progress);
-    if (context->files_total) {
-        printf(" %i/%i files", context->files, context->files_total);
-    }
-    if (context->directories_total) {
-        printf(" %i/%i dirs", context->directories, context->directories_total);
-    }
-    if (context->symlinks_total) {
-        printf(" %i/%i symlinks", context->symlinks, context->symlinks_total);
-    }
+    printf("\33[2K\rcompressing [%d%%] %i/%i %-40.40s", progress, current, total, prefix);
     fflush(stdout);
 }
 
@@ -916,9 +929,6 @@ static int __discover_files_in_directory(struct progress_context* progress, cons
         }
 
         switch (entry->type) {
-            case PLATFORM_FILETYPE_DIRECTORY:
-                progress->directories_total++;
-                break;
             case PLATFORM_FILETYPE_FILE:
                 progress->files_total++;
                 break;
@@ -939,55 +949,61 @@ cleanup:
 
 static int __discover_files(struct progress_context* progress, const char** paths, int count, int gitIgnore)
 {
-    printf("mkvafs: discovering files\n");
     for (int i = 0; i < count; i++) {
         int      status;
         uint32_t filemode;
+        char*    abspath;
 
-        status = __ministat(paths[i], &filemode);
+        // resolve the full path first of all
+        abspath = __abspath(paths[i]);
+        if (abspath == NULL) {
+            fprintf(stderr, "mkvafs: failed to resolve %s\n", paths[i]);
+            return -1;
+        }
+
+        status = __ministat(abspath, &filemode);
         if (status) {
-            fprintf(stderr, "mkvafs: failed to stat %s\n", paths[i]);
+            fprintf(stderr, "mkvafs: failed to stat %s\n", abspath);
+            free(abspath);
             return status;
         }
 
         if (__is_directory(filemode)) {
-            status = __discover_files_in_directory(progress, paths[i], gitIgnore);
+            status = __discover_files_in_directory(progress, abspath, gitIgnore);
             if (status) {
-                fprintf(stderr, "mkvafs: failed to discover files in %s\n", paths[i]);
+                fprintf(stderr, "mkvafs: failed to discover files in %s\n", abspath);
+                free(abspath);
                 return status;
             }
-            progress->directories_total++;
         } else if (__is_symlink(filemode)) {
             status = __add_platform_file_entry(
-                &progress->file_list, __get_filename(paths[i]),
-                PLATFORM_FILETYPE_SYMLINK, NULL, paths[i]
+                &progress->file_list, __get_filename(abspath),
+                PLATFORM_FILETYPE_SYMLINK, NULL, abspath
             );
             if (status) {
-                fprintf(stderr, "mkvafs: failed to allocate memory for %s\n", paths[i]);
+                fprintf(stderr, "mkvafs: failed to allocate memory for %s\n", abspath);
+                free(abspath);
                 return status;
             }
             progress->symlinks_total++;
         } else if (__is_file(filemode)) {
             status = __add_platform_file_entry(
-                &progress->file_list, __get_filename(paths[i]),
-                PLATFORM_FILETYPE_FILE, NULL, paths[i]
+                &progress->file_list, __get_filename(abspath),
+                PLATFORM_FILETYPE_FILE, NULL, abspath
             );
             if (status) {
-                fprintf(stderr, "mkvafs: failed to allocate memory for %s\n", paths[i]);
+                fprintf(stderr, "mkvafs: failed to allocate memory for %s\n", abspath);
+                free(abspath);
                 return status;
             }
             progress->files_total++;
         }
+        free(abspath);
     }
-
-    printf("mkvafs: %i directories, %i files and %i symlinks\n",
-        progress->directories_total,
-        progress->files_total,
-        progress->symlinks_total
-    );
+    return 0;
 }
 
-static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, const char* base, const char* relative)
+static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, const char* abs, const char* relative)
 {
     struct VaFsDirectoryHandle* handle;
     
@@ -1008,10 +1024,8 @@ static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, con
     }
 
     // setup full
-    strcpy(&full[0], base);
-    if (full[strlen(base)] != __PATH_SEPARATOR) {
-        full[strlen(base)] = __PATH_SEPARATOR;
-    }
+    strcpy(&full[0], abs);
+    full[strlen(abs) - strlen(relative)] = '\0';
 
     // copy first token
     st = strchr(token, __PATH_SEPARATOR);
@@ -1074,7 +1088,7 @@ static int __create_image(struct __options* opts)
 
     status = __discover_files(&progressContext, &opts->paths[0], opts->paths_count, opts->git_ignore);
     if (status) {
-        fprintf(stderr, "mkvafs: cannot create image\n");
+        fprintf(stderr, "mkvafs: failed to discover files: %i\n", status);
         return status;
     }
 
@@ -1105,16 +1119,9 @@ static int __create_image(struct __options* opts)
     list_foreach(&progressContext.file_list, it) {
         struct platform_file_entry* entry = (struct platform_file_entry*)it;
         struct VaFsDirectoryHandle* directoryHandle;
-        
-        if (entry->type == PLATFORM_FILETYPE_DIRECTORY) {
-            // we do squad for directories, they get created automatically
-            // if there is any content in them
-            progressContext.directories++;
-        }
+        __write_progress(entry->sub_path, &progressContext);
 
-        __write_progress(entry->path, &progressContext);
-
-        directoryHandle = __get_directory_handle(vafsHandle, "", entry->sub_path);
+        directoryHandle = __get_directory_handle(vafsHandle, entry->path, entry->sub_path);
         if (directoryHandle == NULL) {
             fprintf(stderr, "mkvafs: failed to get internal directory handle for %s\n", entry->sub_path);
             break;
@@ -1151,7 +1158,7 @@ static int __create_image(struct __options* opts)
             }
             progressContext.files++;
         }
-        __write_progress(entry->path, &progressContext);
+        __write_progress(entry->sub_path, &progressContext);
     }
     
     if (!progressContext.disabled) {
@@ -1190,13 +1197,13 @@ int main(int argc, char *argv[])
     int status;
 
     struct __options opts = { 
-        { NULL },
-        0,
-        NULL,
-        NULL,
-        NULL,
-        0,
-        VaFsLogLevel_Warning
+        .paths = { NULL },
+        .paths_count = 0,
+        .image_path = "image.vafs",
+        .arch = __ARCHITECTURE_STR,
+        .compression = "aplib",
+        .git_ignore = 0,
+        .level = VaFsLogLevel_Warning
     };
     __parse_options(&opts, argc, argv);
 
