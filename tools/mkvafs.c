@@ -520,7 +520,7 @@ static void __show_help(void)
 {
     printf("Usage: mkvafs [options] dir/files ...\n\n"
            "Options\n"
-           "    --arch              {i386,amd64,arm,arm64,rv32,rv64}\n"
+           "    --arch              {i386,amd64,arm,arm64,rv32,rv64,all}\n"
            "    --compression       {aplib}\n"
            "    --out               A path to where the disk image should be written to\n"
            "    --git-ignore        Enable discovery of ignore files and apply to file discovery\n"
@@ -531,14 +531,22 @@ static void __show_help(void)
 static enum VaFsArchitecture __get_vafs_arch(
     const char* arch)
 {
-    if (!strcmp(arch, "x86") || !strcmp(arch, "i386"))
+    if (arch == NULL) {
+        return VaFsArchitecture_ALL;
+    }
+
+    if (strcmp(arch, "x86") == 0 || strcmp(arch, "i386") == 0)
         return VaFsArchitecture_X86;
-    else if (!strcmp(arch, "x64") || !strcmp(arch, "amd64"))
+    else if (strcmp(arch, "x64") == 0 || strcmp(arch, "amd64") == 0)
         return VaFsArchitecture_X64;
-    else if (strcmp(arch, "arm") == 0)
+    else if (strcmp(arch, "arm") == 0 || strcmp(arch, "armhf") == 0)
         return VaFsArchitecture_ARM;
     else if (strcmp(arch, "arm64") == 0)
         return VaFsArchitecture_ARM64;
+    else if (strcmp(arch, "r32") == 0)
+        return VaFsArchitecture_RISCV32;
+    else if (strcmp(arch, "r64") == 0)
+        return VaFsArchitecture_RISCV64;
     else {
         fprintf(stderr, "mkvafs: unknown architecture '%s'\n", arch);
         exit(-1);
@@ -1171,7 +1179,7 @@ static int __create_image(struct __options* opts)
     return status;
 }
 
-static void __parse_options(struct __options* opts, int argc, char *argv[])
+static int __parse_options(struct __options* opts, int argc, char *argv[])
 {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--arch") && (i + 1) < argc) {
@@ -1186,10 +1194,14 @@ static void __parse_options(struct __options* opts, int argc, char *argv[])
             opts->level = VaFsLogLevel_Debug;
         } else if (!strcmp(argv[i], "--git-ignore")) {
             opts->git_ignore = 1;
+        } else if (!strncmp(argv[i], "-", 1)) {
+            fprintf(stderr, "unmkvfs: unrecognized parameter %s\n", argv[i]);
+            return -1;
         } else {
             opts->paths[opts->paths_count++] = argv[i];
         }
     }
+    return 0;
 }
 
 int main(int argc, char *argv[])
@@ -1200,15 +1212,19 @@ int main(int argc, char *argv[])
         .paths = { NULL },
         .paths_count = 0,
         .image_path = "image.vafs",
-        .arch = __ARCHITECTURE_STR,
+        .arch = NULL,
         .compression = "aplib",
         .git_ignore = 0,
         .level = VaFsLogLevel_Warning
     };
-    __parse_options(&opts, argc, argv);
+    
+    if (__parse_options(&opts, argc, argv)) {
+        __show_help();
+        return -1;
+    }
 
     // validate parameters
-    if (opts.arch == NULL || !opts.paths_count) {
+    if (!opts.paths_count) {
         __show_help();
         return -1;
     }
