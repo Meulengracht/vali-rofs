@@ -65,6 +65,7 @@ enum VaFsArchitecture {
     VaFsArchitecture_ARM64 = 0xAA64,
     VaFsArchitecture_RISCV32 = 0x5032,
     VaFsArchitecture_RISCV64 = 0x5064,
+    VaFsArchitecture_ALL = 0xDEAD,
 };
 
 struct VaFsFeatureHeader {

@@ -88,6 +88,12 @@ int __symlink(const char* path, const char* target)
 
 #endif
 
+struct __options {
+    const char*       image_path;
+    const char*       out_path;
+    enum VaFsLogLevel level;
+};
+
 struct progress_context {
     int disabled;
 
@@ -324,6 +330,25 @@ static int __handle_overview(struct VaFs* vafsHandle, struct progress_context* p
     return 0;
 }
 
+static int __parse_options(struct __options* opts, int argc, char *argv[])
+{
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--out") && (i + 1) < argc) {
+            opts->out_path = argv[++i];
+        } else if (!strcmp(argv[i], "--v")) {
+            opts->level = VaFsLogLevel_Info;
+        } else if (!strcmp(argv[i], "--vv")) {
+            opts->level = VaFsLogLevel_Debug;
+        } else if (!strncmp(argv[i], "-", 1)) {
+            fprintf(stderr, "mkvfs: unrecognized parameter %s\n", argv[i]);
+            return -1;
+        } else {
+            opts->image_path = argv[i];
+        }
+    }
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     struct VaFsDirectoryHandle* directoryHandle = NULL;
@@ -332,35 +357,25 @@ int main(int argc, char *argv[])
     struct progress_context     progressContext = { 0 };
     int                         exitCode = 0;
 
-    char* imagePath = NULL;
-    char* destinationPath = "vafs-root";
-
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--out") && (i + 1) < argc) {
-            destinationPath = argv[++i];
-        }
-		else if (!strcmp(argv[i], "--v")) {
-			vafs_log_initalize(VaFsLogLevel_Info);
-            progressContext.disabled = 1;
-		}
-		else if (!strcmp(argv[i], "--vv")) {
-			vafs_log_initalize(VaFsLogLevel_Debug);
-            progressContext.disabled = 1;
-		}
-        else {
-            imagePath = argv[i];
-        }
+    struct __options opts = { 
+        .image_path = NULL,
+        .out_path = "vafs-root",
+        .level = VaFsLogLevel_Warning
+    };
+    
+    if (__parse_options(&opts, argc, argv)) {
+        __show_help();
+        return -1;
     }
 
-    if (imagePath == NULL) {
+    if (opts.image_path == NULL) {
         __show_help();
         return -1;
     }
     
-    
-    status = vafs_open_file(imagePath, &vafsHandle);
+    status = vafs_open_file(opts.image_path, &vafsHandle);
     if (status) {
-        fprintf(stderr, "unmkvafs: cannot open vafs image: %s\n", imagePath);
+        fprintf(stderr, "unmkvafs: cannot open vafs image: %s\n", opts.image_path);
         return -1;
     }
 
@@ -382,9 +397,9 @@ int main(int argc, char *argv[])
         goto error;
     }
 
-    status = __extract_directory(&progressContext, directoryHandle, destinationPath, destinationPath);
+    status = __extract_directory(&progressContext, directoryHandle, opts.out_path, opts.out_path);
     if (status != 0) {
-        fprintf(stderr, "unmkvafs: unable to extract to directory %s\n", destinationPath);
+        fprintf(stderr, "unmkvafs: unable to extract to directory %s\n", opts.out_path);
         goto error;
     }
 
