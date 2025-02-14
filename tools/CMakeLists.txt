@@ -41,6 +41,11 @@ add_executable(mkvafs
     filter.c
 )
 target_compile_definitions(mkvafs PRIVATE ${ADDITIONAL_DEFINES})
+target_compile_options(mkvafs
+    PRIVATE
+        $<$<CXX_COMPILER_ID:Clang>:-Wl,-z,noexecstack>
+        $<$<CXX_COMPILER_ID:GNU>:-Wl,-z,noexecstack>
+)
 target_link_libraries(mkvafs ${ADDITIONAL_LIBS})
 
 # build the unmkvafs tool that is a generic utility for unpacking
@@ -50,6 +55,11 @@ add_executable(unmkvafs
     filter.c
 )
 target_compile_definitions(unmkvafs PRIVATE ${ADDITIONAL_DEFINES})
+target_compile_options(unmkvafs
+    PRIVATE
+        $<$<CXX_COMPILER_ID:Clang>:-Wl,-z,noexecstack>
+        $<$<CXX_COMPILER_ID:GNU>:-Wl,-z,noexecstack>
+)
 target_link_libraries(unmkvafs ${ADDITIONAL_LIBS})
 
 # add support for installing
