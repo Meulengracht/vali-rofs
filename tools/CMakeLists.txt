@@ -21,6 +21,12 @@ if (VAFS_BUILD_FILTER_APLIB)
     set(ADDITIONAL_DEFINES __VAFS_FILTER_APLIB)
 endif (VAFS_BUILD_FILTER_APLIB)
 
+# add filter library targets and includes
+if (VAFS_BUILD_FILTER_BRIEFLZ)
+    set(ADDITIONAL_LIBS ${ADDITIONAL_LIBS} brieflz)
+    set(ADDITIONAL_DEFINES __VAFS_FILTER_BRIEFLZ)
+endif (VAFS_BUILD_FILTER_BRIEFLZ)
+
 # build the vafs-util tool, which is the fuse filesystem
 if (NOT WIN32 AND NOT MOLLENOS)
     add_executable(vafs-util vafs.c filter.c)

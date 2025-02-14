@@ -1,5 +1,5 @@
 /**
- * Copyright 2022, Philip Meulengracht
+ * Copyright, Philip Meulengracht
  *
  * This program is free software : you can redistribute it and / or modify
  * it under the terms of the GNU General Public License as published by
@@ -27,7 +27,8 @@
 #include <string.h>
 
 enum VaFsFilterType {
-    VaFsFilterType_APLIB
+    VaFsFilterType_APLIB,
+    VaFsFilterType_BRIEFLZ
 };
 
 struct VaFsFeatureFilter {
@@ -104,12 +105,89 @@ static int __aplib_decode(void* Input, uint32_t InputLength, void* Output, uint3
     }
 
     if (decompressedSize > *OutputLength) {
-        errno = ENODATA;
+        errno = ENOSPC;
         return -1;
     }
 
     decompressedSize = aPsafe_depack(Input, InputLength, Output, decompressedSize);
     *OutputLength = decompressedSize;
+    return 0;
+}
+#endif
+
+#if defined(__VAFS_FILTER_BRIEFLZ)
+#include <brieflz.h>
+#ifndef CB_CALLCONV
+# if defined(AP_DLL)
+#  define CB_CALLCONV __stdcall
+# elif defined(__GNUC__)
+#  define CB_CALLCONV
+# else
+#  define CB_CALLCONV __cdecl
+# endif
+#endif
+
+struct __brieflz_block {
+    uint64_t usize;
+    char     payload[];
+};
+
+static int __brieflz_encode(void* source, uint32_t sourceLength, void** output, uint32_t* outputLength)
+{
+    struct __brieflz_block* block;
+    uint32_t                compressedSize;
+    void*                   workmemory = NULL;
+    char                    header[16];
+
+    block = malloc(blz_max_packed_size(sourceLength) + sizeof(struct __brieflz_block));
+    if (block == NULL) {
+        errno = ENOMEM;
+        goto error;
+    }
+
+    workmemory = malloc(blz_workmem_size_level(sourceLength, 9));
+    if (workmemory == NULL) {
+        errno = ENOMEM;
+        goto error;
+    }
+
+    compressedSize = blz_pack_level(source, &block->payload[0], sourceLength, workmemory, 9);
+    if (compressedSize == BLZ_ERROR) {
+        errno = EINVAL;
+        goto error;
+    }
+    free(workmemory);
+
+    // store the uncompressed size
+    block->usize = sourceLength;
+
+    *output = block;
+    *outputLength = compressedSize + sizeof(struct __brieflz_block);
+    return 0;
+
+error:
+    free(block);
+    free(workmemory);
+    return -1;
+}
+
+static int __brieflz_decode(void* source, uint32_t sourceLength, void* output, uint32_t* outputLength)
+{
+    uint64_t                decompressedSize;
+    struct __brieflz_block* block = source;
+
+    if (block->usize > *outputLength) {
+        errno = ENOSPC;
+        return -1;
+    }
+
+    decompressedSize = blz_depack_safe(&block->payload[0], sourceLength, output, block->usize);
+    if (decompressedSize == BLZ_ERROR) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    *outputLength = (uint32_t)decompressedSize;
     return 0;
 }
 #endif
@@ -128,6 +206,12 @@ static int __set_filter_ops(
         case VaFsFilterType_APLIB: {
             filterOps.Encode = __aplib_encode;
             filterOps.Decode = __aplib_decode;
+        } break;
+#endif
+#if defined(__VAFS_FILTER_BRIEFLZ)
+        case VaFsFilterType_BRIEFLZ: {
+            filterOps.Encode = __brieflz_encode;
+            filterOps.Decode = __brieflz_decode;
         } break;
 #endif
         default: {
@@ -159,6 +243,10 @@ static enum VaFsFilterType __get_filter_from_name(
 #if defined(__VAFS_FILTER_APLIB)
     if (!strcmp(filterName, "aplib"))
         return VaFsFilterType_APLIB;
+#endif
+#if defined(__VAFS_FILTER_BRIEFLZ)
+    if (!strcmp(filterName, "brieflz"))
+        return VaFsFilterType_BRIEFLZ;
 #endif
     return -1;
 }
