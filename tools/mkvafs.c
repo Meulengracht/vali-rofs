@@ -1,5 +1,5 @@
 /**
- * Copyright 2022, Philip Meulengracht
+ * Copyright, Philip Meulengracht
  *
  * This program is free software : you can redistribute it and / or modify
  * it under the terms of the GNU General Public License as published by
@@ -521,7 +521,7 @@ static void __show_help(void)
     printf("Usage: mkvafs [options] dir/files ...\n\n"
            "Options\n"
            "    --arch              {i386,amd64,arm,arm64,rv32,rv64,all}\n"
-           "    --compression       {aplib}\n"
+           "    --compression       {aplib,brieflz}\n"
            "    --out               A path to where the disk image should be written to\n"
            "    --git-ignore        Enable discovery of ignore files and apply to file discovery\n"
            "    --v,vv              Enables extra tracing output for debugging\n");
@@ -1213,7 +1213,11 @@ int main(int argc, char *argv[])
         .paths_count = 0,
         .image_path = "image.vafs",
         .arch = NULL,
+#ifdef __VAFS_FILTER_APLIB
         .compression = "aplib",
+#elif __VAFS_FILTER_BRIEFLZ
+        .compression = "brieflz",
+#endif
         .git_ignore = 0,
         .level = VaFsLogLevel_Warning
     };
