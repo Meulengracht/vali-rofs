@@ -91,6 +91,7 @@ int __symlink(const char* path, const char* target)
 struct __options {
     const char*       image_path;
     const char*       out_path;
+    int               no_progress;
     enum VaFsLogLevel level;
 };
 
@@ -339,6 +340,8 @@ static int __parse_options(struct __options* opts, int argc, char *argv[])
             opts->level = VaFsLogLevel_Info;
         } else if (!strcmp(argv[i], "--vv")) {
             opts->level = VaFsLogLevel_Debug;
+        } else if (!strcmp(argv[i], "--no-progress")) {
+            opts->no_progress = 1;
         } else if (!strncmp(argv[i], "-", 1)) {
             fprintf(stderr, "mkvfs: unrecognized parameter %s\n", argv[i]);
             return -1;
@@ -372,7 +375,11 @@ int main(int argc, char *argv[])
         __show_help();
         return -1;
     }
-    
+
+    if (opts.no_progress) {
+        progressContext.disabled = 1;
+    }
+
     status = vafs_open_file(opts.image_path, &vafsHandle);
     if (status) {
         fprintf(stderr, "unmkvafs: cannot open vafs image: %s\n", opts.image_path);
@@ -406,6 +413,8 @@ int main(int argc, char *argv[])
     if (!progressContext.disabled) {
         printf("\n");
     }
+
+    goto exit;
 
 error:
     exitCode = -1;
