@@ -168,15 +168,23 @@ static struct VaFsFeatureHeader* __load_feature(
     return feature;
 }
 
-static int __default_fail_encode()
+static int __default_fail_encode(void* Input, uint32_t InputLength, void** Output, uint32_t* OutputLength)
 {
+    (void)Input;
+    (void)InputLength;
+    (void)Output;
+    (void)OutputLength;
     VAFS_ERROR("__default_fail_encode: encode handler not installed\n");
     errno = ENOTSUP;
     return -1;
 }
 
-static int __default_fail_decode()
+static int __default_fail_decode(void* Input, uint32_t InputLength, void* Output, uint32_t* OutputLength)
 {
+    (void)Input;
+    (void)InputLength;
+    (void)Output;
+    (void)OutputLength;
     VAFS_ERROR("__default_fail_decode: decode handler not installed\n");
     errno = ENOTSUP;
     return -1;
