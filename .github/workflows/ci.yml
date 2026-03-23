@@ -1,0 +1,76 @@
+name: CI Build and Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+      fail-fast: false
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies (Ubuntu)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libfuse3-dev
+
+    - name: Setup CMake
+      uses: jwlawson/actions-setup-cmake@v2
+      with:
+        cmake-version: '3.14.x'
+
+    - name: Configure CMake (Unix)
+      if: runner.os != 'Windows'
+      run: |
+        mkdir build
+        cd build
+        cmake .. -DCMAKE_BUILD_TYPE=Release -DVAFS_BUILD_TOOLS=ON
+
+    - name: Configure CMake (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        mkdir build
+        cd build
+        cmake .. -DCMAKE_BUILD_TYPE=Release -DVAFS_BUILD_TOOLS=ON
+
+    - name: Build
+      run: cmake --build build --config Release
+
+    - name: List built binaries (Unix)
+      if: runner.os != 'Windows'
+      run: ls -lh build/bin/
+
+    - name: List built binaries (Windows)
+      if: runner.os == 'Windows'
+      run: dir build\bin\
+
+    - name: Run test harness (Unix)
+      if: runner.os != 'Windows'
+      run: |
+        cd tests
+        bash test_harness.sh
+
+    - name: Run test harness (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        cd tests
+        bash test_harness.sh
+      shell: bash
+
+    - name: Upload test artifacts on failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-artifacts-${{ matrix.os }}
+        path: tests/test_output/
