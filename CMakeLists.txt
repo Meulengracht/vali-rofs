@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.14.3)
 project(vafs C)
 
 option(VAFS_BUILD_TOOLS "Build fs tools for VaFs" ON)
+option(VAFS_BUILD_BENCHMARKS "Build benchmarks for VaFs" ON)
 
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -14,3 +15,7 @@ add_subdirectory(filters)
 if (VAFS_BUILD_TOOLS)
     add_subdirectory(tools)
 endif(VAFS_BUILD_TOOLS)
+
+if (VAFS_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
+endif(VAFS_BUILD_BENCHMARKS)
