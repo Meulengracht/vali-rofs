@@ -14,3 +14,4 @@ build/
 .oven/
 /.vs
 .vscode/
+tests/test_output/
