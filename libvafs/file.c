@@ -229,8 +229,10 @@ size_t vafs_file_read(
     void*                  buffer,
     size_t                 size)
 {
-    size_t read;
-    int    status;
+    size_t   read;
+    int      status;
+    uint32_t bytesRemaining;
+    uint32_t readOffset;
 
     if (!handle) {
         errno = EINVAL;
@@ -243,6 +245,30 @@ size_t vafs_file_read(
         return 0;
     }
 
+    // Validate file position doesn't exceed file length
+    if (handle->Position > handle->File->Descriptor.FileLength) {
+        VAFS_ERROR("vafs_file_read: position %u exceeds file length %u\n",
+            handle->Position, handle->File->Descriptor.FileLength);
+        errno = EINVAL;
+        return 0;
+    }
+
+    // Calculate bytes remaining in file
+    bytesRemaining = handle->File->Descriptor.FileLength - handle->Position;
+
+    // Clamp read size to remaining bytes
+    if (size > bytesRemaining) {
+        size = bytesRemaining;
+    }
+
+    // Check for integer overflow in offset calculation
+    readOffset = handle->File->Descriptor.Data.Offset + handle->Position;
+    if (readOffset < handle->File->Descriptor.Data.Offset) {
+        VAFS_ERROR("vafs_file_read: integer overflow in offset calculation\n");
+        errno = EINVAL;
+        return 0;
+    }
+
     status = vafs_stream_lock(handle->File->VaFs->DataStream);
     if (status) {
         errno = EBUSY;
@@ -252,7 +278,7 @@ size_t vafs_file_read(
     status = vafs_stream_seek(
         handle->File->VaFs->DataStream,
         handle->File->Descriptor.Data.Index,
-        handle->File->Descriptor.Data.Offset + handle->Position
+        readOffset
     );
     if (status) {
         vafs_stream_unlock(handle->File->VaFs->DataStream);
