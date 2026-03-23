@@ -165,6 +165,154 @@ static int __get_descriptor_size(
     }
 }
 
+static int __validate_descriptor_length(
+    VaFsDescriptor_t* descriptor,
+    int               expectedSize)
+{
+    // Descriptor length must be at least the base descriptor size
+    if (descriptor->Length < sizeof(VaFsDescriptor_t)) {
+        VAFS_ERROR("__validate_descriptor_length: descriptor length %u is less than minimum %zu\n",
+            descriptor->Length, sizeof(VaFsDescriptor_t));
+        return -1;
+    }
+
+    // Descriptor length must be at least the expected size for this type
+    if (descriptor->Length < (uint16_t)expectedSize) {
+        VAFS_ERROR("__validate_descriptor_length: descriptor length %u is less than expected %d for type %u\n",
+            descriptor->Length, expectedSize, descriptor->Type);
+        return -1;
+    }
+
+    // Check for reasonable maximum length (prevent massive allocations)
+    // Maximum descriptor size should be type size + reasonable name length
+    // Use VAFS_NAME_MAX * 2 to allow for file name + symlink target
+    if (descriptor->Length > (uint16_t)expectedSize + (VAFS_NAME_MAX * 2)) {
+        VAFS_ERROR("__validate_descriptor_length: descriptor length %u exceeds maximum %d\n",
+            descriptor->Length, expectedSize + (VAFS_NAME_MAX * 2));
+        return -1;
+    }
+
+    return 0;
+}
+
+static int __validate_file_descriptor(
+    VaFsFileDescriptor_t* descriptor,
+    const char*           extendedData)
+{
+    size_t nameLength;
+
+    // Validate the descriptor length
+    if (__validate_descriptor_length(&descriptor->Base, sizeof(VaFsFileDescriptor_t)) != 0) {
+        return -1;
+    }
+
+    // Calculate and validate name length
+    nameLength = descriptor->Base.Length - sizeof(VaFsFileDescriptor_t);
+    if (nameLength == 0) {
+        VAFS_ERROR("__validate_file_descriptor: file has no name\n");
+        return -1;
+    }
+
+    if (nameLength > VAFS_NAME_MAX) {
+        VAFS_ERROR("__validate_file_descriptor: file name length %zu exceeds maximum %d\n",
+            nameLength, VAFS_NAME_MAX);
+        return -1;
+    }
+
+    // Validate block position values
+    if (descriptor->Data.Index != VA_FS_INVALID_BLOCK && descriptor->Data.Offset == VA_FS_INVALID_OFFSET) {
+        VAFS_ERROR("__validate_file_descriptor: invalid block position: index=%u, offset=%u\n",
+            descriptor->Data.Index, descriptor->Data.Offset);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int __validate_directory_descriptor(
+    VaFsDirectoryDescriptor_t* descriptor,
+    const char*                extendedData)
+{
+    size_t nameLength;
+
+    // Validate the descriptor length
+    if (__validate_descriptor_length(&descriptor->Base, sizeof(VaFsDirectoryDescriptor_t)) != 0) {
+        return -1;
+    }
+
+    // Calculate and validate name length
+    nameLength = descriptor->Base.Length - sizeof(VaFsDirectoryDescriptor_t);
+    if (nameLength == 0) {
+        VAFS_ERROR("__validate_directory_descriptor: directory has no name\n");
+        return -1;
+    }
+
+    if (nameLength > VAFS_NAME_MAX) {
+        VAFS_ERROR("__validate_directory_descriptor: directory name length %zu exceeds maximum %d\n",
+            nameLength, VAFS_NAME_MAX);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int __validate_symlink_descriptor(
+    VaFsSymlinkDescriptor_t* descriptor,
+    const char*              extendedData)
+{
+    size_t totalExtendedLength;
+    size_t expectedLength;
+
+    // Validate the descriptor length
+    if (__validate_descriptor_length(&descriptor->Base, sizeof(VaFsSymlinkDescriptor_t)) != 0) {
+        return -1;
+    }
+
+    // Validate name and target lengths are non-zero
+    if (descriptor->NameLength == 0) {
+        VAFS_ERROR("__validate_symlink_descriptor: symlink has no name\n");
+        return -1;
+    }
+
+    if (descriptor->TargetLength == 0) {
+        VAFS_ERROR("__validate_symlink_descriptor: symlink has no target\n");
+        return -1;
+    }
+
+    // Validate name length
+    if (descriptor->NameLength > VAFS_NAME_MAX) {
+        VAFS_ERROR("__validate_symlink_descriptor: name length %u exceeds maximum %d\n",
+            descriptor->NameLength, VAFS_NAME_MAX);
+        return -1;
+    }
+
+    // Validate target length
+    if (descriptor->TargetLength > VAFS_PATH_MAX) {
+        VAFS_ERROR("__validate_symlink_descriptor: target length %u exceeds maximum %d\n",
+            descriptor->TargetLength, VAFS_PATH_MAX);
+        return -1;
+    }
+
+    // Check for integer overflow in addition
+    if ((uint32_t)descriptor->NameLength + (uint32_t)descriptor->TargetLength < descriptor->NameLength) {
+        VAFS_ERROR("__validate_symlink_descriptor: integer overflow in name+target length\n");
+        return -1;
+    }
+
+    // Validate that descriptor length matches the sum of base size + name + target
+    totalExtendedLength = (size_t)descriptor->NameLength + descriptor->TargetLength;
+    expectedLength = sizeof(VaFsSymlinkDescriptor_t) + totalExtendedLength;
+
+    if (descriptor->Base.Length != expectedLength) {
+        VAFS_ERROR("__validate_symlink_descriptor: descriptor length %u does not match expected %zu (base=%zu + name=%u + target=%u)\n",
+            descriptor->Base.Length, expectedLength, sizeof(VaFsSymlinkDescriptor_t),
+            descriptor->NameLength, descriptor->TargetLength);
+        return -1;
+    }
+
+    return 0;
+}
+
 static int __read_descriptor(
     struct VaFsDirectoryReader* reader,
     char*                       buffer,
@@ -264,13 +412,19 @@ static struct VaFsFile* __create_file_from_descriptor(
     const char*           extendedData)
 {
     struct VaFsFile* file;
-    
+
+    // Validate the file descriptor
+    if (__validate_file_descriptor(descriptor, extendedData) != 0) {
+        errno = EINVAL;
+        return NULL;
+    }
+
     file = (struct VaFsFile*)malloc(sizeof(struct VaFsFile));
     if (!file) {
         errno = ENOMEM;
         return NULL;
     }
-    
+
     memcpy(&file->Descriptor, descriptor, sizeof(VaFsFileDescriptor_t));
     file->Name = __read_extended_string(extendedData, descriptor->Base.Length - sizeof(VaFsFileDescriptor_t));
     file->VaFs = vafs;
@@ -283,13 +437,19 @@ static struct VaFsDirectory* __create_directory_from_descriptor(
     const char*                extendedData)
 {
     struct VaFsDirectoryReader* directory;
-    
+
+    // Validate the directory descriptor
+    if (__validate_directory_descriptor(descriptor, extendedData) != 0) {
+        errno = EINVAL;
+        return NULL;
+    }
+
     directory = (struct VaFsDirectoryReader*)malloc(sizeof(struct VaFsDirectoryReader));
     if (!directory) {
         errno = ENOMEM;
         return NULL;
     }
-    
+
     directory->State     = VaFsDirectoryState_Open;
     directory->Entries   = NULL;
     directory->Base.Name = __read_extended_string(extendedData, descriptor->Base.Length - sizeof(VaFsDirectoryDescriptor_t));
@@ -304,13 +464,19 @@ static struct VaFsSymlink* __create_symlink_from_descriptor(
     const char*              extendedData)
 {
     struct VaFsSymlink* symlink;
-    
+
+    // Validate the symlink descriptor
+    if (__validate_symlink_descriptor(descriptor, extendedData) != 0) {
+        errno = EINVAL;
+        return NULL;
+    }
+
     symlink = (struct VaFsSymlink*)malloc(sizeof(struct VaFsSymlink));
     if (!symlink) {
         errno = ENOMEM;
         return NULL;
     }
-    
+
     memcpy(&symlink->Descriptor, descriptor, sizeof(VaFsSymlinkDescriptor_t));
     symlink->Name   = __read_extended_string(extendedData, descriptor->NameLength);
     symlink->Target = __read_extended_string(extendedData + descriptor->NameLength, descriptor->TargetLength);
@@ -391,6 +557,17 @@ static int __load_directory(
         VAFS_ERROR("__load_directory: failed to read directory header\n");
         vafs_stream_unlock(reader->Base.VaFs->DescriptorStream);
         return status;
+    }
+
+    // Validate directory entry count is reasonable
+    // A directory with more than 1 million entries is suspicious and likely malformed
+    #define MAX_DIRECTORY_ENTRIES 1000000
+    if (header.Count > MAX_DIRECTORY_ENTRIES) {
+        VAFS_ERROR("__load_directory: directory entry count %u exceeds maximum %d\n",
+            header.Count, MAX_DIRECTORY_ENTRIES);
+        vafs_stream_unlock(reader->Base.VaFs->DescriptorStream);
+        errno = EINVAL;
+        return -1;
     }
 
     // read the directory entries
