@@ -206,26 +206,53 @@ static int __load_block_headers(
 {
     int    status;
     size_t read;
+    long   blockHeadersOffset;
+    size_t totalHeaderSize;
 
     VAFS_DEBUG("__load_block_headers()\n");
+
+    // Validate block headers count is reasonable
+    #define MAX_BLOCK_HEADERS 1000000
+    if (stream->Header.BlockHeadersCount > MAX_BLOCK_HEADERS) {
+        VAFS_ERROR("__load_block_headers: block headers count %u exceeds maximum %d\n",
+            stream->Header.BlockHeadersCount, MAX_BLOCK_HEADERS);
+        errno = EINVAL;
+        return -1;
+    }
+
+    // Check for integer overflow in total header size calculation
+    totalHeaderSize = (size_t)stream->Header.BlockHeadersCount * sizeof(struct BlockHeader);
+    if (stream->Header.BlockHeadersCount > 0 && totalHeaderSize / stream->Header.BlockHeadersCount != sizeof(struct BlockHeader)) {
+        VAFS_ERROR("__load_block_headers: integer overflow in header size calculation\n");
+        errno = EINVAL;
+        return -1;
+    }
+
+    // Validate block headers offset doesn't overflow when added to device offset
+    blockHeadersOffset = __get_block_headers_offset(stream);
+    if (blockHeadersOffset < stream->DeviceOffset) {
+        VAFS_ERROR("__load_block_headers: block headers offset overflow\n");
+        errno = EINVAL;
+        return -1;
+    }
 
     // allocate the block headers
     stream->BlockHeaders.Count    = stream->Header.BlockHeadersCount;
     stream->BlockHeaders.Capacity = stream->Header.BlockHeadersCount;
-    stream->BlockHeaders.Headers  = (struct BlockHeader*)malloc(sizeof(struct BlockHeader) * stream->Header.BlockHeadersCount);
+    stream->BlockHeaders.Headers  = (struct BlockHeader*)malloc(totalHeaderSize);
     if (!stream->BlockHeaders.Headers) {
         errno = ENOMEM;
         return -1;
     }
 
     // seek to block headers
-    VAFS_DEBUG("__load_block_headers: seeking to block headers %lu\n", __get_block_headers_offset(stream));
-    vafs_streamdevice_seek(stream->Device, __get_block_headers_offset(stream), SEEK_SET);
+    VAFS_DEBUG("__load_block_headers: seeking to block headers %ld\n", blockHeadersOffset);
+    vafs_streamdevice_seek(stream->Device, blockHeadersOffset, SEEK_SET);
 
     // read the block headers
     status = vafs_streamdevice_read(
         stream->Device, stream->BlockHeaders.Headers,
-        sizeof(struct BlockHeader) * stream->BlockHeaders.Count,
+        totalHeaderSize,
         &read
     );
     if (status != 0) {
@@ -437,7 +464,7 @@ static int __load_blockbuffer(
 }
 
 int vafs_stream_seek(
-    struct VaFsStream* stream, 
+    struct VaFsStream* stream,
     vafsblock_t        blockIndex,
     uint32_t           blockOffset)
 {
@@ -453,7 +480,15 @@ int vafs_stream_seek(
         errno = EINVAL;
         return -1;
     }
-    
+
+    // Validate block index against block count
+    if (blockIndex >= stream->BlockHeaders.Count) {
+        VAFS_ERROR("vafs_stream_seek: block index %u exceeds block count %u\n",
+            blockIndex, stream->BlockHeaders.Count);
+        errno = EINVAL;
+        return -1;
+    }
+
     // seek to start of stream
     while (1) {
         blockHeader = __get_block_header(stream, i);
@@ -472,6 +507,21 @@ int vafs_stream_seek(
             // nope, reduce offset, switch to next block
             targetOffset -= stream->Header.BlockSize;
             targetBlock++;
+
+            // Check for overflow: if targetBlock wrapped around, we have an overflow
+            if (targetBlock < i) {
+                VAFS_ERROR("vafs_stream_seek: block index overflow\n");
+                errno = EINVAL;
+                return -1;
+            }
+
+            // Also validate targetBlock doesn't exceed block count
+            if (targetBlock >= stream->BlockHeaders.Count) {
+                VAFS_ERROR("vafs_stream_seek: computed block index %u exceeds block count %u\n",
+                    targetBlock, stream->BlockHeaders.Count);
+                errno = EINVAL;
+                return -1;
+            }
         }
         i++;
     }

@@ -3,6 +3,7 @@ project(vafs C)
 
 option(VAFS_BUILD_TOOLS "Build fs tools for VaFs" ON)
 option(VAFS_BUILD_BENCHMARKS "Build benchmarks for VaFs" ON)
+option(VAFS_BUILD_TESTS "Build tests for VaFs" ON)
 
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -19,3 +20,7 @@ endif(VAFS_BUILD_TOOLS)
 if (VAFS_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
 endif(VAFS_BUILD_BENCHMARKS)
+
+if (VAFS_BUILD_TESTS)
+    add_subdirectory(tests)
+endif(VAFS_BUILD_TESTS)
