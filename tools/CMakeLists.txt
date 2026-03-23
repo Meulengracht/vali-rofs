@@ -3,7 +3,13 @@
 
 # find FUSE module aswell to support mounting
 if (NOT WIN32 AND NOT MOLLENOS)
-    find_package(FUSE REQUIRED)
+    find_package(FUSE)
+    if (FUSE_FOUND)
+        set(VAFS_BUILD_FUSE_UTIL ON)
+    else()
+        message(STATUS "FUSE not found - vafs-util will not be built")
+        set(VAFS_BUILD_FUSE_UTIL OFF)
+    endif()
 endif()
 
 # build a list of additional libraries to link against
@@ -28,7 +34,7 @@ if (VAFS_BUILD_FILTER_BRIEFLZ)
 endif (VAFS_BUILD_FILTER_BRIEFLZ)
 
 # build the vafs-util tool, which is the fuse filesystem
-if (NOT WIN32 AND NOT MOLLENOS)
+if (VAFS_BUILD_FUSE_UTIL)
     add_executable(vafs-util vafs.c filter.c)
     target_link_libraries(vafs-util ${FUSE_LIBRARIES} ${ADDITIONAL_LIBS})
 endif ()
