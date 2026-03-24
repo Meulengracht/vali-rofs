@@ -222,16 +222,93 @@ static int __load_features(
 static int __verify_header(
     struct VaFs* vafs)
 {
+    uint32_t minDescriptorOffset;
+    uint32_t maxDescriptorOffset;
+
+    // Validate magic number
     if (vafs->Header.Magic != VA_FS_MAGIC) {
         VAFS_ERROR("__verify_header: invalid image magic 0x%x\n", vafs->Header.Magic);
+        errno = EINVAL;
         return -1;
     }
-    
+
+    // Validate version
     if (vafs->Header.Version != VA_FS_VERSION) {
         VAFS_ERROR("__verify_header: invalid image version 0x%x\n", vafs->Header.Version);
+        errno = EINVAL;
         return -1;
     }
-    
+
+    // Validate feature count bounds
+    if (vafs->Header.FeatureCount > VA_FS_MAX_FEATURES) {
+        VAFS_ERROR("__verify_header: feature count %u exceeds maximum %u\n",
+                   vafs->Header.FeatureCount, VA_FS_MAX_FEATURES);
+        errno = EINVAL;
+        return -1;
+    }
+
+    // Validate reserved field (must be zero for format stability)
+    if (vafs->Header.Reserved != 0) {
+        VAFS_ERROR("__verify_header: reserved field must be zero, got 0x%x\n",
+                   vafs->Header.Reserved);
+        errno = EINVAL;
+        return -1;
+    }
+
+    // Validate descriptor block offset
+    // Must be after header (minimum offset)
+    minDescriptorOffset = sizeof(VaFsHeader_t);
+    if (vafs->Header.DescriptorBlockOffset < minDescriptorOffset) {
+        VAFS_ERROR("__verify_header: descriptor block offset %u is before end of header (min %u)\n",
+                   vafs->Header.DescriptorBlockOffset, minDescriptorOffset);
+        errno = EINVAL;
+        return -1;
+    }
+
+    // Validate data block offset
+    // Must be after descriptor block offset
+    if (vafs->Header.DataBlockOffset <= vafs->Header.DescriptorBlockOffset) {
+        VAFS_ERROR("__verify_header: data block offset %u must be after descriptor block offset %u\n",
+                   vafs->Header.DataBlockOffset, vafs->Header.DescriptorBlockOffset);
+        errno = EINVAL;
+        return -1;
+    }
+
+    // Check for offset arithmetic overflow
+    // The descriptor block should reasonably fit between header and data block
+    // Stream header size is 16 bytes (4 uint32_t fields)
+    maxDescriptorOffset = vafs->Header.DataBlockOffset - 16 - VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    if (vafs->Header.DescriptorBlockOffset > maxDescriptorOffset) {
+        VAFS_ERROR("__verify_header: descriptor block offset %u too large, max allowed %u\n",
+                   vafs->Header.DescriptorBlockOffset, maxDescriptorOffset);
+        errno = EINVAL;
+        return -1;
+    }
+
+    // Validate root descriptor has reasonable values
+    // A valid block index should not be the invalid block marker
+    if (vafs->Header.RootDescriptor.Index == VA_FS_INVALID_BLOCK) {
+        VAFS_ERROR("__verify_header: root descriptor has invalid block index\n");
+        errno = EINVAL;
+        return -1;
+    }
+
+    // Root descriptor offset should not be invalid offset marker
+    if (vafs->Header.RootDescriptor.Offset == VA_FS_INVALID_OFFSET) {
+        VAFS_ERROR("__verify_header: root descriptor has invalid offset\n");
+        errno = EINVAL;
+        return -1;
+    }
+
+    // Root descriptor offset should be within a reasonable block size
+    // (descriptors are limited by block size)
+    if (vafs->Header.RootDescriptor.Offset >= VA_FS_DESCRIPTOR_BLOCK_SIZE) {
+        VAFS_ERROR("__verify_header: root descriptor offset %u exceeds descriptor block size %u\n",
+                   vafs->Header.RootDescriptor.Offset, VA_FS_DESCRIPTOR_BLOCK_SIZE);
+        errno = EINVAL;
+        return -1;
+    }
+
     return 0;
 }
 
