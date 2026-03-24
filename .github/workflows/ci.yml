@@ -68,6 +68,19 @@ jobs:
         bash github-ci.sh
       shell: bash
 
+    - name: Run malformed image regression tests (Unix)
+      if: runner.os != 'Windows'
+      run: |
+        cd tests/unit
+        bash run_regression_tests.sh
+
+    - name: Run malformed image regression tests (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        cd tests/unit
+        bash run_regression_tests.sh
+      shell: bash
+
     - name: Upload test artifacts on failure
       if: failure()
       uses: actions/upload-artifact@v4
