@@ -23,3 +23,11 @@ target_include_directories(test-header-validation PRIVATE
     ${CMAKE_SOURCE_DIR}/libvafs/include
     ${CMAKE_SOURCE_DIR}/libvafs
 )
+
+# Add comprehensive regression test suite
+add_executable(test-regression test_regression.c)
+target_link_libraries(test-regression vafs)
+target_include_directories(test-regression PRIVATE
+    ${CMAKE_SOURCE_DIR}/libvafs/include
+    ${CMAKE_SOURCE_DIR}/libvafs
+)
