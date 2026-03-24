@@ -101,6 +101,21 @@ int __vafs_resolve_symlink(
         return -1;
     }
 
+    // Validate symlink target is not empty
+    if (symlinkTarget[0] == '\0') {
+        VAFS_ERROR("__vafs_resolve_symlink: symlink target is empty\n");
+        errno = EINVAL;
+        return -1;
+    }
+
+    // Validate symlink target length
+    size_t targetLength = strlen(symlinkTarget);
+    if (targetLength > VAFS_PATH_MAX) {
+        VAFS_ERROR("__vafs_resolve_symlink: symlink target exceeds max path length\n");
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
     // start by copying base path over into buffer, but let us
     // 'clean' the path as we go
     for (i = 0, j = 0; i < baseLength && j < bufferLength; i++) {
@@ -113,6 +128,13 @@ int __vafs_resolve_symlink(
         } else {
             buffer[j++] = baseStart[i];
         }
+    }
+
+    // Check for buffer overflow during base path copy
+    if (i < baseLength) {
+        VAFS_ERROR("__vafs_resolve_symlink: buffer overflow during base path copy\n");
+        errno = ENAMETOOLONG;
+        return -1;
     }
 
     // now we resolve the final path by appending the symlink target,
@@ -150,6 +172,20 @@ int __vafs_resolve_symlink(
         }
     }
 
+    // Check for buffer overflow during target append
+    if (i < strlen(symlinkTarget)) {
+        VAFS_ERROR("__vafs_resolve_symlink: buffer overflow during target append\n");
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    // Validate final path length
+    if (j >= bufferLength) {
+        VAFS_ERROR("__vafs_resolve_symlink: resolved path exceeds buffer length\n");
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
     // terminate the string
     buffer[j] = '\0';
 
@@ -157,11 +193,12 @@ int __vafs_resolve_symlink(
     return (int)j;
 }
 
-int vafs_path_stat(
+int __vafs_path_stat_internal(
     struct VaFs*      vafs,
     const char*       path,
     int               followLinks,
-    struct vafs_stat* stat)
+    struct vafs_stat* stat,
+    int               symlinkDepth)
 {
     struct VaFsDirectoryEntry* entries;
     const char*                remainingPath = path;
@@ -169,6 +206,14 @@ int vafs_path_stat(
 
     if (vafs == NULL || path == NULL || stat == NULL) {
         errno = EINVAL;
+        return -1;
+    }
+
+    // Check symlink depth limit
+    if (symlinkDepth > VAFS_SYMLINK_MAX_DEPTH) {
+        VAFS_ERROR("__vafs_path_stat_internal: symlink depth limit exceeded (depth=%d, max=%d)\n",
+            symlinkDepth, VAFS_SYMLINK_MAX_DEPTH);
+        errno = ELOOP;
         return -1;
     }
 
@@ -216,7 +261,7 @@ int vafs_path_stat(
                     int   written;
                     int   status;
                     if (!pathBuffer) {
-                        VAFS_ERROR("vafs_directory_open: failed to allocate path buffer\n");
+                        VAFS_ERROR("__vafs_path_stat_internal: failed to allocate path buffer\n");
                         errno = ENOMEM;
                         return -1;
                     }
@@ -229,12 +274,12 @@ int vafs_path_stat(
                             entries->Symlink->Target
                     );
                     if (written < 0) {
-                        VAFS_ERROR("vafs_directory_open: failed to resolve symlink %s\n", entries->Symlink->Target);
+                        VAFS_ERROR("__vafs_path_stat_internal: failed to resolve symlink %s\n", entries->Symlink->Target);
                         free(pathBuffer);
                         return -1;
                     }
 
-                    status = vafs_path_stat(vafs, pathBuffer, followLinks, stat);
+                    status = __vafs_path_stat_internal(vafs, pathBuffer, followLinks, stat, symlinkDepth + 1);
                     free(pathBuffer);
                     return status;
                 } else if (entries->Type == VA_FS_DESCRIPTOR_TYPE_FILE) {
@@ -261,4 +306,13 @@ int vafs_path_stat(
 
     errno = ENOENT;
     return -1;
+}
+
+int vafs_path_stat(
+    struct VaFs*      vafs,
+    const char*       path,
+    int               followLinks,
+    struct vafs_stat* stat)
+{
+    return __vafs_path_stat_internal(vafs, path, followLinks, stat, 0);
 }
