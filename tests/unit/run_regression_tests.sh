@@ -39,23 +39,32 @@ print_info() {
     echo -e "[INFO] $1"
 }
 
-# Determine paths based on OS
+# Determine paths based on OS and try multiple locations
+# Script can be run from tests/unit/ or repository root
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
 if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" || "$OSTYPE" == "cygwin" ]]; then
-    TEST_REGRESSION="../../build/bin/Release/test-regression.exe"
-    TEST_HEADER_VALIDATION="../../build/bin/Release/test-header-validation.exe"
-    TEST_MALFORMED="../../build/bin/Release/test-malformed.exe"
-    TEST_SYMLINKS="../../build/bin/Release/test-symlinks.exe"
-    UNMKVAFS="../../build/bin/Release/unmkvafs.exe"
+    BUILD_BIN="$REPO_ROOT/build/bin/Release"
+    EXE_EXT=".exe"
 else
-    TEST_REGRESSION="../../build/bin/test-regression"
-    TEST_HEADER_VALIDATION="../../build/bin/test-header-validation"
-    TEST_MALFORMED="../../build/bin/test-malformed"
-    TEST_SYMLINKS="../../build/bin/test-symlinks"
-    UNMKVAFS="../../build/bin/unmkvafs"
+    BUILD_BIN="$REPO_ROOT/build/bin"
+    EXE_EXT=""
 fi
+
+TEST_REGRESSION="$BUILD_BIN/test-regression$EXE_EXT"
+TEST_HEADER_VALIDATION="$BUILD_BIN/test-header-validation$EXE_EXT"
+TEST_MALFORMED="$BUILD_BIN/test-malformed$EXE_EXT"
+TEST_SYMLINKS="$BUILD_BIN/test-symlinks$EXE_EXT"
+UNMKVAFS="$BUILD_BIN/unmkvafs$EXE_EXT"
 
 # Check if binaries exist
 MISSING=0
+
+print_info "Repository root: $REPO_ROOT"
+print_info "Build binary directory: $BUILD_BIN"
+print_info "Looking for test binaries..."
+
 if [ ! -f "$TEST_REGRESSION" ]; then
     print_error "test-regression binary not found at $TEST_REGRESSION"
     MISSING=1
