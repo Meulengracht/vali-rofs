@@ -15,3 +15,11 @@ target_include_directories(test-symlinks PRIVATE
     ${CMAKE_SOURCE_DIR}/libvafs/include
     ${CMAKE_SOURCE_DIR}/libvafs
 )
+
+# Add test executable for header validation
+add_executable(test-header-validation test_header_validation.c)
+target_link_libraries(test-header-validation vafs)
+target_include_directories(test-header-validation PRIVATE
+    ${CMAKE_SOURCE_DIR}/libvafs/include
+    ${CMAKE_SOURCE_DIR}/libvafs
+)
