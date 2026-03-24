@@ -143,16 +143,20 @@ The fuzzing binaries will be located in `build-fuzz/bin/` or `build-fuzz/tests/f
 
 ## Corpus Seeds
 
-Corpus seeds are initial test inputs that help the fuzzer explore the input space more effectively. This directory includes a script to generate malformed VaFS images as corpus seeds.
+Corpus seeds are initial test inputs that help the fuzzer explore the input space more effectively.
+
+**Note**: Corpus files are NOT checked into the repository. You must generate them locally before running the fuzzers.
 
 ### Generating Corpus Seeds
+
+Before running any fuzzer, generate the corpus seeds:
 
 ```bash
 cd tests/fuzz
 ./generate_corpus.sh
 ```
 
-This creates several malformed VaFS image files in `tests/fuzz/corpus/`:
+This creates a `corpus/` directory with several malformed VaFS image files:
 - `seed_minimal.vafs` - Minimal valid empty VaFS image
 - `seed_bad_magic.vafs` - Invalid magic number
 - `seed_bad_version.vafs` - Invalid version
@@ -164,7 +168,20 @@ This creates several malformed VaFS image files in `tests/fuzz/corpus/`:
 
 These seeds cover edge cases from the existing unit tests (`test_header_validation.c` and `test_malformed.c`).
 
+The fuzzer will also discover and save additional interesting inputs to the corpus directory during execution.
+
 ## Running Fuzzing Locally
+
+### Prerequisites
+
+Before running any fuzzer, you must generate the corpus seeds:
+
+```bash
+cd tests/fuzz
+./generate_corpus.sh
+```
+
+This creates the `corpus/` directory with initial seed inputs.
 
 ### Basic Usage
 
