@@ -43,11 +43,11 @@ print_info() {
 
 # Determine paths based on OS
 if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" || "$OSTYPE" == "cygwin" ]]; then
-    MKVAFS="../build/bin/Release/mkvafs.exe"
-    UNMKVAFS="../build/bin/Release/unmkvafs.exe"
+    MKVAFS="../../build/bin/Release/mkvafs.exe"
+    UNMKVAFS="../../build/bin/Release/unmkvafs.exe"
 else
-    MKVAFS="../build/bin/mkvafs"
-    UNMKVAFS="../build/bin/unmkvafs"
+    MKVAFS="../../build/bin/mkvafs"
+    UNMKVAFS="../../build/bin/unmkvafs"
 fi
 
 # Check if binaries exist
@@ -65,7 +65,7 @@ print_info "Using mkvafs: $MKVAFS"
 print_info "Using unmkvafs: $UNMKVAFS"
 
 # Setup test directories
-TEST_ROOT="$(pwd)/test_output"
+TEST_ROOT="$(mktemp -d)"
 TEST_DATA="$TEST_ROOT/test_data"
 TEST_IMAGE="$TEST_ROOT/test.vafs"
 TEST_EXTRACT="$TEST_ROOT/extracted"
