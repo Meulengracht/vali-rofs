@@ -41,11 +41,11 @@ print_info() {
 
 # Determine paths based on OS
 if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" || "$OSTYPE" == "cygwin" ]]; then
-    UNMKVAFS="../build/bin/Release/unmkvafs.exe"
-    TEST_MALFORMED="../build/bin/Release/test-malformed.exe"
+    UNMKVAFS="../../build/bin/Release/unmkvafs.exe"
+    TEST_MALFORMED="../../build/bin/Release/test-malformed.exe"
 else
-    UNMKVAFS="../build/bin/unmkvafs"
-    TEST_MALFORMED="../build/bin/test-malformed"
+    UNMKVAFS="../../build/bin/unmkvafs"
+    TEST_MALFORMED="../../build/bin/test-malformed"
 fi
 
 # Check if binaries exist
@@ -64,7 +64,7 @@ print_info "Using unmkvafs: $UNMKVAFS"
 print_info "Using test-malformed: $TEST_MALFORMED"
 
 # Setup test directories
-TEST_ROOT="$(pwd)/test_malformed_output"
+TEST_ROOT="$(mktemp -d)"
 TEST_IMAGES="$TEST_ROOT/images"
 TEST_EXTRACT="$TEST_ROOT/extracted"
 

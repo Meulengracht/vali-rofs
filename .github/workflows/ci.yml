@@ -25,6 +25,11 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y libfuse3-dev
 
+    - name: Install dependencies (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        vcpkg install --triplet x64-windows
+
     - name: Setup CMake
       uses: jwlawson/actions-setup-cmake@v2
       with:
@@ -35,14 +40,14 @@ jobs:
       run: |
         mkdir build
         cd build
-        cmake .. -DCMAKE_BUILD_TYPE=Release -DVAFS_BUILD_TOOLS=ON
+        cmake .. -DCMAKE_BUILD_TYPE=Release
 
     - name: Configure CMake (Windows)
       if: runner.os == 'Windows'
       run: |
         mkdir build
         cd build
-        cmake .. -DCMAKE_BUILD_TYPE=Release -DVAFS_BUILD_TOOLS=ON
+        cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="${env:VCPKG_INSTALLATION_ROOT}/scripts/buildsystems/vcpkg.cmake"
 
     - name: Build
       run: cmake --build build --config Release
@@ -58,14 +63,14 @@ jobs:
     - name: Run test harness (Unix)
       if: runner.os != 'Windows'
       run: |
-        cd tests
-        bash test_harness.sh
+        cd tests/lib
+        bash github-ci.sh
 
     - name: Run test harness (Windows)
       if: runner.os == 'Windows'
       run: |
-        cd tests
-        bash test_harness.sh
+        cd tests/lib
+        bash github-ci.sh
       shell: bash
 
     - name: Upload test artifacts on failure

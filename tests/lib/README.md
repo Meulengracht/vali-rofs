@@ -4,7 +4,7 @@ This directory contains the test harness for the VaFS tools (mkvafs and unmkvafs
 
 ## Test Harness
 
-The `test_harness.sh` script provides comprehensive testing of the mkvafs and unmkvafs tools.
+The `github-ci.sh` script provides comprehensive testing of the mkvafs and unmkvafs tools.
 
 ### What it tests
 
@@ -38,8 +38,8 @@ cmake .. -DCMAKE_BUILD_TYPE=Release -DVAFS_BUILD_TOOLS=ON
 cmake --build . --config Release
 
 # Run the tests
-cd ../tests
-./test_harness.sh
+cd ../tests/libs
+./github-ci.sh
 ```
 
 ### Test Output

@@ -14,5 +14,3 @@ build/
 .oven/
 /.vs
 .vscode/
-tests/test_output/
-tests/test_malformed_output/
