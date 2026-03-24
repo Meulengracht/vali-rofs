@@ -7,3 +7,11 @@ target_include_directories(test-malformed PRIVATE
     ${CMAKE_SOURCE_DIR}/libvafs/include
     ${CMAKE_SOURCE_DIR}/libvafs
 )
+
+# Add test executable for symlink security
+add_executable(test-symlinks test_symlinks.c)
+target_link_libraries(test-symlinks vafs)
+target_include_directories(test-symlinks PRIVATE
+    ${CMAKE_SOURCE_DIR}/libvafs/include
+    ${CMAKE_SOURCE_DIR}/libvafs
+)

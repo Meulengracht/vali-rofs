@@ -29,6 +29,7 @@
 
 struct VaFsStream;
 struct VaFsStreamDevice;
+struct vafs_stat;
 
 typedef uint32_t vafsblock_t;
 
@@ -54,6 +55,11 @@ typedef uint32_t vafsblock_t;
 #define VAFS_WARN(...)   vafs_log_message(VaFsLogLevel_Warning, "libvafs: " __VA_ARGS__)
 #define VAFS_INFO(...)   vafs_log_message(VaFsLogLevel_Info, "libvafs: " __VA_ARGS__)
 #define VAFS_DEBUG(...)  vafs_log_message(VaFsLogLevel_Debug, "libvafs: " __VA_ARGS__)
+
+// Symlink resolution limits
+// Maximum number of symlinks that can be traversed in a single path resolution
+// This prevents infinite loops from cyclic symlinks and limits resource consumption
+#define VAFS_SYMLINK_MAX_DEPTH 40
 
 VAFS_ONDISK_STRUCT(VaFsBlockPosition, {
     vafsblock_t Index;
@@ -455,6 +461,9 @@ struct VaFsDirectoryEntry {
 extern int __vafs_is_root_path(const char* path);
 extern int __vafs_pathtoken(const char* path, char* token, size_t tokenSize);
 extern int __vafs_resolve_symlink(char* buffer, size_t bufferLength, const char* baseStart, size_t baseLength, const char* symlinkTarget);
+extern int __vafs_path_stat_internal(struct VaFs* vafs, const char* path, int followLinks, struct vafs_stat* stat, int symlinkDepth);
+extern int __vafs_directory_open_internal(struct VaFs* vafs, const char* path, struct VaFsDirectoryHandle** handleOut, int symlinkDepth);
+extern int __vafs_file_open_internal(struct VaFs* vafs, const char* path, struct VaFsFileHandle** handleOut, int symlinkDepth);
 extern struct VaFsDirectoryEntry* __vafs_directory_entries(struct VaFsDirectory* directory);
 extern const char* __vafs_directory_entry_name(struct VaFsDirectoryEntry* entry);
 
