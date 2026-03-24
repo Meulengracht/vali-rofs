@@ -55,7 +55,6 @@ fi
 TEST_REGRESSION="$BUILD_BIN/test-regression$EXE_EXT"
 TEST_HEADER_VALIDATION="$BUILD_BIN/test-header-validation$EXE_EXT"
 TEST_MALFORMED="$BUILD_BIN/test-malformed$EXE_EXT"
-TEST_SYMLINKS="$BUILD_BIN/test-symlinks$EXE_EXT"
 UNMKVAFS="$BUILD_BIN/unmkvafs$EXE_EXT"
 
 # Check if binaries exist
@@ -80,11 +79,6 @@ if [ ! -f "$TEST_MALFORMED" ]; then
     MISSING=1
 fi
 
-if [ ! -f "$TEST_SYMLINKS" ]; then
-    print_error "test-symlinks binary not found at $TEST_SYMLINKS"
-    MISSING=1
-fi
-
 if [ ! -f "$UNMKVAFS" ]; then
     print_error "unmkvafs binary not found at $UNMKVAFS"
     MISSING=1
@@ -98,7 +92,6 @@ fi
 print_info "Using test-regression: $TEST_REGRESSION"
 print_info "Using test-header-validation: $TEST_HEADER_VALIDATION"
 print_info "Using test-malformed: $TEST_MALFORMED"
-print_info "Using test-symlinks: $TEST_SYMLINKS"
 print_info "Using unmkvafs: $UNMKVAFS"
 
 # Setup test directories
@@ -172,16 +165,6 @@ else
         print_error "Malformed descriptor tests failed"
         cat "$TEST_ROOT/malformed.log"
     fi
-fi
-
-# Test 4: Run symlink security tests
-print_header "Running symlink security tests"
-print_test "Testing symlink loop detection and depth limits"
-if "$TEST_SYMLINKS" > "$TEST_ROOT/symlinks.log" 2>&1; then
-    print_success "All symlink security tests passed"
-else
-    print_error "Symlink security tests failed"
-    cat "$TEST_ROOT/symlinks.log"
 fi
 
 # Cleanup

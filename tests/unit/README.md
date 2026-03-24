@@ -87,7 +87,8 @@ This script will:
 1. Run the comprehensive regression suite (25 tests)
 2. Run header validation tests (11 tests)
 3. Run malformed descriptor tests (7 tests)
-4. Run symlink security tests (6 tests)
+
+Note: The test-symlinks program is not included in the regression test runner as it tests runtime symlink resolution rather than malformed image parsing. Malformed symlink descriptors are covered by test_regression.c.
 
 ### Run Individual Test Programs
 
