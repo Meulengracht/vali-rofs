@@ -30,7 +30,7 @@ Fuzzing is a security testing technique that feeds malformed, unexpected, or ran
 
 **Example Run**:
 ```bash
-./fuzz_image_open corpus/ -max_total_time=60
+./fuzz_image_open cases/ -max_total_time=60
 ```
 
 ### 2. `fuzz_directory_traversal` - Directory Parsing and Traversal
@@ -57,7 +57,7 @@ Fuzzing is a security testing technique that feeds malformed, unexpected, or ran
 
 **Example Run**:
 ```bash
-./fuzz_directory_traversal corpus/ -max_total_time=60
+./fuzz_directory_traversal cases/ -max_total_time=60
 ```
 
 ### 3. `fuzz_file_operations` - File Open and Read Operations
@@ -81,7 +81,7 @@ Fuzzing is a security testing technique that feeds malformed, unexpected, or ran
 
 **Example Run**:
 ```bash
-./fuzz_file_operations corpus/ -max_total_time=60
+./fuzz_file_operations cases/ -max_total_time=60
 ```
 
 ### 4. `fuzz_symlink_resolution` - Symlink Resolution and Path Canonicalization
@@ -106,7 +106,7 @@ Fuzzing is a security testing technique that feeds malformed, unexpected, or ran
 
 **Example Run**:
 ```bash
-./fuzz_symlink_resolution corpus/ -max_total_time=60
+./fuzz_symlink_resolution cases/ -max_total_time=60
 ```
 
 ## Building the Fuzzing Harnesses
@@ -143,20 +143,11 @@ The fuzzing binaries will be located in `build-fuzz/bin/` or `build-fuzz/tests/f
 
 ## Corpus Seeds
 
-Corpus seeds are initial test inputs that help the fuzzer explore the input space more effectively.
+Corpus seeds are initial test inputs that help the fuzzer explore the input space more effectively. These seed files are checked into the repository in `tests/fuzz/cases/` to track known test cases and edge cases that have been identified.
 
-**Note**: Corpus files are NOT checked into the repository. You must generate them locally before running the fuzzers.
+### Seed Files
 
-### Generating Corpus Seeds
-
-Before running any fuzzer, generate the corpus seeds:
-
-```bash
-cd tests/fuzz
-./generate_corpus.sh
-```
-
-This creates a `corpus/` directory with several malformed VaFS image files:
+The repository includes pre-generated malformed VaFS image files in `tests/fuzz/cases/`:
 - `seed_minimal.vafs` - Minimal valid empty VaFS image
 - `seed_bad_magic.vafs` - Invalid magic number
 - `seed_bad_version.vafs` - Invalid version
@@ -168,27 +159,47 @@ This creates a `corpus/` directory with several malformed VaFS image files:
 
 These seeds cover edge cases from the existing unit tests (`test_header_validation.c` and `test_malformed.c`).
 
-The fuzzer will also discover and save additional interesting inputs to the corpus directory during execution.
+### Regenerating Seeds
 
-## Running Fuzzing Locally
-
-### Prerequisites
-
-Before running any fuzzer, you must generate the corpus seeds:
+If you need to regenerate the seed files (e.g., after modifying test cases):
 
 ```bash
 cd tests/fuzz
 ./generate_corpus.sh
 ```
 
-This creates the `corpus/` directory with initial seed inputs.
+This will recreate all seed files in the `cases/` directory.
+
+### Using Custom Corpus Directory
+
+The fuzzer will discover and save additional interesting inputs during execution. To avoid cluttering the repository, use a separate corpus directory when running fuzzers:
+
+```bash
+mkdir -p my-corpus
+cp cases/*.vafs my-corpus/
+./fuzz_image_open my-corpus/ -max_total_time=60
+```
+
+The fuzzer will add newly discovered test cases to `my-corpus/` without affecting the checked-in seed files.
+
+## Running Fuzzing Locally
 
 ### Basic Usage
 
-Run a fuzzer for 60 seconds:
+The seed test cases are already provided in `tests/fuzz/cases/`. You can run a fuzzer directly:
+
 ```bash
-./fuzz_image_open corpus/ -max_total_time=60
+./fuzz_image_open cases/ -max_total_time=60
 ```
+
+For longer runs that discover new test cases, use a separate working corpus directory:
+```bash
+mkdir -p my-corpus
+cp cases/*.vafs my-corpus/
+./fuzz_image_open my-corpus/ -max_total_time=60
+```
+
+The fuzzer will save any newly discovered interesting inputs to `my-corpus/` without modifying the checked-in seed files.
 
 ### Common Options
 
@@ -204,26 +215,32 @@ Run a fuzzer for 60 seconds:
 
 ### Recommended Configuration
 
-For comprehensive local testing:
+For comprehensive local testing (using a working corpus directory):
 ```bash
+# Set up working corpus
+mkdir -p my-corpus
+cp cases/*.vafs my-corpus/
+
 # Fuzz image opening for 5 minutes
-./fuzz_image_open corpus/ -max_total_time=300 -print_final_stats=1
+./fuzz_image_open my-corpus/ -max_total_time=300 -print_final_stats=1
 
 # Fuzz directory traversal for 5 minutes
-./fuzz_directory_traversal corpus/ -max_total_time=300 -print_final_stats=1
+./fuzz_directory_traversal my-corpus/ -max_total_time=300 -print_final_stats=1
 
 # Fuzz file operations for 5 minutes
-./fuzz_file_operations corpus/ -max_total_time=300 -print_final_stats=1
+./fuzz_file_operations my-corpus/ -max_total_time=300 -print_final_stats=1
 
 # Fuzz symlink resolution for 5 minutes
-./fuzz_symlink_resolution corpus/ -max_total_time=300 -print_final_stats=1
+./fuzz_symlink_resolution my-corpus/ -max_total_time=300 -print_final_stats=1
 ```
 
 ### Continuous Fuzzing
 
 For continuous fuzzing (until manually stopped):
 ```bash
-./fuzz_image_open corpus/ -workers=4 -jobs=4
+mkdir -p my-corpus
+cp cases/*.vafs my-corpus/
+./fuzz_image_open my-corpus/ -workers=4 -jobs=4
 ```
 
 Press `Ctrl+C` to stop.
@@ -277,16 +294,11 @@ To reproduce a crash:
     CC=clang CXX=clang++ cmake -DVAFS_BUILD_FUZZ=ON ..
     cmake --build .
 
-    # Generate corpus
-    cd ../tests/fuzz
-    ./generate_corpus.sh
-    cd ../../build-fuzz
-
-    # Run each fuzzer for 60 seconds
-    ./tests/fuzz/fuzz_image_open ../tests/fuzz/corpus/ -max_total_time=60
-    ./tests/fuzz/fuzz_directory_traversal ../tests/fuzz/corpus/ -max_total_time=60
-    ./tests/fuzz/fuzz_file_operations ../tests/fuzz/corpus/ -max_total_time=60
-    ./tests/fuzz/fuzz_symlink_resolution ../tests/fuzz/corpus/ -max_total_time=60
+    # Run each fuzzer for 60 seconds using checked-in seed cases
+    ./tests/fuzz/fuzz_image_open ../tests/fuzz/cases/ -max_total_time=60
+    ./tests/fuzz/fuzz_directory_traversal ../tests/fuzz/cases/ -max_total_time=60
+    ./tests/fuzz/fuzz_file_operations ../tests/fuzz/cases/ -max_total_time=60
+    ./tests/fuzz/fuzz_symlink_resolution ../tests/fuzz/cases/ -max_total_time=60
 ```
 
 ## Security Boundaries Tested
@@ -336,16 +348,15 @@ clang --version  # Should show Clang version
 
 **Solution**: Reduce the RSS limit or max input length:
 ```bash
-./fuzz_image_open corpus/ -rss_limit_mb=512 -max_len=65536
+./fuzz_image_open cases/ -rss_limit_mb=512 -max_len=65536
 ```
 
 ### Issue: "No interesting inputs found"
 
-**Solution**: Ensure corpus seeds are generated:
+**Solution**: The seed cases are already provided in `tests/fuzz/cases/`. Make sure you're pointing to the correct directory:
 ```bash
-cd tests/fuzz
-./generate_corpus.sh
-ls corpus/  # Should show .vafs files
+ls tests/fuzz/cases/  # Should show .vafs files
+./fuzz_image_open cases/ -max_total_time=60
 ```
 
 ## References

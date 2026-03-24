@@ -6,11 +6,11 @@ set -e
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CORPUS_DIR="${SCRIPT_DIR}/corpus"
+CORPUS_DIR="${SCRIPT_DIR}/cases"
 
 echo "Generating fuzzing corpus seeds in ${CORPUS_DIR}"
 
-# Create corpus directory if it doesn't exist
+# Create cases directory if it doesn't exist
 mkdir -p "${CORPUS_DIR}"
 
 # Helper function to write a hex byte to a file
@@ -173,4 +173,4 @@ echo "Creating seed_excessive_dir_count.vafs"
 
 echo ""
 echo "Generated $(ls -1 ${CORPUS_DIR}/*.vafs 2>/dev/null | wc -l) corpus seed files"
-echo "Corpus location: ${CORPUS_DIR}"
+echo "Cases location: ${CORPUS_DIR}"
