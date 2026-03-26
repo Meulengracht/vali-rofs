@@ -4,13 +4,15 @@ This directory contains a comprehensive benchmark suite for measuring VaFS (Vali
 
 ## Overview
 
-The benchmark suite measures five core workload categories:
+The benchmark suite measures seven core workload categories:
 
 1. **Mount Latency** - Time to open and initialize a VaFS image
 2. **Metadata Traversal** - Speed of directory listing and metadata operations
 3. **Small File Read** - Performance reading small files (4KB)
 4. **Large File Sequential Read** - Throughput for reading large files sequentially
 5. **Repeated Path Lookup** - Path resolution performance with repeated lookups
+6. **Deep Path Stat** - Repeated `stat` on a long/deep path
+7. **Wide Directory Stat** - Repeated `stat` across many siblings in a wide directory
 
 ## Building
 
@@ -154,6 +156,8 @@ You can specify custom paths within the VaFS image for testing:
   --large-file=/large.bin \
   --directory=/wide_dir \
   --lookup-path=/lookup_test/subdir1/subdir2/subdir3/target.txt \
+  --wide-directory=/wide_dir \
+  --deep-path=/lookup_test/subdir1/subdir2/subdir3/target.txt \
   benchmark.vafs
 ```
 
@@ -164,6 +168,9 @@ You can specify custom paths within the VaFS image for testing:
 - `--large-file=<path>` - Path to large file in image (default: `/large.bin`)
 - `--directory=<path>` - Directory path for traversal benchmark (default: `/`)
 - `--lookup-path=<path>` - Path for repeated lookup benchmark (default: `/test.txt`)
+- `--wide-directory=<path>` - Directory with many entries for wide lookup benchmark (default: `/wide_dir`)
+- `--deep-path=<path>` - Deep path for repeated `stat` benchmark (default: `/lookup_test/subdir1/subdir2/subdir3/target.txt`)
+- `--only=<name>` - Run a single benchmark (`mount`, `traversal`, `small`, `large`, `lookup`, `deepstat`, `wide`)
 - `--help` - Display help message
 
 ## Benchmark Details
@@ -216,7 +223,7 @@ You can specify custom paths within the VaFS image for testing:
 - Opens a 4KB file
 - Reads entire file into memory
 - Closes file handle
-- Repeats 1000 times
+- Repeats 10 times by default
 
 **Metrics**:
 - Average read time (ms)
@@ -237,7 +244,7 @@ You can specify custom paths within the VaFS image for testing:
 - Opens a large file (5MB)
 - Reads entire file in 128KB chunks
 - Seeks back to beginning
-- Repeats 50 times
+- Repeats 2 times by default
 
 **Metrics**:
 - Average read time (ms)
@@ -258,7 +265,7 @@ You can specify custom paths within the VaFS image for testing:
 - Resolves path to a file
 - Opens file handle
 - Closes file handle immediately
-- Repeats 1000 times
+- Repeats 5 times by default
 
 **Metrics**:
 - Average lookup time (ms)
@@ -270,19 +277,56 @@ You can specify custom paths within the VaFS image for testing:
 - Descriptor lookups
 - Open/close overhead
 
+### 6. Deep Path Stat
+
+**Purpose**: Measure repeated metadata lookups on a long nested path.
+
+**Methodology**:
+- Calls `vafs_path_stat` on a deep path
+- Resolves symlinks when present
+- Repeats 10 times by default
+
+**Metrics**:
+- Average stat time (ms)
+- Min/max latency
+
+**What it measures**:
+- Path tokenization on long paths
+- Descriptor traversal through multiple levels
+- Symlink resolution overhead (if present)
+
+### 7. Wide Directory Stat
+
+**Purpose**: Measure metadata lookup performance across many siblings.
+
+**Methodology**:
+- Enumerates all names in a wide directory once
+- Repeatedly `stat`s entries in a round-robin fashion
+- Repeats 5 times by default
+
+**Metrics**:
+- Average stat time (ms)
+- Min/max latency
+
+**What it measures**:
+- Directory entry scanning in wide directories
+- Descriptor lookup behavior under high sibling counts
+
 ## Benchmark Configuration
 
 The default iteration counts are defined in `vafs_bench.c`:
 
 ```c
-#define MOUNT_LATENCY_ITERATIONS       100
-#define METADATA_TRAVERSAL_ITERATIONS  50
-#define SMALL_FILE_READ_ITERATIONS     1000
-#define LARGE_FILE_READ_ITERATIONS     50
-#define PATH_LOOKUP_ITERATIONS         1000
+#define MOUNT_LATENCY_ITERATIONS       5
+#define METADATA_TRAVERSAL_ITERATIONS  3
+#define SMALL_FILE_READ_ITERATIONS     10
+#define LARGE_FILE_READ_ITERATIONS     2
+#define PATH_LOOKUP_ITERATIONS         5
+#define WIDE_LOOKUP_ITERATIONS         5
+#define DEEP_STAT_ITERATIONS           10
 ```
 
-These can be adjusted by modifying the source and rebuilding.
+These can be adjusted by modifying the source and rebuilding, or you can focus on a single benchmark with `--only=<name>`.
 
 ## Output Format Specification
 
