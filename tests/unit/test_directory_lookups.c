@@ -13,6 +13,7 @@
 #include <vafs/directory.h>
 #include <vafs/file.h>
 #include <vafs/stat.h>
+#include "../../libvafs/private.h"
 
 #define TEST_IMAGE_PATH "/tmp/test_directory_lookups.vafs"
 #define SMALL_DIR_ENTRY_COUNT 64
@@ -47,6 +48,66 @@ static void make_prefixed_entry_name(char* buffer, size_t buffer_size, const cha
     snprintf(buffer, buffer_size, "%s_%04d", prefix, index);
 }
 
+static int lookup_cache_has_state(
+    struct VaFs*                vafs,
+    struct VaFsDirectory*       parent,
+    const char*                 name,
+    enum VaFsLookupCacheState   state)
+{
+    size_t i;
+
+    for (i = 0; i < VAFS_LOOKUP_CACHE_CAPACITY; i++) {
+        struct VaFsLookupCacheEntry* entry = &vafs->LookupCache.Entries[i];
+        if (entry->State == state && entry->Parent == parent && strcmp(entry->Name, name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int lookup_cache_has_name(
+    struct VaFs*          vafs,
+    struct VaFsDirectory* parent,
+    const char*           name)
+{
+    return lookup_cache_has_state(vafs, parent, name, VaFsLookupCacheState_Hit) ||
+        lookup_cache_has_state(vafs, parent, name, VaFsLookupCacheState_Miss);
+}
+
+static int find_collision_names(
+    struct VaFsDirectory* directory,
+    char                  names[VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY + 1][32])
+{
+    char   candidates[VAFS_LOOKUP_CACHE_SET_COUNT][VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY + 1][32];
+    size_t counts[VAFS_LOOKUP_CACHE_SET_COUNT] = { 0 };
+    char   name[32];
+    size_t setIndex;
+    int    i;
+
+    memset(candidates, 0, sizeof(candidates));
+    for (i = 0; i < LARGE_DIR_ENTRY_COUNT; i++) {
+        make_entry_name(name, sizeof(name), i);
+        if (strcmp(name, "entry_0000") == 0 || strcmp(name, "entry_0512") == 0 || strcmp(name, "entry_1023") == 0) {
+            continue;
+        }
+
+        setIndex = __vafs_directory_lookup_cache_set(directory, name);
+        if (counts[setIndex] < (VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY + 1)) {
+            strcpy(candidates[setIndex][counts[setIndex]], name);
+        }
+        counts[setIndex]++;
+        if (counts[setIndex] == (VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY + 1)) {
+            size_t j;
+            for (j = 0; j < (VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY + 1); j++) {
+                strcpy(names[j], candidates[setIndex][j]);
+            }
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
 static int assert_repeated_path_stat(
     struct VaFs*  vafs,
     const char*   path,
@@ -76,7 +137,12 @@ static int test_wide_directory_lookup(void)
     struct VaFsDirectoryHandle* large_dir = NULL;
     struct VaFsDirectoryHandle* nested = NULL;
     struct VaFsFileHandle* file_handle = NULL;
+    struct VaFsDirectoryEntry* small_dir_entry = NULL;
+    struct VaFsDirectoryEntry* large_dir_entry = NULL;
+    struct vafs_stat statbuf;
     char name[32];
+    char collision_names[VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY + 1][32];
+    char path_buffer[128];
     struct VaFsEntry entry;
     size_t read_count = 0;
     int saw_small_first = 0;
@@ -178,6 +244,11 @@ static int test_wide_directory_lookup(void)
     status = assert_repeated_path_stat(vafs, "/small_dir/small_0000", S_IFREG | 0644, strlen("small-directory-data"), "Failed to stat small-directory file through path lookup");
     TEST_ASSERT(status == 0, "Repeated small-directory file path stat failed");
 
+    small_dir_entry = __vafs_directory_find_entry(vafs->RootDirectory, "small_dir");
+    TEST_ASSERT(small_dir_entry != NULL, "Failed to resolve small directory for cache assertions");
+    TEST_ASSERT(lookup_cache_has_state(vafs, vafs->RootDirectory, "small_dir", VaFsLookupCacheState_Hit), "Small directory lookup should be cached as a hit");
+    TEST_ASSERT(lookup_cache_has_state(vafs, small_dir_entry->Directory, "small_0000", VaFsLookupCacheState_Hit), "Small directory file lookup should be cached as a hit");
+
     while (vafs_directory_read(small_dir, &entry) == 0) {
         if (strcmp(entry.Name, "small_0000") == 0) {
             saw_small_first = 1;
@@ -218,6 +289,36 @@ static int test_wide_directory_lookup(void)
 
     status = assert_repeated_path_stat(vafs, "/large_dir/entry_1023", S_IFREG | 0644, 0, "Failed to stat large-directory file through path lookup");
     TEST_ASSERT(status == 0, "Repeated large-directory file path stat failed");
+
+    large_dir_entry = __vafs_directory_find_entry(vafs->RootDirectory, "large_dir");
+    TEST_ASSERT(large_dir_entry != NULL, "Failed to resolve large directory for cache assertions");
+
+    status = vafs_path_stat(vafs, "/large_dir/missing_entry", 1, &statbuf);
+    TEST_ASSERT(status != 0 && errno == ENOENT, "Missing large-directory entry should return ENOENT");
+    status = vafs_path_stat(vafs, "/large_dir/missing_entry", 1, &statbuf);
+    TEST_ASSERT(status != 0 && errno == ENOENT, "Repeated missing large-directory entry should return ENOENT");
+    TEST_ASSERT(lookup_cache_has_state(vafs, large_dir_entry->Directory, "missing_entry", VaFsLookupCacheState_Miss), "Missing entry should be cached as a miss");
+
+    status = find_collision_names(large_dir_entry->Directory, collision_names);
+    TEST_ASSERT(status == 0, "Failed to find colliding names for lookup-cache eviction test");
+
+    for (i = 0; i < VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY; i++) {
+        snprintf(path_buffer, sizeof(path_buffer), "/large_dir/%s", collision_names[i]);
+        status = vafs_path_stat(vafs, path_buffer, 1, &statbuf);
+        TEST_ASSERT(status == 0, "Failed to warm lookup-cache eviction test entry");
+    }
+
+    snprintf(path_buffer, sizeof(path_buffer), "/large_dir/%s", collision_names[0]);
+    status = vafs_path_stat(vafs, path_buffer, 1, &statbuf);
+    TEST_ASSERT(status == 0, "Failed to refresh most-recent lookup-cache entry");
+
+    snprintf(path_buffer, sizeof(path_buffer), "/large_dir/%s", collision_names[VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY]);
+    status = vafs_path_stat(vafs, path_buffer, 1, &statbuf);
+    TEST_ASSERT(status == 0, "Failed to trigger lookup-cache eviction");
+
+    TEST_ASSERT(lookup_cache_has_state(vafs, large_dir_entry->Directory, collision_names[0], VaFsLookupCacheState_Hit), "Most-recent lookup-cache entry should remain resident after eviction");
+    TEST_ASSERT(!lookup_cache_has_name(vafs, large_dir_entry->Directory, collision_names[1]), "Least-recent lookup-cache entry should be evicted");
+    TEST_ASSERT(lookup_cache_has_state(vafs, large_dir_entry->Directory, collision_names[VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY], VaFsLookupCacheState_Hit), "Newest lookup-cache entry should be resident after eviction");
 
     while (vafs_directory_read(large_dir, &entry) == 0) {
         if (strcmp(entry.Name, "entry_0000") == 0) {

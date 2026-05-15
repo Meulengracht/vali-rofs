@@ -16,6 +16,8 @@ The benchmark suite measures seven core workload categories:
 
 The `deepstat` and `wide` benchmarks are the closest stand-ins for hot FUSE `getattr` and `access` workloads because they repeatedly call `vafs_path_stat()` against already-open images.
 
+The `lookup` benchmark is the closest stand-in for repeated open/lookup traffic because it repeatedly resolves the same file path through `vafs_file_open()`.
+
 ## Building
 
 The benchmarks are built automatically with the project if `VAFS_BUILD_BENCHMARKS` is enabled (default: ON).
@@ -181,6 +183,15 @@ The first command exercises the small-directory fallback path. The second exerci
 
 Both runs also cover the read-mode `vafs_path_stat()` fast path, which now reuses the same cached directory lookup structures and cached entry stat metadata used by direct directory operations.
 
+## Readonly Lookup Cache Notes
+
+Mounted images now keep a bounded read-mode component cache keyed by `(parent directory, entry name)`.
+
+- Capacity: 128 sets x 4 ways = 512 cached components per open image.
+- Eviction: least-recently-used within each set.
+- Cached values: both successful entry lookups and failed lookups.
+- Readonly assumption: the cache is only active when reading mounted/opened images. Image creation bypasses it so mutable directory state never has to invalidate cached pointers.
+
 ### Options
 
 - `--format=<format>` - Output format: `human`, `json`, or `csv` (default: human)
@@ -282,6 +293,7 @@ Both runs also cover the read-mode `vafs_path_stat()` fast path, which now reuse
 **Purpose**: Measure path resolution and file lookup performance.
 
 **Methodology**:
+- Warms the target path once during setup to exclude one-time directory loading and cache priming
 - Resolves path to a file
 - Opens file handle
 - Closes file handle immediately
@@ -302,6 +314,7 @@ Both runs also cover the read-mode `vafs_path_stat()` fast path, which now reuse
 **Purpose**: Measure repeated metadata lookups on a long nested path.
 
 **Methodology**:
+- Warms the target path once during setup to exclude one-time directory loading and cache priming
 - Calls `vafs_path_stat` on a deep path
 - Resolves symlinks when present
 - Repeats 10 times by default
