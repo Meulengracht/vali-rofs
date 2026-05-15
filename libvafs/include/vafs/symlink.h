@@ -25,12 +25,15 @@
 #include <vafs/vafs.h>
 
 /**
- * @brief 
- * 
- * @param vafs 
- * @param path 
- * @param handleOut 
- * @return int 
+ * @brief Opens a symbolic link by absolute path without following it.
+ *
+ * The final path component must resolve to a symbolic link entry.
+ *
+ * @param vafs      Filesystem handle to search in.
+ * @param path      Absolute path of the symbolic link to open.
+ * @param handleOut Receives the opened symbolic link handle on success.
+ * @return int Returns 0 on success, -1 on failure. See errno for details such as EINVAL,
+ *             ENOENT, EISDIR, or ENOTDIR.
  */
 extern int vafs_symlink_open(
     struct VaFs*               vafs,
@@ -38,21 +41,24 @@ extern int vafs_symlink_open(
     struct VaFsSymlinkHandle** handleOut);
 
 /**
- * @brief 
- * 
- * @param handle 
- * @return int 
+ * @brief Closes a symbolic link handle.
+ *
+ * @param handle Symbolic link handle to close.
+ * @return int Returns 0 on success, -1 if handle is invalid.
  */
 extern int vafs_symlink_close(
     struct VaFsSymlinkHandle* handle);
 
 /**
- * @brief 
- * 
- * @param handle 
- * @param buffer 
- * @param size 
- * @return int
+ * @brief Copies the symlink target into a caller-provided buffer.
+ *
+ * The target is copied with strncpy semantics, so the result is only null-terminated when the
+ * destination buffer is large enough to hold the full target string.
+ *
+ * @param handle Symbolic link handle to read from.
+ * @param buffer Destination buffer for the target path.
+ * @param size   Size of buffer in bytes.
+ * @return int Returns 0 on success, -1 on failure.
  */
 extern int vafs_symlink_target(
     struct VaFsSymlinkHandle* handle,

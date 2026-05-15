@@ -25,12 +25,16 @@
 #include <vafs/vafs.h>
 
 /**
- * @brief 
- * 
- * @param handle
- * @param path 
- * @param handleOut 
- * @return int 
+ * @brief Opens a directory by absolute path.
+ *
+ * The root path "/" is valid and returns a handle to the filesystem root. Symbolic links in the
+ * path are resolved up to the library's symlink depth limit.
+ *
+ * @param vafs      Filesystem handle to search in.
+ * @param path      Absolute path of the directory to open.
+ * @param handleOut Receives the opened directory handle on success.
+ * @return int Returns 0 on success, -1 on failure. See errno for details such as EINVAL,
+ *             ENOENT, ENOTDIR, or ELOOP.
  */
 extern int vafs_directory_open(
     struct VaFs*                 vafs,
@@ -38,19 +42,19 @@ extern int vafs_directory_open(
     struct VaFsDirectoryHandle** handleOut);
 
 /**
- * @brief 
- * 
- * @param handle 
- * @return int 
+ * @brief Closes a directory handle.
+ *
+ * @param handle Directory handle to close.
+ * @return int Returns 0 on success, -1 if handle is invalid.
  */
 extern int vafs_directory_close(
     struct VaFsDirectoryHandle* handle);
 
 /**
- * @brief 
- * 
- * @param handle 
- * @return uint32_t 
+ * @brief Returns the stored permission bits for the directory.
+ *
+ * @param handle Directory handle to query.
+ * @return uint32_t Permission bits for the directory, or (uint32_t)-1 if handle is invalid.
  */
 extern uint32_t vafs_directory_permissions(
     struct VaFsDirectoryHandle* handle);
@@ -67,12 +71,15 @@ extern int vafs_directory_read(
     struct VaFsEntry*           entry);
 
 /**
- * @brief 
- * 
- * @param handle 
- * @param name 
- * @param handleOut 
- * @return int 
+ * @brief Opens a child directory by name from an already opened directory.
+ *
+ * This helper only works on filesystem handles opened in read mode. The name must identify a
+ * single path component within handle.
+ *
+ * @param handle    Parent directory handle.
+ * @param name      Name of the child directory to open.
+ * @param handleOut Receives the opened child directory handle.
+ * @return int Returns 0 on success, -1 on failure.
  */
 extern int vafs_directory_open_directory(
     struct VaFsDirectoryHandle*  handle,
@@ -80,13 +87,16 @@ extern int vafs_directory_open_directory(
     struct VaFsDirectoryHandle** handleOut);
 
 /**
- * @brief 
- * 
- * @param handle 
- * @param name 
- * @param permissions
- * @param handleOut 
- * @return int 
+ * @brief Creates a child directory while building an image.
+ *
+ * If the named directory already exists, a handle to that directory is returned instead of creating
+ * a duplicate entry.
+ *
+ * @param handle      Parent directory handle opened in write mode.
+ * @param name        Name of the child directory to create.
+ * @param permissions Permission bits to store for the directory.
+ * @param handleOut   Receives the created or existing child directory handle.
+ * @return int Returns 0 on success, -1 on failure.
  */
 extern int vafs_directory_create_directory(
     struct VaFsDirectoryHandle*  handle,
@@ -95,12 +105,12 @@ extern int vafs_directory_create_directory(
     struct VaFsDirectoryHandle** handleOut);
 
 /**
- * @brief 
- * 
- * @param handle 
- * @param name 
- * @param target 
- * @return int 
+ * @brief Creates a symbolic link entry in a directory opened for writing.
+ *
+ * @param handle Parent directory handle opened in write mode.
+ * @param name   Name of the symbolic link entry.
+ * @param target Target path stored in the symbolic link.
+ * @return int Returns 0 on success, -1 on failure. Returns EEXIST if name already exists.
  */
 extern int vafs_directory_create_symlink(
     struct VaFsDirectoryHandle* handle,
@@ -108,12 +118,15 @@ extern int vafs_directory_create_symlink(
     const char*                 target);
 
 /**
- * @brief 
- * 
- * @param handle 
- * @param name 
- * @param targetOut 
- * @return int 
+ * @brief Looks up a child symbolic link and returns its stored target string.
+ *
+ * The returned pointer refers to data owned by the filesystem and remains valid only while the
+ * underlying image stays open.
+ *
+ * @param handle    Parent directory handle opened in read mode.
+ * @param name      Name of the symbolic link entry.
+ * @param targetOut Receives a borrowed pointer to the symlink target string.
+ * @return int Returns 0 on success, -1 on failure.
  */
 extern int vafs_directory_read_symlink(
     struct VaFsDirectoryHandle* handle,
@@ -121,12 +134,15 @@ extern int vafs_directory_read_symlink(
     const char**                targetOut);
 
 /**
- * @brief 
- * 
- * @param handle 
- * @param name 
- * @param handleOut
- * @return int 
+ * @brief Opens a child file by name from an already opened directory.
+ *
+ * This helper only works on filesystem handles opened in read mode. The name must identify a
+ * single file entry within handle.
+ *
+ * @param handle    Parent directory handle.
+ * @param name      Name of the child file to open.
+ * @param handleOut Receives the opened file handle.
+ * @return int Returns 0 on success, -1 on failure.
  */
 extern int vafs_directory_open_file(
     struct VaFsDirectoryHandle* handle,
@@ -134,13 +150,13 @@ extern int vafs_directory_open_file(
     struct VaFsFileHandle**     handleOut);
 
 /**
- * @brief 
- * 
- * @param handle 
- * @param name 
- * @param permissions
- * @param handleOut
- * @return int 
+ * @brief Creates a child file while building an image.
+ *
+ * @param handle      Parent directory handle opened in write mode.
+ * @param name        Name of the child file to create.
+ * @param permissions Permission bits to store for the file.
+ * @param handleOut   Receives the opened file handle for the new entry.
+ * @return int Returns 0 on success, -1 on failure. Returns EEXIST if name already exists.
  */
 extern int vafs_directory_create_file(
     struct VaFsDirectoryHandle* handle,

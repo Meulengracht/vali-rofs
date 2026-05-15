@@ -31,10 +31,10 @@ enum VaFsFilterType {
     VaFsFilterType_BRIEFLZ
 };
 
-struct VaFsFeatureFilter {
+VAFS_ONDISK_STRUCT(VaFsFeatureFilter, {
     struct VaFsFeatureHeader Header;
-    int                      Type;
-};
+    uint32_t                 Type;
+});
 
 static struct VaFsGuid g_filterGuid    = VA_FS_FEATURE_FILTER;
 static struct VaFsGuid g_filterOpsGuid = VA_FS_FEATURE_FILTER_OPS;

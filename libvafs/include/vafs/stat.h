@@ -31,13 +31,18 @@ struct vafs_stat {
 };
 
 /**
- * @brief 
- * 
- * @param vafs 
- * @param path
- * @param followLinks
- * @param stat 
- * @return int 
+ * @brief Retrieves POSIX-like metadata for a filesystem entry.
+ *
+ * The returned mode field contains both the entry type bits and the stored permission bits. When
+ * followLinks is non-zero, symbolic links in the path are resolved up to the library's symlink
+ * depth limit; otherwise the metadata of the link itself is returned.
+ *
+ * @param vafs        Filesystem handle to query.
+ * @param path        Absolute path of the entry.
+ * @param followLinks Non-zero to follow symbolic links, 0 to stat the link itself.
+ * @param stat        Receives the resulting metadata.
+ * @return int Returns 0 on success, -1 on failure. See errno for details such as EINVAL,
+ *             ENOENT, ENOTDIR, or ELOOP.
  */
 extern int vafs_path_stat(
     struct VaFs*      vafs,

@@ -51,9 +51,16 @@ static int __handle_feature_ops(
     struct VaFsFeatureHeader* feature)
 {
     if (!__compare_guids(&feature->Guid, &g_filterOpsGuid)) {
-        struct VaFsFeatureFilterOps* ops = (struct VaFsFeatureFilterOps*)feature;
-        vafs_stream_set_filter(vafs->DescriptorStream, ops->Encode, ops->Decode);
-        vafs_stream_set_filter(vafs->DataStream, ops->Encode, ops->Decode);
+        struct VaFsFeatureFilterOps ops;
+
+        if (feature->Length < sizeof(struct VaFsFeatureFilterOps)) {
+            errno = EINVAL;
+            return -1;
+        }
+
+        memcpy(&ops, feature, sizeof(struct VaFsFeatureFilterOps));
+        vafs_stream_set_filter(vafs->DescriptorStream, ops.Encode, ops.Decode);
+        vafs_stream_set_filter(vafs->DataStream, ops.Encode, ops.Decode);
         return 0;
     }
     return -1;
