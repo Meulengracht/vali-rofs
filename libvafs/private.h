@@ -27,10 +27,10 @@
 #include <stdio.h>
 #include "cache/hashtable.h"
 #include <vafs.h>
+#include <vafs/stat.h>
 
 struct VaFsStream;
 struct VaFsStreamDevice;
-struct vafs_stat;
 
 typedef uint32_t vafsblock_t;
 
@@ -125,12 +125,16 @@ struct VaFsFile {
     struct VaFs*         VaFs;
     VaFsFileDescriptor_t Descriptor;
     const char*          Name;
+    struct vafs_stat     Stat;
+    int                  StatCached;
 };
 
 struct VaFsDirectory {
     struct VaFs*              VaFs;
     VaFsDirectoryDescriptor_t Descriptor;
     const char*               Name;
+    struct vafs_stat          Stat;
+    int                       StatCached;
 };
 
 struct VaFsSymlink {
@@ -138,6 +142,8 @@ struct VaFsSymlink {
     VaFsSymlinkDescriptor_t Descriptor;
     const char*             Name;
     const char*             Target;
+    struct vafs_stat        Stat;
+    int                     StatCached;
 };
 
 struct VaFs {
@@ -482,6 +488,8 @@ extern int __vafs_path_stat_internal(struct VaFs* vafs, const char* path, int fo
 extern int __vafs_directory_open_internal(struct VaFs* vafs, const char* path, struct VaFsDirectoryHandle** handleOut, int symlinkDepth);
 extern int __vafs_file_open_internal(struct VaFs* vafs, const char* path, struct VaFsFileHandle** handleOut, int symlinkDepth);
 extern struct VaFsDirectoryEntry* __vafs_directory_entries(struct VaFsDirectory* directory);
+extern struct VaFsDirectoryEntry* __vafs_directory_find_entry(struct VaFsDirectory* directory, const char* token);
+extern int __vafs_directory_entry_stat(struct VaFsDirectoryEntry* entry, struct vafs_stat* stat);
 extern const char* __vafs_directory_entry_name(struct VaFsDirectoryEntry* entry);
 
 #endif // __VAFS_PRIVATE_H__

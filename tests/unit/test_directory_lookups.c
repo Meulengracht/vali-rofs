@@ -12,6 +12,7 @@
 #include <vafs/vafs.h>
 #include <vafs/directory.h>
 #include <vafs/file.h>
+#include <vafs/stat.h>
 
 #define TEST_IMAGE_PATH "/tmp/test_directory_lookups.vafs"
 #define SMALL_DIR_ENTRY_COUNT 64
@@ -44,6 +45,26 @@ static void make_entry_name(char* buffer, size_t buffer_size, int index)
 static void make_prefixed_entry_name(char* buffer, size_t buffer_size, const char* prefix, int index)
 {
     snprintf(buffer, buffer_size, "%s_%04d", prefix, index);
+}
+
+static int assert_repeated_path_stat(
+    struct VaFs*  vafs,
+    const char*   path,
+    uint32_t      expected_mode,
+    size_t        expected_size,
+    const char*   message)
+{
+    struct vafs_stat stat;
+    int              status;
+    int              i;
+
+    for (i = 0; i < 32; i++) {
+        status = vafs_path_stat(vafs, path, 1, &stat);
+        TEST_ASSERT(status == 0, message);
+        TEST_ASSERT(stat.mode == expected_mode, "Unexpected mode returned from repeated path stat");
+        TEST_ASSERT(stat.size == expected_size, "Unexpected size returned from repeated path stat");
+    }
+    return 0;
 }
 
 static int test_wide_directory_lookup(void)
@@ -151,6 +172,12 @@ static int test_wide_directory_lookup(void)
     status = vafs_directory_open(vafs, "/small_dir", &small_dir);
     TEST_ASSERT(status == 0, "Failed to reopen small directory");
 
+    status = assert_repeated_path_stat(vafs, "/small_dir", S_IFDIR | 0755, 0, "Failed to stat small directory through path lookup");
+    TEST_ASSERT(status == 0, "Repeated small-directory path stat failed");
+
+    status = assert_repeated_path_stat(vafs, "/small_dir/small_0000", S_IFREG | 0644, strlen("small-directory-data"), "Failed to stat small-directory file through path lookup");
+    TEST_ASSERT(status == 0, "Repeated small-directory file path stat failed");
+
     while (vafs_directory_read(small_dir, &entry) == 0) {
         if (strcmp(entry.Name, "small_0000") == 0) {
             saw_small_first = 1;
@@ -186,6 +213,12 @@ static int test_wide_directory_lookup(void)
     status = vafs_directory_open(vafs, "/large_dir", &large_dir);
     TEST_ASSERT(status == 0, "Failed to reopen large directory");
 
+    status = assert_repeated_path_stat(vafs, "/large_dir", S_IFDIR | 0755, 0, "Failed to stat large directory through path lookup");
+    TEST_ASSERT(status == 0, "Repeated large-directory path stat failed");
+
+    status = assert_repeated_path_stat(vafs, "/large_dir/entry_1023", S_IFREG | 0644, 0, "Failed to stat large-directory file through path lookup");
+    TEST_ASSERT(status == 0, "Repeated large-directory file path stat failed");
+
     while (vafs_directory_read(large_dir, &entry) == 0) {
         if (strcmp(entry.Name, "entry_0000") == 0) {
             saw_large_first = 1;
@@ -219,6 +252,9 @@ static int test_wide_directory_lookup(void)
     TEST_ASSERT(status == 0, "Failed to open nested file through path lookup");
     vafs_file_close(file_handle);
     file_handle = NULL;
+
+    status = assert_repeated_path_stat(vafs, "/nested_dir/inner_file", S_IFREG | 0644, 0, "Failed to stat nested file through path lookup");
+    TEST_ASSERT(status == 0, "Repeated nested-file path stat failed");
 
     status = vafs_directory_open(vafs, "/nested_dir", &nested);
     TEST_ASSERT(status == 0, "Failed to open nested directory through path lookup");

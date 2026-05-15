@@ -70,6 +70,60 @@ static void __initialize_symlink_descriptor(
     descriptor->TargetLength = 0;
 }
 
+static int __vafs_file_stat_internal(
+    struct VaFsFile*  file,
+    struct vafs_stat* stat)
+{
+    if (file->VaFs->Mode == VaFsMode_Read && file->StatCached) {
+        *stat = file->Stat;
+        return 0;
+    }
+
+    stat->mode = S_IFREG | file->Descriptor.Permissions;
+    stat->size = file->Descriptor.FileLength;
+    if (file->VaFs->Mode == VaFsMode_Read) {
+        file->Stat = *stat;
+        file->StatCached = 1;
+    }
+    return 0;
+}
+
+static int __vafs_directory_stat_internal(
+    struct VaFsDirectory* directory,
+    struct vafs_stat*     stat)
+{
+    if (directory->VaFs->Mode == VaFsMode_Read && directory->StatCached) {
+        *stat = directory->Stat;
+        return 0;
+    }
+
+    stat->mode = S_IFDIR | directory->Descriptor.Permissions;
+    stat->size = 0;
+    if (directory->VaFs->Mode == VaFsMode_Read) {
+        directory->Stat = *stat;
+        directory->StatCached = 1;
+    }
+    return 0;
+}
+
+static int __vafs_symlink_stat_internal(
+    struct VaFsSymlink* symlink,
+    struct vafs_stat*   stat)
+{
+    if (symlink->VaFs->Mode == VaFsMode_Read && symlink->StatCached) {
+        *stat = symlink->Stat;
+        return 0;
+    }
+
+    stat->mode = S_IFLNK | 0777;
+    stat->size = strlen(symlink->Target);
+    if (symlink->VaFs->Mode == VaFsMode_Read) {
+        symlink->Stat = *stat;
+        symlink->StatCached = 1;
+    }
+    return 0;
+}
+
 int vafs_directory_create_root(
     struct VaFs*           vafs,
     struct VaFsDirectory** directoryOut)
@@ -90,6 +144,7 @@ int vafs_directory_create_root(
 
     directory->Base.VaFs = vafs;
     directory->Base.Name = strdup("root");
+    directory->Base.StatCached = 0;
     directory->Index = NULL;
     directory->EntryCount = 0;
     directory->IndexDirty = 1;
@@ -318,7 +373,7 @@ static hashtable_t* __vafs_directory_name_index(
     return &reader->NameIndex;
 }
 
-static struct VaFsDirectoryEntry* __find_entry(
+struct VaFsDirectoryEntry* __vafs_directory_find_entry(
     struct VaFsDirectory* directory,
     const char*           token)
 {
@@ -387,6 +442,28 @@ static struct VaFsDirectoryEntry* __find_entry(
     }
 
     return NULL;
+}
+
+int __vafs_directory_entry_stat(
+    struct VaFsDirectoryEntry* entry,
+    struct vafs_stat*          stat)
+{
+    if (entry == NULL || stat == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    switch (entry->Type) {
+        case VA_FS_DESCRIPTOR_TYPE_FILE:
+            return __vafs_file_stat_internal(entry->File, stat);
+        case VA_FS_DESCRIPTOR_TYPE_DIRECTORY:
+            return __vafs_directory_stat_internal(entry->Directory, stat);
+        case VA_FS_DESCRIPTOR_TYPE_SYMLINK:
+            return __vafs_symlink_stat_internal(entry->Symlink, stat);
+        default:
+            errno = EINVAL;
+            return -1;
+    }
 }
 
 void vafs_directory_destroy(struct VaFsDirectory* directory)
@@ -688,6 +765,7 @@ static struct VaFsFile* __create_file_from_descriptor(
     memcpy(&file->Descriptor, descriptor, sizeof(VaFsFileDescriptor_t));
     file->Name = __read_extended_string(extendedData, descriptor->Base.Length - sizeof(VaFsFileDescriptor_t));
     file->VaFs = vafs;
+    file->StatCached = 0;
     return file;
 }
 
@@ -719,6 +797,7 @@ static struct VaFsDirectory* __create_directory_from_descriptor(
     memset(&directory->NameIndex, 0, sizeof(hashtable_t));
     directory->Base.Name = __read_extended_string(extendedData, descriptor->Base.Length - sizeof(VaFsDirectoryDescriptor_t));
     directory->Base.VaFs = vafs;
+    directory->Base.StatCached = 0;
     memcpy(&directory->Base.Descriptor, descriptor, sizeof(VaFsDirectoryDescriptor_t));
     return &directory->Base;
 }
@@ -746,6 +825,7 @@ static struct VaFsSymlink* __create_symlink_from_descriptor(
     symlink->Name   = __read_extended_string(extendedData, descriptor->NameLength);
     symlink->Target = __read_extended_string(extendedData + descriptor->NameLength, descriptor->TargetLength);
     symlink->VaFs   = vafs;
+    symlink->StatCached = 0;
     return symlink;
 }
 
@@ -904,6 +984,7 @@ int vafs_directory_open_root(
 
     reader->Base.VaFs = vafs;
     reader->Base.Name = strdup("root");
+    reader->Base.StatCached = 0;
     reader->State     = VaFsDirectoryState_Open;
     reader->Entries   = NULL;
     reader->Index     = NULL;
@@ -1009,7 +1090,7 @@ int __vafs_directory_open_internal(
         }
         remainingPath += charsConsumed;
 
-        entry = __find_entry(currentDirectory, token);
+        entry = __vafs_directory_find_entry(currentDirectory, token);
         if (entry == NULL) {
             errno = ENOENT;
             return -1;
@@ -1356,6 +1437,7 @@ static int __create_file_entry(
 
     entry->VaFs = writer->Base.VaFs;
     entry->Name = strdup(name);
+    entry->StatCached = 0;
     if (!entry->Name) {
         free(entry);
         errno = ENOMEM;
@@ -1412,6 +1494,7 @@ static int __create_symlink_entry(
 
     entry->VaFs = writer->Base.VaFs;
     entry->Name = strdup(name);
+    entry->StatCached = 0;
     if (!entry->Name) {
         free(entry);
         errno = ENOMEM;
@@ -1427,6 +1510,7 @@ static int __create_symlink_entry(
     }
 
     __initialize_symlink_descriptor(&entry->Descriptor);
+    entry->StatCached = 0;
     status = __add_symlink_entry(writer, entry);
     if (status) {
         free((void*)entry->Target);
@@ -1481,6 +1565,7 @@ static int __create_directory_entry(
     entry->IndexDirty = 1;
     entry->Base.VaFs = writer->Base.VaFs;
     entry->Base.Name = strdup(name);
+    entry->Base.StatCached = 0;
     if (!entry->Base.Name) {
         free(entry);
         errno = ENOMEM;
@@ -1525,7 +1610,7 @@ int vafs_directory_open_directory(
     }
 
     // find the name in the directory
-    entry = __find_entry(handle->Directory, token);
+    entry = __vafs_directory_find_entry(handle->Directory, token);
     if (entry == NULL) {
         errno = ENOENT;
         return -1;
@@ -1570,7 +1655,7 @@ int vafs_directory_create_directory(
     }
 
     // find the name in the directory
-    entry = __find_entry(handle->Directory, token);
+    entry = __vafs_directory_find_entry(handle->Directory, token);
     if (entry != NULL) {
         *handleOut = __create_handle(entry->Directory);
         return 0;
@@ -1581,7 +1666,7 @@ int vafs_directory_create_directory(
     if (status != 0) {
         return status;
     }
-    entry = __find_entry(handle->Directory, token);
+    entry = __vafs_directory_find_entry(handle->Directory, token);
 
     *handleOut = __create_handle(entry->Directory);
     return 0;
@@ -1614,7 +1699,7 @@ int vafs_directory_open_file(
     }
 
     // find the name in the directory
-    entry = __find_entry(handle->Directory, token);
+    entry = __vafs_directory_find_entry(handle->Directory, token);
     if (entry == NULL) {
         errno = ENOENT;
         return -1;
@@ -1659,7 +1744,7 @@ int vafs_directory_create_file(
     }
 
     // find the name in the directory
-    entry = __find_entry(handle->Directory, token);
+    entry = __vafs_directory_find_entry(handle->Directory, token);
     if (entry != NULL) {
         errno = EEXIST;
         return -1;
@@ -1670,7 +1755,7 @@ int vafs_directory_create_file(
     if (status != 0) {
         return status;
     }
-    entry = __find_entry(handle->Directory, token);
+    entry = __vafs_directory_find_entry(handle->Directory, token);
     
     *handleOut = vafs_file_create_handle(entry->File);
     return 0;
@@ -1703,7 +1788,7 @@ int vafs_directory_create_symlink(
 
     // find the name in the directory
     VAFS_DEBUG("vafs_directory_create_symlink: locating %s\n", token);
-    entry = __find_entry(handle->Directory, token);
+    entry = __vafs_directory_find_entry(handle->Directory, token);
     if (entry == NULL) {
         struct VaFsDirectoryWriter* writer = (struct VaFsDirectoryWriter*)handle->Directory;
         return __create_symlink_entry(writer, token, target);
@@ -1740,7 +1825,7 @@ int vafs_directory_read_symlink(
 
     // find the name in the directory
     VAFS_DEBUG("vafs_directory_read_symlink: locating %s\n", token);
-    entry = __find_entry(handle->Directory, token);
+    entry = __vafs_directory_find_entry(handle->Directory, token);
     if (entry == NULL) {
         errno = ENOENT;
         return -1;
