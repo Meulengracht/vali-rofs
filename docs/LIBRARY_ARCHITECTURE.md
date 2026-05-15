@@ -393,6 +393,14 @@ Implementation: `libvafs/vafs.c:399-530`
 
 Path resolution in VaFS traverses the directory tree, handling symbolic links and path components.
 
+Read-mode directory lookup uses two internal strategies depending on directory size:
+
+- Small directories keep a sorted pointer array and resolve names with binary search.
+- Very large directories build a secondary hash index keyed by entry name and bypass the binary-search path.
+- Directory iteration still follows the stored linked-list order so enumeration semantics do not change when the faster lookup index is enabled.
+
+The current large-directory threshold is 512 entries. Directories below that threshold stay on the lower-overhead binary-search path.
+
 ### Path Resolution Algorithm
 
 ```

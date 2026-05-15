@@ -25,6 +25,7 @@
 #include <platform.h>
 #include <stdint.h>
 #include <stdio.h>
+#include "cache/hashtable.h"
 #include <vafs.h>
 
 struct VaFsStream;
@@ -49,6 +50,11 @@ typedef uint32_t vafsblock_t;
 #define VA_FS_DATA_MIN_BLOCKSIZE     (8 * 1024)
 #define VA_FS_DATA_DEFAULT_BLOCKSIZE (128 * 1024)
 #define VA_FS_DATA_MAX_BLOCKSIZE     (1024 * 1024)
+
+// If a directory has more entries than this threshold, we will build a 
+// hash index for it to speed up lookups. This is a tradeoff between 
+// memory usage and lookup performance.
+#define VAFS_DIRECTORY_HASH_INDEX_THRESHOLD 512
 
 // Logging macros
 #define VAFS_ERROR(...)  vafs_log_message(VaFsLogLevel_Error, "libvafs: " __VA_ARGS__)
@@ -441,10 +447,13 @@ struct VaFsDirectoryReader {
     struct VaFsDirectory       Base;
     enum VaFsDirectoryState    State;
     struct VaFsDirectoryEntry* Entries;
-    // Sorted view used by read-mode lookups and deterministic iteration.
+    // Small read-mode directories use this sorted view for binary search by name.
     struct VaFsDirectoryEntry** Index;
+    // Very large directories build a secondary name index to avoid binary-search overhead.
+    hashtable_t                NameIndex;
     size_t                     EntryCount;
     int                        IndexDirty;
+    int                        NameIndexInitialized;
 };
 
 struct VaFsDirectoryWriter {

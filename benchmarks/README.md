@@ -161,6 +161,22 @@ You can specify custom paths within the VaFS image for testing:
   benchmark.vafs
 ```
 
+### Threshold-Oriented Wide Directory Checks
+
+Directory lookup uses a thresholded strategy internally: smaller directories stay on the binary-search path, while very large directories switch to a secondary name index.
+
+To benchmark both sides of that threshold with the wide-directory image generator:
+
+```bash
+BUILD_DIR=$PWD/build FILE_COUNT=256 tests/lib/generate_wide_directory_image.sh
+./build/bin/vafs-bench --only=wide --wide-directory=/wide_dir /tmp/vafs-test-wide-dir/wide-directory.vafs
+
+BUILD_DIR=$PWD/build FILE_COUNT=5000 tests/lib/generate_wide_directory_image.sh
+./build/bin/vafs-bench --only=wide --wide-directory=/wide_dir /tmp/vafs-test-wide-dir/wide-directory.vafs
+```
+
+The first command exercises the small-directory fallback path. The second exercises the large-directory secondary index path.
+
 ### Options
 
 - `--format=<format>` - Output format: `human`, `json`, or `csv` (default: human)
