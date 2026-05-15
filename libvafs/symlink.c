@@ -49,7 +49,8 @@ int vafs_symlink_open(
         const char*                path,
         struct VaFsSymlinkHandle** handleOut)
 {
-    struct VaFsDirectoryEntry* entries;
+    struct VaFsDirectory*      currentDirectory;
+    struct VaFsDirectoryEntry* entry;
     const char*                remainingPath = path;
     char                       token[VAFS_NAME_MAX + 1];
 
@@ -63,7 +64,7 @@ int vafs_symlink_open(
         return -1;
     }
 
-    entries = __vafs_directory_entries(vafs->RootDirectory);
+    currentDirectory = vafs->RootDirectory;
     do {
         int charsConsumed = __vafs_pathtoken(remainingPath, token, sizeof(token));
         if (!charsConsumed) {
@@ -71,38 +72,36 @@ int vafs_symlink_open(
         }
         remainingPath += charsConsumed;
 
-        // find the name in the directory
-        while (entries != NULL) {
-            if (!strcmp(__vafs_directory_entry_name(entries), token)) {
-                if (entries->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
-                    // If we encounter a directory in this case, we must not
-                    // be at the end of the path
-                    if (remainingPath[0] == '\0') {
-                        errno = EISDIR;
-                        return -1;
-                    }
-
-                    // fall through this entire if/else
-                } else if (entries->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
-                    // If we encounter a symlink in this case, we must be at the end of the path
-                    if (remainingPath[0] != '\0') {
-                        errno = ENOTDIR;
-                        return -1;
-                    }
-
-                    *handleOut = __symlink_handle_new(entries->Symlink);
-                    return 0;
-                } else {
-                    errno = ENOENT;
-                    return -1;
-                }
-
-                entries = __vafs_directory_entries(entries->Directory);
-                break;
-            }
-            entries = entries->Link;
+        entry = __vafs_directory_find_entry(currentDirectory, token);
+        if (entry == NULL) {
+            errno = ENOENT;
+            return -1;
         }
+
+        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
+            if (remainingPath[0] == '\0') {
+                errno = EISDIR;
+                return -1;
+            }
+
+            currentDirectory = entry->Directory;
+            continue;
+        }
+
+        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
+            if (remainingPath[0] != '\0') {
+                errno = ENOTDIR;
+                return -1;
+            }
+
+            *handleOut = __symlink_handle_new(entry->Symlink);
+            return 0;
+        }
+
+        errno = ENOENT;
+        return -1;
     } while (1);
+    errno = ENOENT;
     return -1;
 }
 

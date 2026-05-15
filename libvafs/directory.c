@@ -35,6 +35,130 @@ struct VaFsDirectoryHandle {
     int                   Index;
 };
 
+static uint64_t __directory_lookup_cache_hash(
+    const struct VaFsDirectory* directory,
+    const char*                 token)
+{
+    const unsigned char* name = (const unsigned char*)token;
+    uintptr_t            parent = (uintptr_t)directory;
+    uint64_t             hash = 1469598103934665603ULL;
+
+    for (size_t i = 0; i < sizeof(parent); i++) {
+        hash ^= (uint64_t)((parent >> (i * 8)) & 0xFF);
+        hash *= 1099511628211ULL;
+    }
+
+    while (*name != '\0') {
+        hash ^= (uint64_t)*name++;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+size_t __vafs_directory_lookup_cache_set(
+    const struct VaFsDirectory* directory,
+    const char*                 token)
+{
+    return (size_t)(__directory_lookup_cache_hash(directory, token) & (VAFS_LOOKUP_CACHE_SET_COUNT - 1));
+}
+
+static uint64_t __directory_lookup_cache_generation(
+    struct VaFsLookupCache* cache)
+{
+    cache->Generation++;
+    if (cache->Generation == 0) {
+        cache->Generation = 1;
+    }
+    return cache->Generation;
+}
+
+static struct VaFsLookupCacheEntry* __directory_lookup_cache_entries(
+    struct VaFs* vafs,
+    size_t       setIndex)
+{
+    return &vafs->LookupCache.Entries[setIndex * VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY];
+}
+
+static int __directory_lookup_cache_get(
+    struct VaFsDirectory*       directory,
+    const char*                 token,
+    struct VaFsDirectoryEntry** entryOut)
+{
+    struct VaFsLookupCache*      cache;
+    struct VaFsLookupCacheEntry* entries;
+    size_t                       setIndex;
+
+    if (directory->VaFs->Mode != VaFsMode_Read) {
+        return 0;
+    }
+
+    cache = &directory->VaFs->LookupCache;
+    setIndex = __vafs_directory_lookup_cache_set(directory, token);
+    entries = __directory_lookup_cache_entries(directory->VaFs, setIndex);
+    for (size_t i = 0; i < VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY; i++) {
+        if (entries[i].State == VaFsLookupCacheState_Empty) {
+            continue;
+        }
+
+        if (entries[i].Parent != directory || strcmp(entries[i].Name, token) != 0) {
+            continue;
+        }
+
+        entries[i].Generation = __directory_lookup_cache_generation(cache);
+        if (entries[i].State == VaFsLookupCacheState_Miss) {
+            errno = ENOENT;
+            *entryOut = NULL;
+            return 1;
+        }
+
+        *entryOut = entries[i].Entry;
+        return 1;
+    }
+    return 0;
+}
+
+static void __directory_lookup_cache_store(
+    struct VaFsDirectory*      directory,
+    const char*                token,
+    struct VaFsDirectoryEntry* entry)
+{
+    struct VaFsLookupCache*      cache;
+    struct VaFsLookupCacheEntry* entries;
+    struct VaFsLookupCacheEntry* target;
+    size_t                       setIndex;
+
+    if (directory->VaFs->Mode != VaFsMode_Read) {
+        return;
+    }
+
+    cache = &directory->VaFs->LookupCache;
+    setIndex = __vafs_directory_lookup_cache_set(directory, token);
+    entries = __directory_lookup_cache_entries(directory->VaFs, setIndex);
+    target = &entries[0];
+
+    for (size_t i = 0; i < VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY; i++) {
+        if (entries[i].State == VaFsLookupCacheState_Empty) {
+            target = &entries[i];
+            break;
+        }
+
+        if (entries[i].Parent == directory && strcmp(entries[i].Name, token) == 0) {
+            target = &entries[i];
+            break;
+        }
+
+        if (target->State != VaFsLookupCacheState_Empty && entries[i].Generation < target->Generation) {
+            target = &entries[i];
+        }
+    }
+
+    target->Parent = directory;
+    target->Entry = entry;
+    target->Generation = __directory_lookup_cache_generation(cache);
+    target->State = entry != NULL ? VaFsLookupCacheState_Hit : VaFsLookupCacheState_Miss;
+    memcpy(target->Name, token, strlen(token) + 1);
+}
+
 static void __initialize_file_descriptor(
     VaFsFileDescriptor_t* descriptor,
     uint32_t              permissions)
@@ -377,9 +501,14 @@ struct VaFsDirectoryEntry* __vafs_directory_find_entry(
     struct VaFsDirectory* directory,
     const char*           token)
 {
-    if (directory->VaFs->Mode == VaFsMode_Write) {
-        struct VaFsDirectoryEntry* entry;
+    struct VaFsDirectoryEntry* entry;
 
+    if (directory == NULL || token == NULL) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    if (directory->VaFs->Mode == VaFsMode_Write) {
         // Writer-side lookups stay on the linked list so creation semantics are unchanged.
         entry = __vafs_directory_entries(directory);
         while (entry != NULL) {
@@ -389,10 +518,17 @@ struct VaFsDirectoryEntry* __vafs_directory_find_entry(
             entry = entry->Link;
         }
 
+        errno = ENOENT;
         return NULL;
     }
 
-    __vafs_directory_entries(directory);
+    if (__directory_lookup_cache_get(directory, token, &entry)) {
+        return entry;
+    }
+
+    if (__vafs_directory_entries(directory) == NULL) {
+        return NULL;
+    }
 
     if (__directory_uses_name_index(directory)) {
         hashtable_t* nameIndex = __vafs_directory_name_index(directory);
@@ -407,8 +543,12 @@ struct VaFsDirectoryEntry* __vafs_directory_find_entry(
             &(struct __directory_name_index_entry) { .Name = token }
         );
         if (indexedEntry == NULL) {
+            if (errno == ENOENT) {
+                __directory_lookup_cache_store(directory, token, NULL);
+            }
             return NULL;
         }
+        __directory_lookup_cache_store(directory, token, indexedEntry->Entry);
         return indexedEntry->Entry;
     }
 
@@ -431,6 +571,7 @@ struct VaFsDirectoryEntry* __vafs_directory_find_entry(
         int comparison = strcmp(__vafs_directory_entry_name(index[middle]), token);
 
         if (comparison == 0) {
+            __directory_lookup_cache_store(directory, token, index[middle]);
             return index[middle];
         }
 
@@ -441,6 +582,8 @@ struct VaFsDirectoryEntry* __vafs_directory_find_entry(
         }
     }
 
+    errno = ENOENT;
+    __directory_lookup_cache_store(directory, token, NULL);
     return NULL;
 }
 

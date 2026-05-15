@@ -423,6 +423,7 @@ static BenchmarkResult run_large_file_read_benchmark(const char* image_path, con
 static int path_lookup_setup(void* user_data)
 {
     PathLookupBenchmarkContext* ctx = (PathLookupBenchmarkContext*)user_data;
+    struct VaFsFileHandle*      handle = NULL;
     int status;
 
     status = vafs_open_file(ctx->image_path, &ctx->vafs);
@@ -438,6 +439,16 @@ static int path_lookup_setup(void* user_data)
         vafs_close(ctx->vafs);
         return -1;
     }
+
+    // Warm the path once so the measured iterations reflect repeated lookup cost
+    // rather than one-time directory loading and cache priming.
+    status = vafs_file_open(ctx->vafs, ctx->path, &handle);
+    if (status != 0) {
+        fprintf(stderr, "Failed to warm lookup path: %s\n", strerror(errno));
+        vafs_close(ctx->vafs);
+        return -1;
+    }
+    vafs_file_close(handle);
 
     return 0;
 }
@@ -490,6 +501,7 @@ static BenchmarkResult run_path_lookup_benchmark(const char* image_path, const c
 static int path_stat_setup(void* user_data)
 {
     PathStatBenchmarkContext* ctx = (PathStatBenchmarkContext*)user_data;
+    struct vafs_stat          statbuf;
     int status;
 
     status = vafs_open_file(ctx->image_path, &ctx->vafs);
@@ -501,6 +513,15 @@ static int path_stat_setup(void* user_data)
     status = __handle_filter(ctx->vafs);
     if (status != 0) {
         fprintf(stderr, "Failed to install filters: %s\n", strerror(errno));
+        vafs_close(ctx->vafs);
+        return -1;
+    }
+
+    // Warm the path once so repeated-stat measurements are not dominated by the
+    // first directory load or initial lookup cache population.
+    status = vafs_path_stat(ctx->vafs, ctx->path, 1, &statbuf);
+    if (status != 0) {
+        fprintf(stderr, "Failed to warm stat path: %s\n", strerror(errno));
         vafs_close(ctx->vafs);
         return -1;
     }

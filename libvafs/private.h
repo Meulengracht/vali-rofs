@@ -56,6 +56,13 @@ typedef uint32_t vafsblock_t;
 // memory usage and lookup performance.
 #define VAFS_DIRECTORY_HASH_INDEX_THRESHOLD 512
 
+// Read-only lookup cache for repeated path traversal. The cache is keyed by
+// (parent directory pointer, child name), stores both hits and misses, and is
+// bounded so mounted images have a predictable memory footprint.
+#define VAFS_LOOKUP_CACHE_SET_COUNT          128
+#define VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY  4
+#define VAFS_LOOKUP_CACHE_CAPACITY           (VAFS_LOOKUP_CACHE_SET_COUNT * VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY)
+
 // Logging macros
 #define VAFS_ERROR(...)  vafs_log_message(VaFsLogLevel_Error, "libvafs: " __VA_ARGS__)
 #define VAFS_WARN(...)   vafs_log_message(VaFsLogLevel_Warning, "libvafs: " __VA_ARGS__)
@@ -121,6 +128,25 @@ enum VaFsMode {
     VaFsMode_Write
 };
 
+enum VaFsLookupCacheState {
+    VaFsLookupCacheState_Empty = 0,
+    VaFsLookupCacheState_Hit,
+    VaFsLookupCacheState_Miss
+};
+
+struct VaFsLookupCacheEntry {
+    struct VaFsDirectory*      Parent;
+    struct VaFsDirectoryEntry* Entry;
+    uint64_t                   Generation;
+    enum VaFsLookupCacheState  State;
+    char                       Name[VAFS_NAME_MAX + 1];
+};
+
+struct VaFsLookupCache {
+    uint64_t                    Generation;
+    struct VaFsLookupCacheEntry Entries[VAFS_LOOKUP_CACHE_CAPACITY];
+};
+
 struct VaFsFile {
     struct VaFs*         VaFs;
     VaFsFileDescriptor_t Descriptor;
@@ -165,7 +191,8 @@ struct VaFs {
     struct VaFsStreamDevice* DataDevice;
     struct VaFsStream*       DataStream;
 
-    struct VaFsDirectory* RootDirectory;
+    struct VaFsDirectory*  RootDirectory;
+    struct VaFsLookupCache LookupCache;
 };
 
 extern int vafs_streamdevice_open_file(
@@ -489,6 +516,7 @@ extern int __vafs_directory_open_internal(struct VaFs* vafs, const char* path, s
 extern int __vafs_file_open_internal(struct VaFs* vafs, const char* path, struct VaFsFileHandle** handleOut, int symlinkDepth);
 extern struct VaFsDirectoryEntry* __vafs_directory_entries(struct VaFsDirectory* directory);
 extern struct VaFsDirectoryEntry* __vafs_directory_find_entry(struct VaFsDirectory* directory, const char* token);
+extern size_t __vafs_directory_lookup_cache_set(const struct VaFsDirectory* directory, const char* token);
 extern int __vafs_directory_entry_stat(struct VaFsDirectoryEntry* entry, struct vafs_stat* stat);
 extern const char* __vafs_directory_entry_name(struct VaFsDirectoryEntry* entry);
 
