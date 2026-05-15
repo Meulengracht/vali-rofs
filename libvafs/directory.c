@@ -25,6 +25,11 @@
 #include <string.h>
 #include <vafs/directory.h>
 
+struct __directory_name_index_entry {
+    const char*                Name;
+    struct VaFsDirectoryEntry* Entry;
+};
+
 struct VaFsDirectoryHandle {
     struct VaFsDirectory* Directory;
     int                   Index;
@@ -127,10 +132,20 @@ static void __free_directory_index(struct VaFsDirectoryEntry** index)
     free(index);
 }
 
+static void __free_directory_name_index(struct VaFsDirectoryReader* reader)
+{
+    if (reader->NameIndexInitialized) {
+        vafs_hashtable_destroy(&reader->NameIndex);
+        memset(&reader->NameIndex, 0, sizeof(hashtable_t));
+        reader->NameIndexInitialized = 0;
+    }
+}
+
 static void __directory_reader_destroy(struct VaFsDirectoryReader* reader)
 {
     __cleanup_directory_entries(reader->Entries);
     __free_directory_index(reader->Index);
+    __free_directory_name_index(reader);
 }
 
 static void __directory_writer_destroy(struct VaFsDirectoryWriter* writer)
@@ -151,6 +166,30 @@ static int __compare_directory_entries(
     return strcmp(leftName, rightName);
 }
 
+static uint64_t __directory_name_hash(
+    const void* element)
+{
+    const struct __directory_name_index_entry* indexEntry = element;
+    const unsigned char*                       name = (const unsigned char*)indexEntry->Name;
+    uint64_t                                   hash = 1469598103934665603ULL;
+
+    while (*name != '\0') {
+        hash ^= (uint64_t)*name++;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static int __directory_name_cmp(
+    const void* lhs,
+    const void* rhs)
+{
+    const struct __directory_name_index_entry* left = lhs;
+    const struct __directory_name_index_entry* right = rhs;
+
+    return strcmp(left->Name, right->Name);
+}
+
 static size_t __directory_entry_count(
     struct VaFsDirectory* directory)
 {
@@ -159,6 +198,13 @@ static size_t __directory_entry_count(
     }
 
     return ((struct VaFsDirectoryWriter*)directory)->EntryCount;
+}
+
+static int __directory_uses_name_index(
+    struct VaFsDirectory* directory)
+{
+    return directory->VaFs->Mode == VaFsMode_Read &&
+        __directory_entry_count(directory) >= VAFS_DIRECTORY_HASH_INDEX_THRESHOLD;
 }
 
 static struct VaFsDirectoryEntry** __vafs_directory_index(
@@ -225,6 +271,53 @@ static struct VaFsDirectoryEntry** __vafs_directory_index(
     return writer->Index;
 }
 
+static hashtable_t* __vafs_directory_name_index(
+    struct VaFsDirectory* directory)
+{
+    struct VaFsDirectoryReader* reader = (struct VaFsDirectoryReader*)directory;
+    struct VaFsDirectoryEntry*  entry;
+    size_t                      count;
+    int                         status;
+
+    if (!__directory_uses_name_index(directory)) {
+        return NULL;
+    }
+
+    if (reader->NameIndexInitialized) {
+        return &reader->NameIndex;
+    }
+
+    count = __directory_entry_count(directory);
+    status = vafs_hashtable_construct(
+        &reader->NameIndex,
+        count,
+        sizeof(struct __directory_name_index_entry),
+        __directory_name_hash,
+        __directory_name_cmp
+    );
+    if (status != 0) {
+        return NULL;
+    }
+    reader->NameIndexInitialized = 1;
+
+    entry = reader->Entries;
+    while (entry != NULL) {
+        struct __directory_name_index_entry indexEntry = {
+            .Name = __vafs_directory_entry_name(entry),
+            .Entry = entry
+        };
+
+        errno = 0;
+        if (vafs_hashtable_set(&reader->NameIndex, &indexEntry) == NULL && errno != 0) {
+            __free_directory_name_index(reader);
+            return NULL;
+        }
+        entry = entry->Link;
+    }
+
+    return &reader->NameIndex;
+}
+
 static struct VaFsDirectoryEntry* __find_entry(
     struct VaFsDirectory* directory,
     const char*           token)
@@ -246,12 +339,30 @@ static struct VaFsDirectoryEntry* __find_entry(
 
     __vafs_directory_entries(directory);
 
+    if (__directory_uses_name_index(directory)) {
+        hashtable_t* nameIndex = __vafs_directory_name_index(directory);
+        struct __directory_name_index_entry* indexedEntry;
+
+        if (nameIndex == NULL) {
+            return NULL;
+        }
+
+        indexedEntry = vafs_hashtable_get(
+            nameIndex,
+            &(struct __directory_name_index_entry) { .Name = token }
+        );
+        if (indexedEntry == NULL) {
+            return NULL;
+        }
+        return indexedEntry->Entry;
+    }
+
     struct VaFsDirectoryEntry** index;
     size_t                      count;
     size_t                      left;
     size_t                      right;
 
-    // Read mode uses the cached sorted view for binary search by entry name.
+    // Smaller read-mode directories use the cached sorted view for binary search by entry name.
     index = __vafs_directory_index(directory);
     if (!index) {
         return NULL;
@@ -604,6 +715,8 @@ static struct VaFsDirectory* __create_directory_from_descriptor(
     directory->Index     = NULL;
     directory->EntryCount = 0;
     directory->IndexDirty = 1;
+    directory->NameIndexInitialized = 0;
+    memset(&directory->NameIndex, 0, sizeof(hashtable_t));
     directory->Base.Name = __read_extended_string(extendedData, descriptor->Base.Length - sizeof(VaFsDirectoryDescriptor_t));
     directory->Base.VaFs = vafs;
     memcpy(&directory->Base.Descriptor, descriptor, sizeof(VaFsDirectoryDescriptor_t));
@@ -758,7 +871,11 @@ static int __load_directory(
 
     reader->State = VaFsDirectoryState_Loaded;
     reader->IndexDirty = 1;
-    if (__vafs_directory_index(&reader->Base) == NULL && reader->EntryCount != 0) {
+    if (__directory_uses_name_index(&reader->Base)) {
+        if (__vafs_directory_name_index(&reader->Base) == NULL && reader->EntryCount != 0) {
+            return -1;
+        }
+    } else if (__vafs_directory_index(&reader->Base) == NULL && reader->EntryCount != 0) {
         return -1;
     }
     return 0;
@@ -792,6 +909,8 @@ int vafs_directory_open_root(
     reader->Index     = NULL;
     reader->EntryCount = 0;
     reader->IndexDirty = 1;
+    reader->NameIndexInitialized = 0;
+    memset(&reader->NameIndex, 0, sizeof(hashtable_t));
     
     // initialize the root descriptor for the directory
     reader->Base.Descriptor.Base.Length = sizeof(VaFsDirectoryDescriptor_t);

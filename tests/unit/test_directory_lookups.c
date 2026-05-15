@@ -14,7 +14,8 @@
 #include <vafs/file.h>
 
 #define TEST_IMAGE_PATH "/tmp/test_directory_lookups.vafs"
-#define ROOT_ENTRY_COUNT 256
+#define SMALL_DIR_ENTRY_COUNT 64
+#define LARGE_DIR_ENTRY_COUNT 1024
 
 static int g_test_passed = 0;
 static int g_test_failed = 0;
@@ -40,19 +41,29 @@ static void make_entry_name(char* buffer, size_t buffer_size, int index)
     snprintf(buffer, buffer_size, "entry_%04d", index);
 }
 
+static void make_prefixed_entry_name(char* buffer, size_t buffer_size, const char* prefix, int index)
+{
+    snprintf(buffer, buffer_size, "%s_%04d", prefix, index);
+}
+
 static int test_wide_directory_lookup(void)
 {
     struct VaFs* vafs = NULL;
     struct VaFsConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsDirectoryHandle* small_dir = NULL;
+    struct VaFsDirectoryHandle* large_dir = NULL;
     struct VaFsDirectoryHandle* nested = NULL;
     struct VaFsFileHandle* file_handle = NULL;
     char name[32];
     struct VaFsEntry entry;
     size_t read_count = 0;
-    int saw_first = 0;
-    int saw_middle = 0;
-    int saw_last = 0;
+    int saw_small_first = 0;
+    int saw_small_middle = 0;
+    int saw_small_last = 0;
+    int saw_large_first = 0;
+    int saw_large_middle = 0;
+    int saw_large_last = 0;
     int saw_nested = 0;
     int status;
     int i;
@@ -64,10 +75,31 @@ static int test_wide_directory_lookup(void)
     status = vafs_directory_open(vafs, "/", &root);
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
-    // Insert names in reverse order so name lookup correctness does not depend on insertion order.
-    for (i = ROOT_ENTRY_COUNT - 1; i >= 0; i--) {
+    status = vafs_directory_create_directory(root, "small_dir", 0755, &small_dir);
+    TEST_ASSERT(status == 0, "Failed to create small directory");
+
+    status = vafs_directory_create_directory(root, "large_dir", 0755, &large_dir);
+    TEST_ASSERT(status == 0, "Failed to create large directory");
+
+    // Insert names in reverse order so lookup correctness does not depend on insertion order.
+    for (i = SMALL_DIR_ENTRY_COUNT - 1; i >= 0; i--) {
+        make_prefixed_entry_name(name, sizeof(name), "small", i);
+        status = vafs_directory_create_file(small_dir, name, 0644, &file_handle);
+        TEST_ASSERT(status == 0, "Failed to create small-directory file entry");
+
+        if (i == 0) {
+            const char* content = "small-directory-data";
+            status = vafs_file_write(file_handle, (void*)content, strlen(content));
+            TEST_ASSERT(status == 0, "Failed to write small-directory file payload");
+        }
+
+        vafs_file_close(file_handle);
+        file_handle = NULL;
+    }
+
+    for (i = LARGE_DIR_ENTRY_COUNT - 1; i >= 0; i--) {
         make_entry_name(name, sizeof(name), i);
-        status = vafs_directory_create_file(root, name, 0644, &file_handle);
+        status = vafs_directory_create_file(large_dir, name, 0644, &file_handle);
         TEST_ASSERT(status == 0, "Failed to create file entry");
 
         if (i == 0) {
@@ -89,6 +121,10 @@ static int test_wide_directory_lookup(void)
     vafs_file_close(file_handle);
     file_handle = NULL;
 
+    vafs_directory_close(large_dir);
+    large_dir = NULL;
+    vafs_directory_close(small_dir);
+    small_dir = NULL;
     vafs_directory_close(nested);
     nested = NULL;
     vafs_directory_close(root);
@@ -103,36 +139,79 @@ static int test_wide_directory_lookup(void)
     TEST_ASSERT(status == 0, "Failed to reopen root directory");
 
     while (vafs_directory_read(root, &entry) == 0) {
-        if (strcmp(entry.Name, "entry_0000") == 0) {
-            saw_first = 1;
-        } else if (strcmp(entry.Name, "entry_0128") == 0) {
-            saw_middle = 1;
-        } else if (strcmp(entry.Name, "entry_0255") == 0) {
-            saw_last = 1;
-        } else if (strcmp(entry.Name, "nested_dir") == 0) {
+        if (strcmp(entry.Name, "small_dir") == 0 || strcmp(entry.Name, "large_dir") == 0 || strcmp(entry.Name, "nested_dir") == 0) {
             saw_nested = 1;
         }
         read_count++;
     }
 
-    TEST_ASSERT(read_count == ROOT_ENTRY_COUNT + 1, "Unexpected root directory entry count");
-    TEST_ASSERT(saw_first, "Missing first lookup target during enumeration");
-    TEST_ASSERT(saw_middle, "Missing middle lookup target during enumeration");
-    TEST_ASSERT(saw_last, "Missing last lookup target during enumeration");
-    TEST_ASSERT(saw_nested, "Missing nested directory during enumeration");
+    TEST_ASSERT(read_count == 3, "Unexpected root directory entry count");
+    TEST_ASSERT(saw_nested, "Missing expected root directories during enumeration");
 
-    status = vafs_directory_open_file(root, "entry_0000", &file_handle);
-    TEST_ASSERT(status == 0, "Failed to open first entry through directory lookup");
+    status = vafs_directory_open(vafs, "/small_dir", &small_dir);
+    TEST_ASSERT(status == 0, "Failed to reopen small directory");
+
+    while (vafs_directory_read(small_dir, &entry) == 0) {
+        if (strcmp(entry.Name, "small_0000") == 0) {
+            saw_small_first = 1;
+        } else if (strcmp(entry.Name, "small_0032") == 0) {
+            saw_small_middle = 1;
+        } else if (strcmp(entry.Name, "small_0063") == 0) {
+            saw_small_last = 1;
+        }
+    }
+
+    TEST_ASSERT(saw_small_first, "Missing first small-directory entry during enumeration");
+    TEST_ASSERT(saw_small_middle, "Missing middle small-directory entry during enumeration");
+    TEST_ASSERT(saw_small_last, "Missing last small-directory entry during enumeration");
+
+    status = vafs_directory_open_file(small_dir, "small_0000", &file_handle);
+    TEST_ASSERT(status == 0, "Failed to open first small-directory entry through lookup");
     vafs_file_close(file_handle);
     file_handle = NULL;
 
-    status = vafs_directory_open_file(root, "entry_0128", &file_handle);
-    TEST_ASSERT(status == 0, "Failed to open middle entry through directory lookup");
+    status = vafs_directory_open_file(small_dir, "small_0032", &file_handle);
+    TEST_ASSERT(status == 0, "Failed to open middle small-directory entry through lookup");
     vafs_file_close(file_handle);
     file_handle = NULL;
 
-    status = vafs_directory_open_file(root, "entry_0255", &file_handle);
-    TEST_ASSERT(status == 0, "Failed to open last entry through directory lookup");
+    status = vafs_directory_open_file(small_dir, "small_0063", &file_handle);
+    TEST_ASSERT(status == 0, "Failed to open last small-directory entry through lookup");
+    vafs_file_close(file_handle);
+    file_handle = NULL;
+
+    vafs_directory_close(small_dir);
+    small_dir = NULL;
+
+    status = vafs_directory_open(vafs, "/large_dir", &large_dir);
+    TEST_ASSERT(status == 0, "Failed to reopen large directory");
+
+    while (vafs_directory_read(large_dir, &entry) == 0) {
+        if (strcmp(entry.Name, "entry_0000") == 0) {
+            saw_large_first = 1;
+        } else if (strcmp(entry.Name, "entry_0512") == 0) {
+            saw_large_middle = 1;
+        } else if (strcmp(entry.Name, "entry_1023") == 0) {
+            saw_large_last = 1;
+        }
+    }
+
+    TEST_ASSERT(saw_large_first, "Missing first large-directory entry during enumeration");
+    TEST_ASSERT(saw_large_middle, "Missing middle large-directory entry during enumeration");
+    TEST_ASSERT(saw_large_last, "Missing last large-directory entry during enumeration");
+
+    status = vafs_directory_open_file(large_dir, "entry_0000", &file_handle);
+    TEST_ASSERT(status == 0, "Failed to open first large-directory entry through lookup");
+    vafs_file_close(file_handle);
+    file_handle = NULL;
+
+    status = vafs_directory_open_file(large_dir, "entry_0512", &file_handle);
+    TEST_ASSERT(status == 0, "Failed to open middle large-directory entry through lookup");
+    vafs_file_close(file_handle);
+    file_handle = NULL;
+
+    status = vafs_directory_open_file(large_dir, "entry_1023", &file_handle);
+    TEST_ASSERT(status == 0, "Failed to open last large-directory entry through lookup");
     vafs_file_close(file_handle);
     file_handle = NULL;
 
@@ -146,14 +225,16 @@ static int test_wide_directory_lookup(void)
     vafs_directory_close(nested);
     nested = NULL;
 
-    status = vafs_directory_open_file(root, "missing_entry", &file_handle);
+    status = vafs_directory_open_file(large_dir, "missing_entry", &file_handle);
     TEST_ASSERT(status != 0 && errno == ENOENT, "Missing entry should return ENOENT");
 
+    vafs_directory_close(large_dir);
+    large_dir = NULL;
     vafs_directory_close(root);
     vafs_close(vafs);
     remove(TEST_IMAGE_PATH);
 
-    TEST_PASS("Wide directory lookup remains correct and deterministic");
+    TEST_PASS("Directory lookup handles both threshold fallback paths correctly");
 }
 
 int main(int argc, char** argv)
