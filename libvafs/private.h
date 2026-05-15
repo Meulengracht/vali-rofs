@@ -441,11 +441,19 @@ struct VaFsDirectoryReader {
     struct VaFsDirectory       Base;
     enum VaFsDirectoryState    State;
     struct VaFsDirectoryEntry* Entries;
+    // Sorted view used by read-mode lookups and deterministic iteration.
+    struct VaFsDirectoryEntry** Index;
+    size_t                     EntryCount;
+    int                        IndexDirty;
 };
 
 struct VaFsDirectoryWriter {
     struct VaFsDirectory       Base;
     struct VaFsDirectoryEntry* Entries;
+    // Writer mode keeps the linked list as the source of truth and rebuilds this cache on demand.
+    struct VaFsDirectoryEntry** Index;
+    size_t                     EntryCount;
+    int                        IndexDirty;
 };
 
 struct VaFsDirectoryEntry {
