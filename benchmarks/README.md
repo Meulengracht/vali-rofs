@@ -14,6 +14,8 @@ The benchmark suite measures seven core workload categories:
 6. **Deep Path Stat** - Repeated `stat` on a long/deep path
 7. **Wide Directory Stat** - Repeated `stat` across many siblings in a wide directory
 
+The `deepstat` and `wide` benchmarks are the closest stand-ins for hot FUSE `getattr` and `access` workloads because they repeatedly call `vafs_path_stat()` against already-open images.
+
 ## Building
 
 The benchmarks are built automatically with the project if `VAFS_BUILD_BENCHMARKS` is enabled (default: ON).
@@ -176,6 +178,8 @@ BUILD_DIR=$PWD/build FILE_COUNT=5000 tests/lib/generate_wide_directory_image.sh
 ```
 
 The first command exercises the small-directory fallback path. The second exercises the large-directory secondary index path.
+
+Both runs also cover the read-mode `vafs_path_stat()` fast path, which now reuses the same cached directory lookup structures and cached entry stat metadata used by direct directory operations.
 
 ### Options
 
