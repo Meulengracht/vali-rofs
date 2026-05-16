@@ -21,6 +21,12 @@ static struct VaFsGuid g_filterOpsGuid = VA_FS_FEATURE_FILTER_OPS;
 static int g_descriptor_encode_calls = 0;
 static int g_data_encode_calls = 0;
 
+struct ReadAtOnlyBuffer {
+    const uint8_t* Data;
+    size_t         Length;
+    int            ReadAtCalls;
+};
+
 static int g_test_passed = 0;
 static int g_test_failed = 0;
 
@@ -168,6 +174,72 @@ static int read_stream_block_sizes(uint32_t* descriptorBlockSizeOut, uint32_t* d
     *dataBlockSizeOut = streamHeader.BlockSize;
 
     fclose(fp);
+    return 0;
+}
+
+static int load_image_bytes(void** bufferOut, size_t* lengthOut)
+{
+    FILE* fp;
+    long  length;
+    void* buffer;
+
+    fp = fopen(TEST_IMAGE_PATH, "rb");
+    if (fp == NULL) {
+        return -1;
+    }
+
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return -1;
+    }
+
+    length = ftell(fp);
+    if (length <= 0) {
+        fclose(fp);
+        return -1;
+    }
+
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return -1;
+    }
+
+    buffer = malloc((size_t)length);
+    if (buffer == NULL) {
+        fclose(fp);
+        errno = ENOMEM;
+        return -1;
+    }
+
+    if (fread(buffer, 1, (size_t)length, fp) != (size_t)length) {
+        fclose(fp);
+        free(buffer);
+        return -1;
+    }
+
+    fclose(fp);
+    *bufferOut = buffer;
+    *lengthOut = (size_t)length;
+    return 0;
+}
+
+static int read_at_only(void* userData, long offset, void* buffer, size_t length, size_t* bytesRead)
+{
+    struct ReadAtOnlyBuffer* image = userData;
+
+    if (image == NULL || buffer == NULL || bytesRead == NULL || offset < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if ((size_t)offset > image->Length || length > image->Length - (size_t)offset) {
+        errno = EIO;
+        return -1;
+    }
+
+    memcpy(buffer, image->Data + offset, length);
+    *bytesRead = length;
+    image->ReadAtCalls++;
     return 0;
 }
 
@@ -362,6 +434,64 @@ static int test_descriptor_and_data_streams_can_diverge(void)
     TEST_PASS("Descriptor and data streams can use different block sizes and filter callbacks");
 }
 
+static int test_open_ops_accepts_read_at_only_backend(void)
+{
+    struct VaFs* vafs = NULL;
+    struct VaFsConfiguration config;
+    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsFileHandle* file = NULL;
+    struct VaFsOperations ops = { 0 };
+    struct ReadAtOnlyBuffer image = { 0 };
+    const char payload[] = "read-at backend";
+    char buffer[sizeof(payload)] = { 0 };
+    size_t read;
+    int status;
+
+    // Prove that the read path no longer requires a mutable device cursor by
+    // reopening an image through a backend that only implements readAt.
+
+    vafs_config_initialize(&config);
+    vafs_config_set_block_size(&config, TEST_BLOCK_SIZE);
+
+    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    TEST_ASSERT(status == 0, "Failed to create readAt-only test image");
+
+    status = vafs_directory_open(vafs, "/", &root);
+    TEST_ASSERT(status == 0, "Failed to open root directory");
+
+    status = vafs_directory_create_file(root, "ops", 0644, &file);
+    TEST_ASSERT(status == 0, "Failed to create readAt-only test file");
+
+    TEST_ASSERT(vafs_file_write(file, (void*)payload, sizeof(payload) - 1) == 0, "Failed to write readAt-only payload");
+
+    vafs_file_close(file);
+    file = NULL;
+    vafs_directory_close(root);
+    root = NULL;
+    vafs_close(vafs);
+    vafs = NULL;
+
+    status = load_image_bytes((void**)&image.Data, &image.Length);
+    TEST_ASSERT(status == 0, "Failed to load image into memory");
+
+    ops.readAt = read_at_only;
+
+    status = vafs_open_ops(&ops, &image, &vafs);
+    TEST_ASSERT(status == 0, "Failed to open image with readAt-only backend");
+
+    status = vafs_file_open(vafs, "/ops", &file);
+    TEST_ASSERT(status == 0, "Failed to open file through readAt-only backend");
+
+    read = vafs_file_read(file, buffer, sizeof(payload) - 1);
+    TEST_ASSERT(read == sizeof(payload) - 1, "Read size mismatch through readAt-only backend");
+    TEST_ASSERT(memcmp(buffer, payload, sizeof(payload) - 1) == 0, "Read content mismatch through readAt-only backend");
+    TEST_ASSERT(image.ReadAtCalls > 0, "Expected readAt callback to service the read path");
+
+    cleanup_image(vafs, NULL, file);
+    free((void*)image.Data);
+    TEST_PASS("Read-only custom backends can rely on readAt without seek+read");
+}
+
 int main(void)
 {
     int status = test_sequential_reads_advance_position();
@@ -374,6 +504,10 @@ int main(void)
 
     if (status == 0) {
         status = test_descriptor_and_data_streams_can_diverge();
+    }
+
+    if (status == 0) {
+        status = test_open_ops_accepts_read_at_only_backend();
     }
 
     printf("\nTest Summary: %d passed, %d failed\n", g_test_passed, g_test_failed);

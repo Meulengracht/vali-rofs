@@ -16,7 +16,7 @@
  *
  */
 
-#include "symlink_utils.h"
+#include "utils.h"
 
 #include <errno.h>
 #include <stdlib.h>

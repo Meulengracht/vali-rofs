@@ -295,6 +295,27 @@ extern int vafs_streamdevice_read(
     size_t*                  bytesRead);
 
 /**
+ * @brief Reads bytes from a stream device at an absolute offset.
+ *
+ * This is the read-only fast path used by stream and metadata loaders. Devices
+ * with native positioned reads can avoid shared cursor mutations entirely.
+ * Devices without that support fall back to an internal seek+read sequence.
+ *
+ * @param[In]  device    The stream device to read from.
+ * @param[In]  offset    Absolute byte offset to read from.
+ * @param[Out] buffer    Destination buffer for the bytes read.
+ * @param[In]  length    Number of bytes requested.
+ * @param[Out] bytesRead Receives the number of bytes actually read.
+ * @return 0 on success, otherwise -1 with `errno` set.
+ */
+extern int vafs_streamdevice_read_at(
+    struct VaFsStreamDevice* device,
+    long                     offset,
+    void*                    buffer,
+    size_t                   length,
+    size_t*                  bytesRead);
+
+/**
  * @brief Writes bytes directly to a stream device.
  *
  * @param[In]  device       The stream device to write to.

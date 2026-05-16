@@ -167,21 +167,16 @@ static int __verify_root_descriptor(
 }
 
 static struct VaFsFeatureHeader* __load_feature(
-    struct VaFs* vafs)
+    struct VaFs* vafs,
+    long         offset,
+    long*        nextOffsetOut)
 {
     struct VaFsFeatureHeader  header;
     struct VaFsFeatureHeader* feature;
     int                       status;
-    long                      offset;
     size_t                    read;
 
-    offset = vafs_streamdevice_seek(vafs->ImageDevice, 0, SEEK_CUR);
-    if (offset < 0) {
-        VAFS_ERROR("__load_feature: failed to retrieve current offset: %i\n", offset);
-        return NULL;
-    }
-
-    status = vafs_streamdevice_read(vafs->ImageDevice, &header, sizeof(struct VaFsFeatureHeader), &read);
+    status = vafs_streamdevice_read_at(vafs->ImageDevice, offset, &header, sizeof(struct VaFsFeatureHeader), &read);
     if (status || read != sizeof(struct VaFsFeatureHeader)) {
         VAFS_ERROR("__load_feature: failed to read feature header %i\n", status);
         return NULL;
@@ -193,19 +188,14 @@ static struct VaFsFeatureHeader* __load_feature(
         return NULL;
     }
 
-    status = (int)vafs_streamdevice_seek(vafs->ImageDevice, offset, SEEK_SET);
-    if (status < 0) {
-        VAFS_ERROR("__load_feature: failed to seek to offset %i\n", offset);
-        free(feature);
-        return NULL;
-    }
-
-    status = vafs_streamdevice_read(vafs->ImageDevice, feature, header.Length, &read);
+    status = vafs_streamdevice_read_at(vafs->ImageDevice, offset, feature, header.Length, &read);
     if (status || read != header.Length) {
         VAFS_ERROR("__load_feature: failed to read feature %i\n", status);
         free(feature);
         return NULL;
     }
+
+    *nextOffsetOut = offset + header.Length;
     return feature;
 }
 
@@ -263,12 +253,16 @@ static void __parse_known_features(
 static int __load_features(
     struct VaFs* vafs)
 {
+    long offset;
+
     if (!vafs->Header.FeatureCount) {
         return 0;
     }
+
+    offset = sizeof(VaFsHeader_t);
     
     for (int i = 0; i < vafs->Header.FeatureCount; i++) {
-        vafs->Features[i] = __load_feature(vafs);
+        vafs->Features[i] = __load_feature(vafs, offset, &offset);
         if (vafs->Features[i] == NULL) {
             return -1;
         }
@@ -392,8 +386,8 @@ static int __initialize_imagestream(
     if (vafs->Mode == VaFsMode_Read) {
         size_t read;
 
-        status = vafs_streamdevice_read(vafs->ImageDevice, &vafs->Header, sizeof(VaFsHeader_t), &read);
-        if (status) {
+        status = vafs_streamdevice_read_at(vafs->ImageDevice, 0, &vafs->Header, sizeof(VaFsHeader_t), &read);
+        if (status || read != sizeof(VaFsHeader_t)) {
             VAFS_ERROR("__initialize_imagestream: failed to read image header: %i\n", status);
             return status;
         }

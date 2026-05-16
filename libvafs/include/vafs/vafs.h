@@ -238,10 +238,10 @@ extern void vafs_config_set_block_size(struct VaFsConfiguration* configuration, 
 /**
  * @brief Allows custom backends as vafs images. The default API for vafs only supports
  * the standard C file, and memory backed images. To allow scenario's that differ from this
- * we allow the user to supply it's own seek/read/write which can then be used in conjunction
- * with vafs_create_ops/vafs_open_ops. It is the users responsibility to make sure that the implementation
- * of these functions are properly initialized before calling vafs_create_ops/vafs_open_ops, and
- * properly disposed after the call to vafs_close.
+ * we allow the user to supply its own storage callbacks. Read-only backends may implement
+ * either positioned reads through readAt or the legacy seek+read pair. It is the users
+ * responsibility to make sure that the implementation of these functions are properly initialized
+ * before calling vafs_open_ops, and properly disposed after the call to vafs_close.
  */
 struct VaFsOperations {
     /**
@@ -266,6 +266,20 @@ struct VaFsOperations {
      * @return int 0 on success, -1 on failure. See errno for more details.
      */
     int (*read)(void* userData, void*, size_t, size_t*);
+
+    /**
+     * @brief Read bytes from the storage at an absolute offset without mutating
+     * any shared cursor state in the backend.
+     * This callback is optional, but strongly recommended for read-only backends.
+     * If omitted, VaFS falls back to serializing seek+read under an internal device lock.
+     * @param userData  The user-supplied pointer that was given to vafs_open_ops.
+     * @param offset    Absolute byte offset on the storage.
+     * @param buffer    The buffer that will be used to store the data.
+     * @param length    The number of bytes which will be read from the storage.
+     * @param bytesRead The actual number of bytes read, up to max <length>.
+     * @return int 0 on success, -1 on failure. See errno for more details.
+     */
+    int (*readAt)(void* userData, long offset, void* buffer, size_t length, size_t* bytesRead);
 
     /**
      * @brief Write bytes to the storage at the current position. The position will
@@ -345,7 +359,7 @@ extern int vafs_open_memory(
  * also be any other file implementation. The caller is responsible for cleaning up after
  * the call to vafs_close.
  * 
- * @param operations A pointer to the function table providing minimum seek+read.
+ * @param operations A pointer to the function table providing either readAt or the legacy seek+read pair.
  * @param userData   A pointer to user-supplied data which will be passed to operations.
  * @param vafsOut    A pointer where the handle of the filesystem instance will be stored.
  * @return int 0 on success, -1 on failure. See errno for more details

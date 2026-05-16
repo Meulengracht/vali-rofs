@@ -64,6 +64,7 @@ struct VaFsStream {
     struct VaFsStreamHeader       Header;
     struct VaFsStreamDevice*      Device;
     long                          DeviceOffset;
+    mtx_t                         Lock;
     VaFsFilterEncodeFunc          Encode;
     VaFsFilterDecodeFunc          Decode;
     struct VaFsBlockCache*        BlockCache;
@@ -98,6 +99,7 @@ static int __new_stream(
 
     stream->Device       = device;
     stream->DeviceOffset = deviceOffset;
+    mtx_init(&stream->Lock, mtx_plain);
     
     *streamOut = stream;
     return 0;
@@ -257,17 +259,15 @@ static int __load_block_headers(
         return -1;
     }
 
-    // seek to block headers
-    VAFS_DEBUG("__load_block_headers: seeking to block headers %ld\n", blockHeadersOffset);
-    vafs_streamdevice_seek(stream->Device, blockHeadersOffset, SEEK_SET);
-
-    // read the block headers
-    status = vafs_streamdevice_read(
-        stream->Device, stream->BlockHeaders.Headers,
+    VAFS_DEBUG("__load_block_headers: reading block headers at %ld\n", blockHeadersOffset);
+    status = vafs_streamdevice_read_at(
+        stream->Device,
+        blockHeadersOffset,
+        stream->BlockHeaders.Headers,
         totalHeaderSize,
         &read
     );
-    if (status != 0) {
+    if (status != 0 || read != totalHeaderSize) {
         VAFS_ERROR("__load_block_headers: failed to read block headers: %i\n", status);
         return status;
     }
@@ -285,13 +285,14 @@ static int __load_metadata(
     // Stream open is two-stage: load and validate the stream header first,
     // then use it to locate and read the block header table.
 
-    status = vafs_streamdevice_read(
+    status = vafs_streamdevice_read_at(
         stream->Device,
+        __get_header_offset(stream),
         &stream->Header,
         sizeof(struct VaFsStreamHeader),
         &read
     );
-    if (status != 0) {
+    if (status != 0 || read != sizeof(struct VaFsStreamHeader)) {
         return -1;
     }
 
@@ -410,7 +411,6 @@ static int __load_blockbuffer(
     size_t              read;
     uint32_t            crc;
     int                 status;
-    long                position;
     VAFS_DEBUG("__load_blockbuffer(block=%u)\n", blockIndex);
 
     // Reads always prefer cached blocks because cache entries already hold the
@@ -440,16 +440,10 @@ static int __load_blockbuffer(
         return -1;
     }
 
-    position = vafs_streamdevice_seek(stream->Device, stream->DeviceOffset + blockHeader->Offset, SEEK_SET);
-    if (position == -1) {
-        VAFS_ERROR("__load_blockbuffer: failed to seek to block: %u\n", blockIndex);
-        free(blockData);
-        return -1;
-    }
-
-    status = vafs_streamdevice_read(stream->Device, blockData, blockSize, &read);
-    if (status) {
+    status = vafs_streamdevice_read_at(stream->Device, stream->DeviceOffset + blockHeader->Offset, blockData, blockSize, &read);
+    if (status || read != blockSize) {
         VAFS_ERROR("__load_blockbuffer: failed to read block: %u\n", blockIndex);
+        free(blockData);
         return status;
     }
 
@@ -917,6 +911,7 @@ int vafs_stream_close(
     vafs_cache_destroy(stream->BlockCache);
     free(stream->BlockHeaders.Headers);
     free(stream->BlockBuffer);
+    mtx_destroy(&stream->Lock);
     free(stream);
     return 0;
 }
@@ -929,7 +924,11 @@ int vafs_stream_lock(
         return -1;
     }
 
-    return vafs_streamdevice_lock(stream->Device);
+    if (mtx_trylock(&stream->Lock) != thrd_success) {
+        errno = EBUSY;
+        return -1;
+    }
+    return 0;
 }
 
 int vafs_stream_unlock(
@@ -940,5 +939,9 @@ int vafs_stream_unlock(
         return -1;
     }
 
-    return vafs_streamdevice_unlock(stream->Device);
+    if (mtx_unlock(&stream->Lock) != thrd_success) {
+        errno = ENOTSUP;
+        return -1;
+    }
+    return 0;
 }

@@ -16,7 +16,7 @@
  *
  */
 
-#include "platform_fs.h"
+#include "utils.h"
 
 #include <errno.h>
 
