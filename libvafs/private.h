@@ -44,8 +44,8 @@ typedef uint32_t vafsblock_t;
 // decision this.
 #define VA_FS_MAX_FEATURES 16
 
-// The default block size for the descriptor stream is 8kb
-// The allowed block sizes for data streams are between 16kb - 1mb
+// The default block size for the descriptor stream is 8kb.
+// Both descriptor and data streams currently use the same supported range.
 #define VA_FS_DESCRIPTOR_BLOCK_SIZE  (8 * 1024)
 #define VA_FS_DATA_MIN_BLOCKSIZE     (8 * 1024)
 #define VA_FS_DATA_DEFAULT_BLOCKSIZE (128 * 1024)
@@ -397,6 +397,15 @@ extern int vafs_stream_position(
     struct VaFsStream* stream, 
     vafsblock_t*       blockOut,
     uint32_t*          offsetOut);
+
+/**
+ * @brief Retrieves the configured block size for a stream.
+ *
+ * @param[In] stream Stream instance to query.
+ * @return Stream block size in bytes, or 0 if stream is invalid.
+ */
+extern uint32_t vafs_stream_block_size(
+    struct VaFsStream* stream);
 
 /**
  * @brief Seeks to a logical block and offset within a stream.

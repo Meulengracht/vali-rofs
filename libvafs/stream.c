@@ -34,6 +34,11 @@
 
 #define STREAM_CACHE_SIZE  32
 
+// Stored blocks keep their raw bytes on disk, are emitted by __flush_block()
+// when filtering would not shrink the payload, and are recognized by
+// __load_blockbuffer() so the read path can skip decode work entirely.
+#define BLOCK_FLAG_STORED  0x0001
+
 VAFS_ONDISK_STRUCT(BlockHeader, {
     uint32_t LengthOnDisk;
     uint32_t Offset;
@@ -186,6 +191,8 @@ static struct BlockHeader* __get_block_header(
 static int __verify_header(
     struct VaFsStreamHeader* header)
 {
+    // Validate every size-bearing field before the stream header can drive
+    // later allocations or seeks.
     if (header->Magic != STREAM_MAGIC) {
         VAFS_ERROR("__verify_header: invalid stream magic\n");
         return -1;
@@ -212,6 +219,9 @@ static int __load_block_headers(
     size_t totalHeaderSize;
 
     VAFS_DEBUG("__load_block_headers()\n");
+
+    // Validate the table shape before allocating memory or seeking based on
+    // untrusted metadata from disk.
 
     // Validate block headers count is reasonable
     #define MAX_BLOCK_HEADERS 1000000
@@ -272,6 +282,9 @@ static int __load_metadata(
 
     VAFS_DEBUG("__load_metadata()\n");
 
+    // Stream open is two-stage: load and validate the stream header first,
+    // then use it to locate and read the block header table.
+
     status = vafs_streamdevice_read(
         stream->Device,
         &stream->Header,
@@ -303,6 +316,8 @@ int vafs_stream_open(
         return -1;
     }
 
+    // Reconstruct metadata before allocating the cache and staging buffer that
+    // the read path reuses across seeks and sequential reads.
     status = __new_stream(device, deviceOffset, &stream);
     if (status != 0) {
         return -1;
@@ -365,6 +380,15 @@ int vafs_stream_position(
     return 0;
 }
 
+uint32_t vafs_stream_block_size(
+    struct VaFsStream* stream)
+{
+    if (stream == NULL) {
+        return 0;
+    }
+    return stream->Header.BlockSize;
+}
+
 static uint32_t __get_blockbuffer_crc(
     struct VaFsStream* stream,
     size_t             length)
@@ -389,11 +413,11 @@ static int __load_blockbuffer(
     long                position;
     VAFS_DEBUG("__load_blockbuffer(block=%u)\n", blockIndex);
 
-    // Always check the block cache first
+    // Reads always prefer cached blocks because cache entries already hold the
+    // final logical bytes for the block.
     status = vafs_cache_get(stream->BlockCache, blockIndex, &blockData, &blockSize);
     if (status == 0) {
-        // We have the block in the cache, so we can just copy the data
-        // to the block buffer and return.
+        // A cache hit avoids both device I/O and any runtime decode callback.
         memcpy(stream->BlockBuffer, blockData, blockSize);
         stream->BlockBufferLength = (uint32_t)blockSize;
         stream->BlockBufferValid = 1;
@@ -429,8 +453,9 @@ static int __load_blockbuffer(
         return status;
     }
 
-    // Handle data filters
-    if (stream->Decode) {
+    // Only decode blocks that were actually written in filtered form. Blocks
+    // marked BLOCK_FLAG_STORED were persisted raw specifically to skip decode.
+    if ((blockHeader->Flags & BLOCK_FLAG_STORED) == 0 && stream->Decode) {
         uint32_t blockBufferSize = stream->Header.BlockSize;
 
         VAFS_DEBUG("__load_blockbuffer decoding buffer of size %zu\n", blockSize);
@@ -448,10 +473,13 @@ static int __load_blockbuffer(
         blockSize = blockBufferSize;
     }
     else {
+        // Stored blocks and unfiltered streams already contain the final bytes.
         memcpy(stream->BlockBuffer, blockData, blockSize);
     }
     free(blockData);
 
+    // CRC is always computed over the logical block bytes, regardless of
+    // whether the block was decoded or copied raw.
     crc = __get_blockbuffer_crc(stream, blockSize);
     if (crc != blockHeader->Crc) {
         VAFS_WARN("__load_blockbuffer: CRC mismatch: %u != %u\n", crc, blockHeader->Crc);
@@ -459,7 +487,8 @@ static int __load_blockbuffer(
         return -1;
     }
 
-    // Cache the block
+    // Cache population is best-effort; a miss here only hurts reuse, not
+    // correctness of the read that already succeeded.
     status = vafs_cache_set(stream->BlockCache, blockIndex, stream->BlockBuffer, blockSize);
     if (status) {
         VAFS_WARN("__load_blockbuffer: failed to cache block %u\n", blockIndex);
@@ -488,6 +517,8 @@ int vafs_stream_seek(
         return -1;
     }
 
+    // Resolve the caller's logical position before deciding whether the staged
+    // block can satisfy it directly.
     // Validate block index against block count
     if (blockIndex >= stream->BlockHeaders.Count) {
         VAFS_ERROR("vafs_stream_seek: block index %u exceeds block count %u\n",
@@ -496,7 +527,8 @@ int vafs_stream_seek(
         return -1;
     }
 
-    // seek to start of stream
+    // Fold oversized offsets across later blocks until the target offset lands
+    // inside one concrete block.
     while (1) {
         blockHeader = __get_block_header(stream, i);
         if (!blockHeader) {
@@ -533,6 +565,8 @@ int vafs_stream_seek(
         i++;
     }
 
+    // Sequential reads often leave the target block staged already, so avoid
+    // another load when the buffered bytes still cover the requested offset.
     if (stream->BlockBufferValid &&
         stream->BlockBufferIndex == targetBlock &&
         targetOffset < stream->BlockBufferLength) {
@@ -553,7 +587,8 @@ int vafs_stream_seek(
 
 static int __add_block_header(
     struct VaFsStream* stream,
-    uint32_t           blockLength)
+    uint32_t           blockLength,
+    uint16_t           blockFlags)
 {
     long     offset;
     uint32_t crc;
@@ -564,6 +599,8 @@ static int __add_block_header(
         stream->BlockBufferIndex, offset);
     VAFS_DEBUG("__add_block_header: block length %u\n", blockLength);
 
+    // Persist CRC over the logical bytes so validation stays identical whether
+    // the payload was stored raw or filtered before writing.
     // perform the CRC on the uncompressed data
     crc = __get_blockbuffer_crc(stream, stream->BlockBufferOffset);
 
@@ -571,6 +608,8 @@ static int __add_block_header(
         struct BlockHeader* newHeaders;
         uint32_t            newCapacity;
 
+        // Grow the in-memory table geometrically so block header appends stay
+        // amortized while the write path streams forward.
         newCapacity = stream->BlockHeaders.Capacity * 2;
         if (newCapacity == 0) {
             newCapacity = 8;
@@ -594,7 +633,7 @@ static int __add_block_header(
     stream->BlockHeaders.Headers[stream->BlockHeaders.Count].LengthOnDisk = blockLength;
     stream->BlockHeaders.Headers[stream->BlockHeaders.Count].Offset       = (uint32_t)offset;
     stream->BlockHeaders.Headers[stream->BlockHeaders.Count].Crc          = crc;
-    stream->BlockHeaders.Headers[stream->BlockHeaders.Count].Flags        = 0;
+    stream->BlockHeaders.Headers[stream->BlockHeaders.Count].Flags        = blockFlags;
     stream->BlockHeaders.Count++;
     return 0;
 }
@@ -602,43 +641,72 @@ static int __add_block_header(
 static int __flush_block(
     struct VaFsStream* stream)
 {
-    void*    compressedData = stream->BlockBuffer;
-    uint32_t compressedSize = stream->BlockBufferOffset;
+    void*    compressedData = NULL;
+    void*    blockData      = stream->BlockBuffer;
+    uint32_t blockFlags     = 0;
+    uint32_t blockLength    = stream->BlockBufferOffset;
     size_t   written;
     int      status;
     VAFS_DEBUG("__flush_block(blockLength=%u)\n", stream->BlockBufferOffset);
+
+    // Finalize one staged block: optionally filter it, keep the filtered bytes
+    // only when they are smaller, then record how the block was stored.
 
     if (!stream->BlockBufferOffset) {
         // empty block, ignore it
         return 0;
     }
     
-    // Handle compressions
+    // Per-stream filtering is optional. When enabled, avoid paying future
+    // decode cost unless the filtered form actually shrinks the payload.
     if (stream->Encode) {
+        uint32_t compressedSize;
+
         status = stream->Encode(stream->BlockBuffer, stream->BlockBufferOffset, &compressedData, &compressedSize);
         if (status) {
             return status;
         }
-        VAFS_DEBUG("__flush_block compressed buffer size %u\n", compressedSize);
+
+        // This is a strict per-block size policy.
+        // Example for an 8192-byte logical block:
+        // - 4096-byte filtered output: keep the filtered bytes.
+        // - 8191-byte filtered output: still keep it because it is smaller.
+        // - 8192-byte or 9000-byte filtered output: discard it, store the raw
+        //   bytes instead, and mark the block BLOCK_FLAG_STORED.
+        if (compressedSize < stream->BlockBufferOffset) {
+            // Smaller filtered output is worth keeping because it reduces the
+            // on-disk bytes the read path has to fetch.
+            blockData = compressedData;
+            blockLength = compressedSize;
+            VAFS_DEBUG("__flush_block compressed buffer size %u\n", compressedSize);
+        } else {
+            // Larger or equal filtered output would only force unnecessary
+            // decode work, so persist the raw bytes and mark them stored.
+            blockFlags |= BLOCK_FLAG_STORED;
+            free(compressedData);
+            compressedData = NULL;
+            VAFS_DEBUG("__flush_block storing raw block of size %u\n", blockLength);
+        }
     }
 
+    // Persist the storage decision before writing so __load_blockbuffer() knows
+    // whether BLOCK_FLAG_STORED should bypass runtime decode.
     // add index mapping
-    status = __add_block_header(stream, compressedSize);
+    status = __add_block_header(stream, blockLength, (uint16_t)blockFlags);
     if (status) {
         VAFS_ERROR("__flush_block: failed to add block header\n");
+        free(compressedData);
         return status;
     }
 
-    status = vafs_streamdevice_write(stream->Device, compressedData, compressedSize, &written);
+    status = vafs_streamdevice_write(stream->Device, blockData, blockLength, &written);
     if (status) {
         VAFS_ERROR("__flush_block: failed to write block data\n");
+        free(compressedData);
         return status;
     }
 
-    // In the case of a compressed stream, we need to free the compressed data
-    if (stream->Encode) {
-        free(compressedData);
-    }
+    free(compressedData);
 
     stream->BlockBufferIndex++;
     stream->BlockBufferOffset = 0;
@@ -659,6 +727,8 @@ int vafs_stream_write(
         return -1;
     }
 
+    // Accumulate into the staging buffer until a full logical block is ready
+    // to be finalized by __flush_block().
     // write the data to stream, taking care of block boundaries
     while (bytesToWrite) {
         size_t byteCount;
@@ -674,6 +744,8 @@ int vafs_stream_write(
         bytesToWrite              -= byteCount;
 
         if (stream->BlockBufferOffset == stream->Header.BlockSize) {
+            // Flush full blocks immediately so subsequent writes start with a
+            // fresh staging buffer and the block index advances in order.
             if (__flush_block(stream)) {
                 VAFS_ERROR("vafs_stream_write: failed to flush block\n");
                 return -1;
@@ -701,6 +773,8 @@ int vafs_stream_read(
         return -1;
     }
 
+    // Drain the currently staged block first and only load the next block when
+    // the caller crosses a block boundary.
     // read the data from stream, taking care of block boundaries
     while (bytesToRead) {
         size_t byteCount;
@@ -717,6 +791,8 @@ int vafs_stream_read(
         bytesToRead               -= byteCount;
 
         if (stream->BlockBufferOffset == stream->Header.BlockSize) {
+            // Crossing the boundary stages the next block so sequential reads
+            // continue forward without an explicit seek from the caller.
             VAFS_DEBUG("vafs_stream_read: loading block %u\n", stream->BlockBufferIndex);
             if (__load_blockbuffer(stream, stream->BlockBufferIndex + 1)) {
                 VAFS_ERROR("vafs_stream_read: failed to load block\n");

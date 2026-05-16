@@ -45,6 +45,7 @@ typedef CRITICAL_SECTION mtx_t;
 #define mtx_plain NULL
 
 static inline int mtx_init(mtx_t* mtx, void* unused) {
+    (void)unused;
     InitializeCriticalSection(mtx);
     return thrd_success;
 }

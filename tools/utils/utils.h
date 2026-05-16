@@ -19,6 +19,7 @@
 #ifndef __VAFS_UTILS_H__
 #define __VAFS_UTILS_H__
 
+#include <stdint.h>
 #include "list.h"
 
 // detect architecture
@@ -113,5 +114,22 @@ extern int strfilter(const char* filter, const char* text, int flags);
  */
 extern int utils_getfiles(const char* path, int recursive, struct list* files);
 extern int utils_getfiles_destroy(struct list* files);
+
+extern int platform_fs_mode_is_file(uint32_t mode);
+extern int platform_fs_mode_is_symlink(uint32_t mode);
+extern int platform_fs_mode_is_directory(uint32_t mode);
+extern uint32_t platform_fs_mode_permissions(uint32_t mode);
+
+extern int platform_fs_directory_exists(const char* path);
+extern int platform_fs_create_directory(const char* path, uint32_t permissions);
+extern int platform_fs_chmod(const char* path, uint32_t permissions);
+
+extern int symlink_utils_init(void);
+extern void symlink_utils_cleanup(void);
+
+extern int symlink_utils_create(const char* target, const char* path);
+extern int symlink_utils_read(const char* path, char** bufferOut);
+extern int symlink_utils_ministat(const char* path, uint32_t* filemode);
+extern char* symlink_utils_abspath(const char* path);
 
 #endif //!__VAFS_UTILS_H__

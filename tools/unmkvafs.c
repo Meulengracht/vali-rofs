@@ -33,67 +33,6 @@
 #include <vafs/directory.h>
 #include <vafs/file.h>
 
-#if defined(_WIN32) || defined(_WIN64)
-#include "utils/dirent_win32.h"
-#include <direct.h>
-#include <io.h>
-#include <WinBase.h>
-
-#define __mkdir(path, perms) _mkdir(path)
-#define chmod _chmod
-
-int __symlink(const char* path, const char* target)
-{
-    int status;
-
-    if (path == NULL || target == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    // SYMBOLIC_LINK_FLAG_DIRECTORY ??
-    status = CreateSymbolicLinkA(target, path, 0);
-    if (status == FALSE) {
-        // ignore it if it exists, in theory we would like to 'update it' if 
-        // exists, but for now just ignore
-        if (GetLastError() == ERROR_ALREADY_EXISTS) {
-            return 0;
-        }
-        return -1;
-    }
-    return 0;
-}
-
-#else
-#include <dirent.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-#define __mkdir(path, perms) mkdir(path, (int)perms)
-
-int __symlink(const char* path, const char* target)
-{
-    int status;
-
-    if (path == NULL || target == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    status = symlink(target, path);
-    if (status) {
-        // ignore it if it exists, in theory we would like to 'update it' if 
-        // exists, but for now just ignore
-        if (errno == EEXIST) {
-            return 0;
-        }
-        return -1;
-    }
-    return 0;
-}
-
-#endif
-
 struct __options {
     const char*       image_path;
     const char*       out_path;
@@ -135,20 +74,6 @@ static const char* __get_relative_path(
     return relative;
 }
 
-static int __directory_exists(
-    const char* path)
-{
-    struct stat st;
-    if (stat(path, &st)) {
-        if (errno == ENOENT) {
-            return 0;
-        }
-        fprintf(stderr, "unmkvafs: stat failed for '%s'\n", path);
-        return -1;
-    }
-    return S_ISDIR(st.st_mode);
-}
-
 static int __extract_file(
     struct VaFsFileHandle* fileHandle,
     const char*            path)
@@ -178,7 +103,7 @@ static int __extract_file(
     fclose(file);
 
     // update permissions on file
-    return chmod(path, vafs_file_permissions(fileHandle));
+    return platform_fs_chmod(path, vafs_file_permissions(fileHandle));
 }
 
 static void __write_progress(const char* prefix, struct progress_context* context)
@@ -221,12 +146,13 @@ static int __extract_directory(
 
     // ensure the directory exists
     if (strlen(path)) {
-        status = __directory_exists(path);
+        status = platform_fs_directory_exists(path);
         if (status == -1) {
+            fprintf(stderr, "unmkvafs: stat failed for '%s'\n", path);
             return status;
         }
 
-        if (!status && __mkdir(path, vafs_directory_permissions(directoryHandle))) {
+        if (!status && platform_fs_create_directory(path, vafs_directory_permissions(directoryHandle))) {
             fprintf(stderr, "unmkvafs: unable to create directory %s\n", path);
             return -1;
         }
@@ -282,7 +208,7 @@ static int __extract_directory(
                 return -1;
             }
 
-            status = __symlink(symlinkTarget, filepathBuffer);
+            status = symlink_utils_create(symlinkTarget, filepathBuffer);
             if (status) {
                 fprintf(stderr, "unmkvafs: failed to create symlink '%s' - %i\n",
                     __get_relative_path(root, filepathBuffer), status);

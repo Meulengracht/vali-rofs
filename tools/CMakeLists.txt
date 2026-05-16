@@ -41,6 +41,8 @@ endif ()
 
 add_executable(mkvafs
     utils/getfiles.c
+    utils/fs_utils.c
+    utils/symlink.c
     utils/strfilter.c
 
     mkvafs.c
@@ -58,6 +60,8 @@ target_link_libraries(mkvafs ${ADDITIONAL_LIBS})
 # build the unmkvafs tool that is a generic utility for unpacking
 # vafs images
 add_executable(unmkvafs
+    utils/fs_utils.c
+    utils/symlink.c
     unmkvafs.c
     filter.c
 )

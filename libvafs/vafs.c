@@ -50,17 +50,21 @@ static int __handle_feature_ops(
     struct VaFs*              vafs,
     struct VaFsFeatureHeader* feature)
 {
+    // Runtime filter callbacks are consumed immediately because only the
+    // persisted filter ids belong in the image metadata.
     if (!__compare_guids(&feature->Guid, &g_filterOpsGuid)) {
         struct VaFsFeatureFilterOps ops;
 
         if (feature->Length < sizeof(struct VaFsFeatureFilterOps)) {
+            // Reject truncated runtime callback records before copying function
+            // pointers out of the feature payload.
             errno = EINVAL;
             return -1;
         }
 
         memcpy(&ops, feature, sizeof(struct VaFsFeatureFilterOps));
-        vafs_stream_set_filter(vafs->DescriptorStream, ops.Encode, ops.Decode);
-        vafs_stream_set_filter(vafs->DataStream, ops.Encode, ops.Decode);
+        vafs_stream_set_filter(vafs->DescriptorStream, ops.DescriptorEncode, ops.DescriptorDecode);
+        vafs_stream_set_filter(vafs->DataStream, ops.DataEncode, ops.DataDecode);
         return 0;
     }
     return -1;
@@ -75,8 +79,8 @@ int vafs_feature_add(
         return -1;
     }
 
-    // So we have the operation features which we do not want installed, but rather
-    // just extract some handlers for.
+    // Operation features are runtime-only, so install their handlers on the
+    // live streams and avoid persisting them as regular image features.
     if (!__handle_feature_ops(vafs, feature)) {
         return 0;
     }
@@ -124,12 +128,42 @@ int vafs_feature_query(
 static int __initialize_root(
     struct VaFs* vafs)
 {
+    // Read mode reopens the persisted root descriptor, while write mode starts
+    // from an empty in-memory root that will later be serialized.
     if (vafs->Mode == VaFsMode_Read) {
         return vafs_directory_open_root(vafs, &vafs->Header.RootDescriptor, &vafs->RootDirectory);
     }
     else {
         return vafs_directory_create_root(vafs, &vafs->RootDirectory);
     }
+}
+
+static int __verify_root_descriptor(
+    struct VaFs* vafs)
+{
+    uint32_t descriptorBlockSize;
+
+    // Validate the root descriptor against the descriptor stream's real block
+    // size because metadata and file data can now use different block sizes.
+
+    if (vafs == NULL || vafs->DescriptorStream == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    descriptorBlockSize = vafs_stream_block_size(vafs->DescriptorStream);
+    if (descriptorBlockSize == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (vafs->Header.RootDescriptor.Offset >= descriptorBlockSize) {
+        VAFS_ERROR("__verify_root_descriptor: root descriptor offset %u exceeds descriptor block size %u\n",
+                   vafs->Header.RootDescriptor.Offset, descriptorBlockSize);
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
 }
 
 static struct VaFsFeatureHeader* __load_feature(
@@ -200,11 +234,28 @@ static int __default_fail_decode(void* Input, uint32_t InputLength, void* Output
 static void __parse_known_features(
     struct VaFs* vafs)
 {
+    // Persisted filter ids tell the reader which streams require runtime decode
+    // support, even before the actual callback table is installed.
     for (int i = 0; i < vafs->Header.FeatureCount; i++) {
         if (!__compare_guids(&vafs->Features[i]->Guid, &g_filterGuid)) {
-            // A filter is present, force the use of filter ops
-            vafs_stream_set_filter(vafs->DescriptorStream, __default_fail_encode, __default_fail_decode);
-            vafs_stream_set_filter(vafs->DataStream, __default_fail_encode, __default_fail_decode);
+            struct VaFsFeatureFilter* filter = (struct VaFsFeatureFilter*)vafs->Features[i];
+
+            if (filter->Header.Length < sizeof(struct VaFsFeatureFilter)) {
+                // Ignore malformed or legacy-sized payloads instead of reading
+                // split descriptor/data policy fields past the stored feature.
+                continue;
+            }
+
+            if (filter->DescriptorType != VaFsFilterType_None) {
+                // Fail fast if descriptor blocks require decode but no runtime
+                // filter ops have been supplied yet.
+                vafs_stream_set_filter(vafs->DescriptorStream, __default_fail_encode, __default_fail_decode);
+            }
+            if (filter->DataType != VaFsFilterType_None) {
+                // Apply the same guard independently to file-data blocks because
+                // the two streams may now use different filter policies.
+                vafs_stream_set_filter(vafs->DataStream, __default_fail_encode, __default_fail_decode);
+            }
         }
     }
 }
@@ -231,6 +282,9 @@ static int __verify_header(
 {
     uint32_t minDescriptorOffset;
     uint32_t maxDescriptorOffset;
+
+    // Validate only the outer-image invariants here; checks that depend on the
+    // descriptor stream's own header run later in __verify_root_descriptor().
 
     // Validate magic number
     if (vafs->Header.Magic != VA_FS_MAGIC) {
@@ -281,10 +335,10 @@ static int __verify_header(
         return -1;
     }
 
-    // Check for offset arithmetic overflow
-    // The descriptor block should reasonably fit between header and data block
-    // Stream header size is 16 bytes (4 uint32_t fields)
-    maxDescriptorOffset = vafs->Header.DataBlockOffset - 16 - VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    // Bound the descriptor stream placement using only values known from the
+    // outer header. The minimum legal data block size is the tightest safe
+    // lower bound before the data stream header and first block payload.
+    maxDescriptorOffset = vafs->Header.DataBlockOffset - 16 - VA_FS_DATA_MIN_BLOCKSIZE;
     if (vafs->Header.DescriptorBlockOffset > maxDescriptorOffset) {
         VAFS_ERROR("__verify_header: descriptor block offset %u too large, max allowed %u\n",
                    vafs->Header.DescriptorBlockOffset, maxDescriptorOffset);
@@ -303,15 +357,6 @@ static int __verify_header(
     // Root descriptor offset should not be invalid offset marker
     if (vafs->Header.RootDescriptor.Offset == VA_FS_INVALID_OFFSET) {
         VAFS_ERROR("__verify_header: root descriptor has invalid offset\n");
-        errno = EINVAL;
-        return -1;
-    }
-
-    // Root descriptor offset should be within a reasonable block size
-    // (descriptors are limited by block size)
-    if (vafs->Header.RootDescriptor.Offset >= VA_FS_DESCRIPTOR_BLOCK_SIZE) {
-        VAFS_ERROR("__verify_header: root descriptor offset %u exceeds descriptor block size %u\n",
-                   vafs->Header.RootDescriptor.Offset, VA_FS_DESCRIPTOR_BLOCK_SIZE);
         errno = EINVAL;
         return -1;
     }
@@ -340,8 +385,8 @@ static int __initialize_imagestream(
 
     VAFS_DEBUG("__initialize_imagestream()\n");
 
-    // initalize the underlying stream device, if we are opening
-    // an existing image, we need to read and verify the header
+    // Either read and validate the existing outer image header plus feature
+    // list, or seed a fresh header for image creation.
     vafs->ImageDevice = imageDevice;
 
     if (vafs->Mode == VaFsMode_Read) {
@@ -373,8 +418,8 @@ static int __initialize_fsstreams_read(
     int status;
     
     VAFS_DEBUG("__initialize_fsstreams_read: vafs: %p\n", vafs);
-    // create the descriptor and data streams, when reading we do not
-    // provide any compression parameter as it's set on block level.
+    // Open both inner streams first; persisted features decide afterward
+    // whether either stream needs runtime filter callbacks.
     status = vafs_stream_open(
         vafs->ImageDevice, 
         vafs->Header.DescriptorBlockOffset,
@@ -400,8 +445,10 @@ static int __initialize_fsstreams_write(
     int status;
     
     VAFS_DEBUG("__initialize_fsstreams_write: vafs: %p\n", vafs);
+    // Allocate descriptor and data streams independently so each stream can
+    // carry its own block size and filter policy from the start.
     status = vafs_streamdevice_create_memory(
-        VA_FS_DESCRIPTOR_BLOCK_SIZE, 
+        configuration->DescriptorBlockSize,
         &vafs->DescriptorDevice
     );
     if (status) {
@@ -421,7 +468,7 @@ static int __initialize_fsstreams_write(
     status = vafs_stream_create(
         vafs->DescriptorDevice, 
         0,
-        VA_FS_DESCRIPTOR_BLOCK_SIZE,
+        configuration->DescriptorBlockSize,
         &vafs->DescriptorStream
     );
     if (status) {
@@ -459,12 +506,16 @@ static int __new_vafs(
     struct VaFs* vafs;
     int          status;
 
+    // Construction happens in phases: outer image header/features, inner
+    // streams, then root-directory state and any runtime feature handling.
+
     if (imageDevice == NULL || vafsOut == NULL) {
         errno = EINVAL;
         return -1;
     }
 
     if (!g_initialized) {
+        // CRC state is process-global, so initialize it lazily once.
         vafs_init();
     }
 
@@ -499,6 +550,17 @@ static int __new_vafs(
         return -1;
     }
 
+    if (vafs->Mode == VaFsMode_Read) {
+        // Root descriptor offsets depend on the descriptor stream header, so
+        // validate them only after the descriptor stream has been opened.
+        status = __verify_root_descriptor(vafs);
+        if (status) {
+            VAFS_ERROR("__new_vafs: failed to validate root descriptor: %i\n", status);
+            vafs_destroy(vafs);
+            return -1;
+        }
+    }
+
     status = __initialize_root(vafs);
     if (status) {
         VAFS_ERROR("__new_vafs: failed to initialize root directory: %i\n", status);
@@ -508,6 +570,8 @@ static int __new_vafs(
 
     // Handle any known features that have been loaded
     if (vafs->Mode == VaFsMode_Read) {
+        // Apply persisted policies after both streams exist so runtime filter
+        // placeholders land on the correct stream.
         __parse_known_features(vafs);
     }
 
