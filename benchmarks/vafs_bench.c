@@ -17,6 +17,11 @@
  * VaFS Benchmark Suite
  */
 
+/* Suppress MSVC deprecation warnings for POSIX functions */
+#if defined(_MSC_VER)
+#pragma warning(disable:4996)
+#endif
+
 #include "filter.h"
 #include "benchmark.h"
 #include <vafs/vafs.h>
@@ -27,7 +32,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#if !defined(_WIN32) && !defined(_WIN64)
 #include <unistd.h>
+#else
+#include <io.h>
+#define access _access
+#define R_OK 4
+#endif
 
 // ============================
 // Benchmark Configuration

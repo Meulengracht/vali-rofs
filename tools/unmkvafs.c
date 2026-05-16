@@ -19,6 +19,11 @@
  *   This filesystem is used to store the initrd of the kernel.
  */
 
+/* Suppress MSVC deprecation warnings for POSIX functions */
+#if defined(_MSC_VER)
+#pragma warning(disable:4996)
+#endif
+
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
@@ -29,8 +34,9 @@
 #include <vafs/file.h>
 
 #if defined(_WIN32) || defined(_WIN64)
-#include "dirent_win32.h"
+#include "utils/dirent_win32.h"
 #include <direct.h>
+#include <io.h>
 #include <WinBase.h>
 
 #define __mkdir(path, perms) _mkdir(path)

@@ -10,6 +10,17 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
+# Suppress MSVC deprecation warnings for POSIX functions on Windows
+if (MSVC)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS _USE_MATH_DEFINES)
+    add_compile_options(/W4)
+    # Also set in flags to ensure they're applied
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /D_CRT_SECURE_NO_WARNINGS")
+    set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /D_CRT_SECURE_NO_WARNINGS")
+    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /D_CRT_SECURE_NO_WARNINGS")
+endif()
+
+
 add_subdirectory(libvafs)
 add_subdirectory(filters)
 

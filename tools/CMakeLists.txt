@@ -46,6 +46,7 @@ add_executable(mkvafs
     mkvafs.c
     filter.c
 )
+target_include_directories(mkvafs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/utils)
 target_compile_definitions(mkvafs PRIVATE ${ADDITIONAL_DEFINES})
 target_compile_options(mkvafs
     PRIVATE
@@ -60,6 +61,7 @@ add_executable(unmkvafs
     unmkvafs.c
     filter.c
 )
+target_include_directories(unmkvafs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/utils)
 target_compile_definitions(unmkvafs PRIVATE ${ADDITIONAL_DEFINES})
 target_compile_options(unmkvafs
     PRIVATE
