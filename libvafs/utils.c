@@ -237,7 +237,6 @@ int __vafs_path_stat_internal(
 
         entry = __vafs_directory_find_entry(currentDirectory, token);
         if (entry == NULL) {
-            errno = ENOENT;
             return -1;
         }
 

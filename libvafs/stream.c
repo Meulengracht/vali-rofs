@@ -68,8 +68,10 @@ struct VaFsStream {
     // we flush it to the data stream. The staging buffer
     // is always the size of the block size.
     char*       BlockBuffer;
+    uint32_t    BlockBufferLength;
     vafsblock_t BlockBufferIndex;
     uint32_t    BlockBufferOffset;
+    int         BlockBufferValid;
 };
 
 static int __new_stream(
@@ -393,6 +395,8 @@ static int __load_blockbuffer(
         // We have the block in the cache, so we can just copy the data
         // to the block buffer and return.
         memcpy(stream->BlockBuffer, blockData, blockSize);
+        stream->BlockBufferLength = (uint32_t)blockSize;
+        stream->BlockBufferValid = 1;
         return 0;
     }
 
@@ -460,6 +464,9 @@ static int __load_blockbuffer(
     if (status) {
         VAFS_WARN("__load_blockbuffer: failed to cache block %u\n", blockIndex);
     }
+
+    stream->BlockBufferLength = (uint32_t)blockSize;
+    stream->BlockBufferValid = 1;
     return 0;
 }
 
@@ -524,6 +531,13 @@ int vafs_stream_seek(
             }
         }
         i++;
+    }
+
+    if (stream->BlockBufferValid &&
+        stream->BlockBufferIndex == targetBlock &&
+        targetOffset < stream->BlockBufferLength) {
+        stream->BlockBufferOffset = targetOffset;
+        return 0;
     }
 
     status = __load_blockbuffer(stream, targetBlock);

@@ -74,7 +74,6 @@ int vafs_symlink_open(
 
         entry = __vafs_directory_find_entry(currentDirectory, token);
         if (entry == NULL) {
-            errno = ENOENT;
             return -1;
         }
 
