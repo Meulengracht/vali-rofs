@@ -40,3 +40,11 @@ target_include_directories(test-regression PRIVATE
     ${CMAKE_SOURCE_DIR}/libvafs/include
     ${CMAKE_SOURCE_DIR}/libvafs
 )
+
+# Add focused regression test for file read position semantics
+add_executable(test-file-read test_file_read.c)
+target_link_libraries(test-file-read vafs)
+target_include_directories(test-file-read PRIVATE
+    ${CMAKE_SOURCE_DIR}/libvafs/include
+    ${CMAKE_SOURCE_DIR}/libvafs
+)

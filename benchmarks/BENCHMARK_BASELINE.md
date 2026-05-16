@@ -133,7 +133,7 @@ Max time:      0.003 ms
 
 - Metadata costs are negligible compared to I/O; even deep paths and wide directories resolve in microseconds.
 - Large file sequential reads dominate overall time because of BriefLZ decompression; improving streaming would yield the biggest win.
-- `vafs_file_read` does not advance file position; sequential readers (including the benchmark) must seek manually between reads.
+- `vafs_file_read` advances file position, so sequential readers can stream forward without an explicit seek between reads.
 
 ## Reproducing Results
 
