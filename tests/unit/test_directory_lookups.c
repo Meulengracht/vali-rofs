@@ -15,7 +15,7 @@
 #include <vafs/stat.h>
 #include "../../libvafs/private.h"
 
-#define TEST_IMAGE_PATH "/tmp/test_directory_lookups.vafs"
+#define TEST_IMAGE_PATH "test_directory_lookups.vafs"
 #define SMALL_DIR_ENTRY_COUNT 64
 #define LARGE_DIR_ENTRY_COUNT 1024
 

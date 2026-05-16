@@ -30,6 +30,7 @@
 #include <vafs/stat.h>
 
 struct VaFsStream;
+struct VaFsStreamReader;
 struct VaFsStreamDevice;
 
 typedef uint32_t vafsblock_t;
@@ -407,7 +408,7 @@ extern int vafs_stream_set_filter(
     VaFsFilterDecodeFunc decode);
 
 /**
- * @brief Retrieves the current logical position inside a stream.
+ * @brief Retrieves the current logical write position inside a stream.
  *
  * @param[In]  stream    The stream to query.
  * @param[Out] blockOut  Receives the current block index.
@@ -418,6 +419,28 @@ extern int vafs_stream_position(
     struct VaFsStream* stream, 
     vafsblock_t*       blockOut,
     uint32_t*          offsetOut);
+
+/**
+ * @brief Creates a read cursor for a stream.
+ *
+ * Each reader owns its own staged block buffer and logical position so
+ * independent callers can read the same stream concurrently.
+ *
+ * @param[In]  stream     Stream instance to read from.
+ * @param[Out] readerOut  Receives the allocated reader.
+ * @return 0 on success, otherwise -1 with `errno` set.
+ */
+extern int vafs_stream_reader_open(
+    struct VaFsStream*        stream,
+    struct VaFsStreamReader** readerOut);
+
+/**
+ * @brief Destroys a previously created stream reader.
+ *
+ * @param[In] reader Reader to destroy. NULL is ignored.
+ */
+extern void vafs_stream_reader_close(
+    struct VaFsStreamReader* reader);
 
 /**
  * @brief Retrieves the configured block size for a stream.
@@ -436,8 +459,8 @@ extern uint32_t vafs_stream_block_size(
  * @param[In] blockOffset Destination byte offset within the block.
  * @return 0 on success, otherwise -1 with `errno` set.
  */
-extern int vafs_stream_seek(
-    struct VaFsStream* stream, 
+extern int vafs_stream_reader_seek(
+    struct VaFsStreamReader* reader,
     vafsblock_t        blockIndex,
     uint32_t           blockOffset);
 
@@ -466,8 +489,8 @@ extern int vafs_stream_write(
  * @param[Out] bytesRead Receives the number of bytes actually read.
  * @return 0 on success, otherwise -1 with `errno` set.
  */
-extern int vafs_stream_read(
-    struct VaFsStream* stream,
+extern int vafs_stream_reader_read(
+    struct VaFsStreamReader* reader,
     void*              buffer,
     size_t             size,
     size_t*            bytesRead);
@@ -607,6 +630,7 @@ struct VaFsDirectoryReader {
     struct VaFsDirectory       Base;
     enum VaFsDirectoryState    State;
     struct VaFsDirectoryEntry* Entries;
+    struct VaFsStreamReader*   Reader;
     // Small read-mode directories use this sorted view for binary search by name.
     struct VaFsDirectoryEntry** Index;
     // Very large directories build a secondary name index to avoid binary-search overhead.

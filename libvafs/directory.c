@@ -325,6 +325,7 @@ static void __directory_reader_destroy(struct VaFsDirectoryReader* reader)
     __cleanup_directory_entries(reader->Entries);
     __free_directory_index(reader->Index);
     __free_directory_name_index(reader);
+    vafs_stream_reader_close(reader->Reader);
 }
 
 static void __directory_writer_destroy(struct VaFsDirectoryWriter* writer)
@@ -809,8 +810,8 @@ static int __read_descriptor(
         return -1;
     }
 
-    status = vafs_stream_read(
-        reader->Base.VaFs->DescriptorStream, 
+    status = vafs_stream_reader_read(
+        reader->Reader,
         buffer, sizeof(VaFsDescriptor_t),
         &read
     );
@@ -833,8 +834,8 @@ static int __read_descriptor(
         VAFS_DEBUG("__read_descriptor: read %u/%u descriptor bytes, reading rest\n", 
             sizeof(VaFsDescriptor_t), size);
 
-        status = vafs_stream_read(
-            reader->Base.VaFs->DescriptorStream, 
+        status = vafs_stream_reader_read(
+            reader->Reader,
             ext, size - sizeof(VaFsDescriptor_t),
             &read
         );
@@ -855,8 +856,8 @@ static int __read_descriptor(
                 return -1;
             }
 
-            status = vafs_stream_read(
-                reader->Base.VaFs->DescriptorStream, 
+            status = vafs_stream_reader_read(
+                reader->Reader,
                 extendedBuffer, base->Length - size,
                 &read
             );
@@ -933,6 +934,7 @@ static struct VaFsDirectory* __create_directory_from_descriptor(
 
     directory->State     = VaFsDirectoryState_Open;
     directory->Entries   = NULL;
+    directory->Reader    = NULL;
     directory->Index     = NULL;
     directory->EntryCount = 0;
     directory->IndexDirty = 1;
@@ -1015,35 +1017,32 @@ static int __load_directory(
         return 0;
     }
 
-    status = vafs_stream_lock(reader->Base.VaFs->DescriptorStream);
-    if (status) {
-        VAFS_ERROR("__load_directory: failed to get lock on stream\n");
-        return status;
+    if (reader->Reader == NULL) {
+        status = vafs_stream_reader_open(reader->Base.VaFs->DescriptorStream, &reader->Reader);
+        if (status != 0) {
+            VAFS_ERROR("__load_directory: failed to create stream reader\n");
+            return status;
+        }
     }
 
-    // we lock the descriptor stream while reading the directory
-    // as only one can access the underlying media at the time due
-    // the c file interface.
-    status = vafs_stream_seek(
-        reader->Base.VaFs->DescriptorStream,
+    status = vafs_stream_reader_seek(
+        reader->Reader,
         reader->Base.Descriptor.Descriptor.Index,
         reader->Base.Descriptor.Descriptor.Offset
     );
     if (status) {
         VAFS_ERROR("__load_directory: failed to seek to directory data\n");
-        vafs_stream_unlock(reader->Base.VaFs->DescriptorStream);
         return status;
     }
 
     // read the directory descriptor
-    status = vafs_stream_read(
-        reader->Base.VaFs->DescriptorStream,
+    status = vafs_stream_reader_read(
+        reader->Reader,
         &header, sizeof(VaFsDirectoryHeader_t),
         &read
     );
     if (status) {
         VAFS_ERROR("__load_directory: failed to read directory header\n");
-        vafs_stream_unlock(reader->Base.VaFs->DescriptorStream);
         return status;
     }
 
@@ -1053,7 +1052,6 @@ static int __load_directory(
     if (header.Count > MAX_DIRECTORY_ENTRIES) {
         VAFS_ERROR("__load_directory: directory entry count %u exceeds maximum %d\n",
             header.Count, MAX_DIRECTORY_ENTRIES);
-        vafs_stream_unlock(reader->Base.VaFs->DescriptorStream);
         errno = EINVAL;
         return -1;
     }
@@ -1069,7 +1067,6 @@ static int __load_directory(
         status = __read_descriptor(reader, &buffer[0], &extendedData);
         if (status) {
             VAFS_ERROR("__load_directory: failed to read descriptor\n");
-            vafs_stream_unlock(reader->Base.VaFs->DescriptorStream);
             return status;
         }
 
@@ -1079,7 +1076,6 @@ static int __load_directory(
 
         if (!entry) {
             VAFS_ERROR("__load_directory: failed to create entry\n");
-            vafs_stream_unlock(reader->Base.VaFs->DescriptorStream);
             return -1;
         }
 
@@ -1088,9 +1084,6 @@ static int __load_directory(
         reader->Entries = entry;
         reader->EntryCount++;
     }
-
-    // unlock the descriptor stream
-    vafs_stream_unlock(reader->Base.VaFs->DescriptorStream);
 
     reader->State = VaFsDirectoryState_Loaded;
     reader->IndexDirty = 1;
@@ -1130,6 +1123,7 @@ int vafs_directory_open_root(
     reader->Base.StatCached = 0;
     reader->State     = VaFsDirectoryState_Open;
     reader->Entries   = NULL;
+    reader->Reader    = NULL;
     reader->Index     = NULL;
     reader->EntryCount = 0;
     reader->IndexDirty = 1;

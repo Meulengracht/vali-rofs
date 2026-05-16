@@ -70,14 +70,20 @@ struct VaFsStream {
     struct VaFsBlockCache*        BlockCache;
     struct VaFsStreamBlockHeaders BlockHeaders;
 
-    // The block buffer is used for staging data before
-    // we flush it to the data stream. The staging buffer
-    // is always the size of the block size.
+    // Writable streams stage logical bytes here until a full block is ready
+    // to be flushed to the backing device.
     char*       BlockBuffer;
-    uint32_t    BlockBufferLength;
     vafsblock_t BlockBufferIndex;
     uint32_t    BlockBufferOffset;
-    int         BlockBufferValid;
+};
+
+struct VaFsStreamReader {
+    struct VaFsStream* Stream;
+    char*              BlockBuffer;
+    uint32_t           BlockBufferLength;
+    vafsblock_t        BlockBufferIndex;
+    uint32_t           BlockBufferOffset;
+    int                BlockBufferValid;
 };
 
 static int __new_stream(
@@ -112,6 +118,17 @@ static int __allocate_blockbuffer(
     
     stream->BlockBuffer = malloc(stream->Header.BlockSize);
     if (!stream->BlockBuffer) {
+        errno = ENOMEM;
+        return -1;
+    }
+    return 0;
+}
+
+static int __allocate_reader_blockbuffer(
+    struct VaFsStreamReader* reader)
+{
+    reader->BlockBuffer = malloc(reader->Stream->Header.BlockSize);
+    if (!reader->BlockBuffer) {
         errno = ENOMEM;
         return -1;
     }
@@ -317,8 +334,8 @@ int vafs_stream_open(
         return -1;
     }
 
-    // Reconstruct metadata before allocating the cache and staging buffer that
-    // the read path reuses across seeks and sequential reads.
+    // Reconstruct metadata before creating the shared block cache. Individual
+    // readers own their own staged blocks and logical positions.
     status = __new_stream(device, deviceOffset, &stream);
     if (status != 0) {
         return -1;
@@ -335,14 +352,6 @@ int vafs_stream_open(
     status = vafs_cache_create(STREAM_CACHE_SIZE, &stream->BlockCache);
     if (status != 0) {
         VAFS_ERROR("vafs_stream_open: failed to create block cache\n");
-        vafs_stream_close(stream);
-        return -1;
-    }
-
-    // allocate the block buffer
-    status = __allocate_blockbuffer(stream);
-    if (status != 0) {
-        VAFS_ERROR("vafs_stream_open: failed to allocate block buffer\n");
         vafs_stream_close(stream);
         return -1;
     }
@@ -381,6 +390,46 @@ int vafs_stream_position(
     return 0;
 }
 
+int vafs_stream_reader_open(
+    struct VaFsStream*        stream,
+    struct VaFsStreamReader** readerOut)
+{
+    struct VaFsStreamReader* reader;
+
+    if (stream == NULL || readerOut == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    reader = malloc(sizeof(struct VaFsStreamReader));
+    if (reader == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    memset(reader, 0, sizeof(struct VaFsStreamReader));
+    reader->Stream = stream;
+
+    if (__allocate_reader_blockbuffer(reader) != 0) {
+        free(reader);
+        return -1;
+    }
+
+    *readerOut = reader;
+    return 0;
+}
+
+void vafs_stream_reader_close(
+    struct VaFsStreamReader* reader)
+{
+    if (reader == NULL) {
+        return;
+    }
+
+    free(reader->BlockBuffer);
+    free(reader);
+}
+
 uint32_t vafs_stream_block_size(
     struct VaFsStream* stream)
 {
@@ -390,23 +439,23 @@ uint32_t vafs_stream_block_size(
     return stream->Header.BlockSize;
 }
 
-static uint32_t __get_blockbuffer_crc(
-    struct VaFsStream* stream,
-    size_t             length)
+static uint32_t __get_buffer_crc(
+    const void* buffer,
+    size_t      length)
 {
     return crc_calculate(
         CRC_BEGIN, 
-        (uint8_t*)stream->BlockBuffer, 
+        (uint8_t*)buffer,
         length
     );
 }
 
 static int __load_blockbuffer(
-    struct VaFsStream* stream,
+    struct VaFsStreamReader* reader,
     vafsblock_t        blockIndex)
 {
+    struct VaFsStream*  stream = reader->Stream;
     struct BlockHeader* blockHeader;
-    void*               blockData;
     size_t              blockSize;
     size_t              read;
     uint32_t            crc;
@@ -415,12 +464,16 @@ static int __load_blockbuffer(
 
     // Reads always prefer cached blocks because cache entries already hold the
     // final logical bytes for the block.
-    status = vafs_cache_get(stream->BlockCache, blockIndex, &blockData, &blockSize);
+    status = vafs_cache_get(
+        stream->BlockCache,
+        blockIndex,
+        reader->BlockBuffer,
+        stream->Header.BlockSize,
+        &blockSize
+    );
     if (status == 0) {
-        // A cache hit avoids both device I/O and any runtime decode callback.
-        memcpy(stream->BlockBuffer, blockData, blockSize);
-        stream->BlockBufferLength = (uint32_t)blockSize;
-        stream->BlockBufferValid = 1;
+        reader->BlockBufferLength = (uint32_t)blockSize;
+        reader->BlockBufferValid = 1;
         return 0;
     }
 
@@ -433,8 +486,8 @@ static int __load_blockbuffer(
     VAFS_DEBUG("__load_blockbuffer: block offset: %u\n", blockHeader->Offset);
     VAFS_DEBUG("__load_blockbuffer: block size: %u\n", blockHeader->LengthOnDisk);
 
-    blockSize   = blockHeader->LengthOnDisk;
-    blockData   = malloc(blockSize);
+    blockSize = blockHeader->LengthOnDisk;
+    void* blockData = malloc(blockSize);
     if (!blockData) {
         errno = ENOMEM;
         return -1;
@@ -453,7 +506,7 @@ static int __load_blockbuffer(
         uint32_t blockBufferSize = stream->Header.BlockSize;
 
         VAFS_DEBUG("__load_blockbuffer decoding buffer of size %zu\n", blockSize);
-        status = stream->Decode(blockData, (uint32_t)blockSize, stream->BlockBuffer, &blockBufferSize);
+        status = stream->Decode(blockData, (uint32_t)blockSize, reader->BlockBuffer, &blockBufferSize);
         if (status) {
             VAFS_ERROR("__load_blockbuffer: failed to decode block, %i\n", errno);
             free(blockData);
@@ -468,13 +521,13 @@ static int __load_blockbuffer(
     }
     else {
         // Stored blocks and unfiltered streams already contain the final bytes.
-        memcpy(stream->BlockBuffer, blockData, blockSize);
+        memcpy(reader->BlockBuffer, blockData, blockSize);
     }
     free(blockData);
 
     // CRC is always computed over the logical block bytes, regardless of
     // whether the block was decoded or copied raw.
-    crc = __get_blockbuffer_crc(stream, blockSize);
+    crc = __get_buffer_crc(reader->BlockBuffer, blockSize);
     if (crc != blockHeader->Crc) {
         VAFS_WARN("__load_blockbuffer: CRC mismatch: %u != %u\n", crc, blockHeader->Crc);
         errno = EIO;
@@ -483,21 +536,22 @@ static int __load_blockbuffer(
 
     // Cache population is best-effort; a miss here only hurts reuse, not
     // correctness of the read that already succeeded.
-    status = vafs_cache_set(stream->BlockCache, blockIndex, stream->BlockBuffer, blockSize);
+    status = vafs_cache_set(stream->BlockCache, blockIndex, reader->BlockBuffer, blockSize);
     if (status) {
         VAFS_WARN("__load_blockbuffer: failed to cache block %u\n", blockIndex);
     }
 
-    stream->BlockBufferLength = (uint32_t)blockSize;
-    stream->BlockBufferValid = 1;
+    reader->BlockBufferLength = (uint32_t)blockSize;
+    reader->BlockBufferValid = 1;
     return 0;
 }
 
-int vafs_stream_seek(
-    struct VaFsStream* stream,
+int vafs_stream_reader_seek(
+    struct VaFsStreamReader* reader,
     vafsblock_t        blockIndex,
     uint32_t           blockOffset)
 {
+    struct VaFsStream*  stream;
     struct BlockHeader* blockHeader;
     int                 status;
     vafsblock_t         targetBlock  = blockIndex;
@@ -506,10 +560,12 @@ int vafs_stream_seek(
     VAFS_DEBUG("vafs_stream_seek(blockIndex=%u, blockOffset=%u)\n",
         blockIndex, blockOffset);
 
-    if (stream == NULL) {
+    if (reader == NULL || reader->Stream == NULL) {
         errno = EINVAL;
         return -1;
     }
+
+    stream = reader->Stream;
 
     // Resolve the caller's logical position before deciding whether the staged
     // block can satisfy it directly.
@@ -561,21 +617,26 @@ int vafs_stream_seek(
 
     // Sequential reads often leave the target block staged already, so avoid
     // another load when the buffered bytes still cover the requested offset.
-    if (stream->BlockBufferValid &&
-        stream->BlockBufferIndex == targetBlock &&
-        targetOffset < stream->BlockBufferLength) {
-        stream->BlockBufferOffset = targetOffset;
+    if (reader->BlockBufferValid &&
+        reader->BlockBufferIndex == targetBlock &&
+        targetOffset < reader->BlockBufferLength) {
+        reader->BlockBufferOffset = targetOffset;
         return 0;
     }
 
-    status = __load_blockbuffer(stream, targetBlock);
+    status = __load_blockbuffer(reader, targetBlock);
     if (status) {
         VAFS_ERROR("vafs_stream_seek: load blockbuffer failed: %i\n", status);
         return status;
     }
 
-    stream->BlockBufferIndex  = targetBlock;
-    stream->BlockBufferOffset = targetOffset;
+    if (targetOffset >= reader->BlockBufferLength) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    reader->BlockBufferIndex  = targetBlock;
+    reader->BlockBufferOffset = targetOffset;
     return 0;
 }
 
@@ -596,7 +657,7 @@ static int __add_block_header(
     // Persist CRC over the logical bytes so validation stays identical whether
     // the payload was stored raw or filtered before writing.
     // perform the CRC on the uncompressed data
-    crc = __get_blockbuffer_crc(stream, stream->BlockBufferOffset);
+    crc = __get_buffer_crc(stream->BlockBuffer, stream->BlockBufferOffset);
 
     if (stream->BlockHeaders.Count == stream->BlockHeaders.Capacity) {
         struct BlockHeader* newHeaders;
@@ -750,22 +811,25 @@ int vafs_stream_write(
     return 0;
 }
 
-int vafs_stream_read(
-    struct VaFsStream* stream,
+int vafs_stream_reader_read(
+    struct VaFsStreamReader* reader,
     void*              buffer,
     size_t             size,
     size_t*            bytesRead)
 {
+    struct VaFsStream* stream;
     uint8_t* data        = (uint8_t*)buffer;
     size_t   bytesToRead = size;
     size_t   bytesLeftInBlock;
     VAFS_DEBUG("vafs_stream_read(size=%u)\n", size);
 
-    if (stream == NULL || buffer == NULL || size == 0) {
+    if (reader == NULL || reader->Stream == NULL || buffer == NULL || size == 0 || bytesRead == NULL) {
         *bytesRead = 0;
         errno = EINVAL;
         return -1;
     }
+
+    stream = reader->Stream;
 
     // Drain the currently staged block first and only load the next block when
     // the caller crosses a block boundary.
@@ -773,30 +837,55 @@ int vafs_stream_read(
     while (bytesToRead) {
         size_t byteCount;
 
-        bytesLeftInBlock = stream->Header.BlockSize - stream->BlockBufferOffset;
+        if (!reader->BlockBufferValid) {
+            *bytesRead = size - bytesToRead;
+            errno = ENODATA;
+            return -1;
+        }
+
+        if (reader->BlockBufferOffset >= reader->BlockBufferLength) {
+            if (reader->BlockBufferIndex + 1 >= stream->BlockHeaders.Count) {
+                *bytesRead = size - bytesToRead;
+                errno = ENODATA;
+                return -1;
+            }
+
+            if (__load_blockbuffer(reader, reader->BlockBufferIndex + 1)) {
+                VAFS_ERROR("vafs_stream_read: failed to load block\n");
+                *bytesRead = size - bytesToRead;
+                errno = ENODATA;
+                return -1;
+            }
+
+            reader->BlockBufferIndex++;
+            reader->BlockBufferOffset = 0;
+        }
+
+        bytesLeftInBlock = reader->BlockBufferLength - reader->BlockBufferOffset;
         byteCount = MIN(bytesToRead, bytesLeftInBlock);
 
         VAFS_DEBUG("vafs_stream_read: reading %u bytes from block %u, offset %u\n",
-            byteCount, stream->BlockBufferIndex, stream->BlockBufferOffset);
-        memcpy(data, stream->BlockBuffer + stream->BlockBufferOffset, byteCount);
+            byteCount, reader->BlockBufferIndex, reader->BlockBufferOffset);
+        memcpy(data, reader->BlockBuffer + reader->BlockBufferOffset, byteCount);
         
-        stream->BlockBufferOffset += (uint32_t)byteCount;
+        reader->BlockBufferOffset += (uint32_t)byteCount;
         data                      += byteCount;
         bytesToRead               -= byteCount;
 
-        if (stream->BlockBufferOffset == stream->Header.BlockSize) {
+        if (reader->BlockBufferOffset == reader->BlockBufferLength &&
+            reader->BlockBufferIndex + 1 < stream->BlockHeaders.Count) {
             // Crossing the boundary stages the next block so sequential reads
             // continue forward without an explicit seek from the caller.
-            VAFS_DEBUG("vafs_stream_read: loading block %u\n", stream->BlockBufferIndex);
-            if (__load_blockbuffer(stream, stream->BlockBufferIndex + 1)) {
+            VAFS_DEBUG("vafs_stream_read: loading block %u\n", reader->BlockBufferIndex);
+            if (__load_blockbuffer(reader, reader->BlockBufferIndex + 1)) {
                 VAFS_ERROR("vafs_stream_read: failed to load block\n");
                 *bytesRead = (size - bytesToRead);
                 errno = ENODATA;
                 return -1;
             }
 
-            stream->BlockBufferIndex++;
-            stream->BlockBufferOffset = 0;
+            reader->BlockBufferIndex++;
+            reader->BlockBufferOffset = 0;
         }
     }
 

@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
+#endif
 #include <vafs/vafs.h>
 #include <vafs/directory.h>
 #include <vafs/file.h>
@@ -26,6 +29,26 @@ struct ReadAtOnlyBuffer {
     size_t         Length;
     int            ReadAtCalls;
 };
+
+#if defined(_WIN32) || defined(_WIN64)
+struct BlockingReadAtBuffer {
+    const uint8_t* Data;
+    size_t         Length;
+    HANDLE         FirstReadEntered;
+    HANDLE         SecondReadEntered;
+    HANDLE         ReleaseReads;
+    volatile LONG  BlockingEnabled;
+    volatile LONG  BlockingReadCalls;
+};
+
+struct ConcurrentReadWorker {
+    struct VaFsFileHandle* File;
+    char*                  Buffer;
+    size_t                 Size;
+    size_t                 BytesRead;
+    int                    ErrnoValue;
+};
+#endif
 
 static int g_test_passed = 0;
 static int g_test_failed = 0;
@@ -242,6 +265,52 @@ static int read_at_only(void* userData, long offset, void* buffer, size_t length
     image->ReadAtCalls++;
     return 0;
 }
+
+#if defined(_WIN32) || defined(_WIN64)
+static int blocking_read_at(void* userData, long offset, void* buffer, size_t length, size_t* bytesRead)
+{
+    struct BlockingReadAtBuffer* image = userData;
+
+    if (image == NULL || buffer == NULL || bytesRead == NULL || offset < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if ((size_t)offset > image->Length || length > image->Length - (size_t)offset) {
+        errno = EIO;
+        return -1;
+    }
+
+    if (InterlockedCompareExchange(&image->BlockingEnabled, 0, 0) != 0) {
+        LONG readCalls = InterlockedIncrement(&image->BlockingReadCalls);
+
+        if (readCalls == 1) {
+            SetEvent(image->FirstReadEntered);
+        }
+        else if (readCalls == 2) {
+            SetEvent(image->SecondReadEntered);
+        }
+
+        if (WaitForSingleObject(image->ReleaseReads, 5000) != WAIT_OBJECT_0) {
+            errno = EBUSY;
+            return -1;
+        }
+    }
+
+    memcpy(buffer, image->Data + offset, length);
+    *bytesRead = length;
+    return 0;
+}
+
+static DWORD WINAPI concurrent_read_worker(LPVOID parameter)
+{
+    struct ConcurrentReadWorker* worker = parameter;
+
+    worker->BytesRead = vafs_file_read(worker->File, worker->Buffer, worker->Size);
+    worker->ErrnoValue = errno;
+    return 0;
+}
+#endif
 
 static void cleanup_image(struct VaFs* vafs, struct VaFsDirectoryHandle* root, struct VaFsFileHandle* file)
 {
@@ -492,6 +561,124 @@ static int test_open_ops_accepts_read_at_only_backend(void)
     TEST_PASS("Read-only custom backends can rely on readAt without seek+read");
 }
 
+static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
+{
+#if defined(_WIN32) || defined(_WIN64)
+    struct VaFs* vafs = NULL;
+    struct VaFsConfiguration config;
+    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsFileHandle* writer = NULL;
+    struct VaFsFileHandle* readerA = NULL;
+    struct VaFsFileHandle* readerB = NULL;
+    struct VaFsOperations ops = { 0 };
+    struct BlockingReadAtBuffer image = { 0 };
+    struct ConcurrentReadWorker workerA = { 0 };
+    struct ConcurrentReadWorker workerB = { 0 };
+    char expected[64];
+    char payload[256];
+    HANDLE threadA = NULL;
+    HANDLE threadB = NULL;
+    HANDLE waitHandles[2];
+    DWORD waitStatus;
+    int status;
+
+    // Hold the first backend read inside readAt, then start a second file
+    // handle. Before the reader refactor the second thread failed on the shared
+    // stream lock with EBUSY instead of reaching the backend.
+
+    fill_pattern(payload, sizeof(payload));
+    memcpy(expected, payload, sizeof(expected));
+
+    vafs_config_initialize(&config);
+    vafs_config_set_block_size(&config, TEST_BLOCK_SIZE);
+
+    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    TEST_ASSERT(status == 0, "Failed to create concurrent-read test image");
+
+    status = vafs_directory_open(vafs, "/", &root);
+    TEST_ASSERT(status == 0, "Failed to open root directory");
+
+    status = vafs_directory_create_file(root, "parallel", 0644, &writer);
+    TEST_ASSERT(status == 0, "Failed to create concurrent-read test file");
+    TEST_ASSERT(vafs_file_write(writer, payload, sizeof(payload)) == 0, "Failed to write concurrent-read payload");
+
+    vafs_file_close(writer);
+    writer = NULL;
+    vafs_directory_close(root);
+    root = NULL;
+    vafs_close(vafs);
+    vafs = NULL;
+
+    status = load_image_bytes((void**)&image.Data, &image.Length);
+    TEST_ASSERT(status == 0, "Failed to load concurrent-read image");
+
+    image.FirstReadEntered = CreateEvent(NULL, TRUE, FALSE, NULL);
+    image.SecondReadEntered = CreateEvent(NULL, TRUE, FALSE, NULL);
+    image.ReleaseReads = CreateEvent(NULL, TRUE, FALSE, NULL);
+    TEST_ASSERT(image.FirstReadEntered != NULL && image.SecondReadEntered != NULL && image.ReleaseReads != NULL,
+        "Failed to create concurrent-read events");
+
+    ops.readAt = blocking_read_at;
+    status = vafs_open_ops(&ops, &image, &vafs);
+    TEST_ASSERT(status == 0, "Failed to reopen image with blocking readAt backend");
+
+    status = vafs_file_open(vafs, "/parallel", &readerA);
+    TEST_ASSERT(status == 0, "Failed to open first concurrent reader");
+    status = vafs_file_open(vafs, "/parallel", &readerB);
+    TEST_ASSERT(status == 0, "Failed to open second concurrent reader");
+
+    workerA.File = readerA;
+    workerA.Buffer = (char*)calloc(1, sizeof(expected));
+    workerA.Size = sizeof(expected);
+    workerB.File = readerB;
+    workerB.Buffer = (char*)calloc(1, sizeof(expected));
+    workerB.Size = sizeof(expected);
+    TEST_ASSERT(workerA.Buffer != NULL && workerB.Buffer != NULL, "Failed to allocate concurrent-read buffers");
+
+    InterlockedExchange(&image.BlockingEnabled, 1);
+
+    threadA = CreateThread(NULL, 0, concurrent_read_worker, &workerA, 0, NULL);
+    TEST_ASSERT(threadA != NULL, "Failed to start first concurrent reader thread");
+
+    waitStatus = WaitForSingleObject(image.FirstReadEntered, 5000);
+    TEST_ASSERT(waitStatus == WAIT_OBJECT_0, "First concurrent reader never reached backend readAt");
+
+    threadB = CreateThread(NULL, 0, concurrent_read_worker, &workerB, 0, NULL);
+    TEST_ASSERT(threadB != NULL, "Failed to start second concurrent reader thread");
+
+    waitHandles[0] = image.SecondReadEntered;
+    waitHandles[1] = threadB;
+    waitStatus = WaitForMultipleObjects(2, waitHandles, FALSE, 5000);
+
+    SetEvent(image.ReleaseReads);
+
+    TEST_ASSERT(WaitForSingleObject(threadA, 5000) == WAIT_OBJECT_0, "First concurrent reader thread did not finish");
+    TEST_ASSERT(WaitForSingleObject(threadB, 5000) == WAIT_OBJECT_0, "Second concurrent reader thread did not finish");
+    TEST_ASSERT(waitStatus == WAIT_OBJECT_0, "Second file handle failed before reaching backend readAt");
+    TEST_ASSERT(workerA.BytesRead == workerA.Size, "First concurrent reader size mismatch");
+    TEST_ASSERT(workerB.BytesRead == workerB.Size, "Second concurrent reader size mismatch");
+    TEST_ASSERT(memcmp(workerA.Buffer, expected, sizeof(expected)) == 0, "First concurrent reader content mismatch");
+    TEST_ASSERT(memcmp(workerB.Buffer, expected, sizeof(expected)) == 0, "Second concurrent reader content mismatch");
+    TEST_ASSERT(image.BlockingReadCalls >= 2, "Expected both concurrent readers to reach the backend");
+
+    CloseHandle(threadA);
+    CloseHandle(threadB);
+    CloseHandle(image.FirstReadEntered);
+    CloseHandle(image.SecondReadEntered);
+    CloseHandle(image.ReleaseReads);
+    free(workerA.Buffer);
+    free(workerB.Buffer);
+    vafs_file_close(readerA);
+    vafs_file_close(readerB);
+    vafs_close(vafs);
+    free((void*)image.Data);
+    remove(TEST_IMAGE_PATH);
+    TEST_PASS("Concurrent file handles can overlap reads without sharing a stream lock");
+#else
+    TEST_PASS("Concurrent file-handle read regression is Windows-only in this test binary");
+#endif
+}
+
 int main(void)
 {
     int status = test_sequential_reads_advance_position();
@@ -508,6 +695,10 @@ int main(void)
 
     if (status == 0) {
         status = test_open_ops_accepts_read_at_only_backend();
+    }
+
+    if (status == 0) {
+        status = test_concurrent_file_handles_do_not_serialize_on_stream_lock();
     }
 
     printf("\nTest Summary: %d passed, %d failed\n", g_test_passed, g_test_failed);

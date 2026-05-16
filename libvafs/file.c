@@ -34,6 +34,7 @@ enum VaFsFileState {
 struct VaFsFileHandle {
     struct VaFsFile*   File;
     enum VaFsFileState State;
+    struct VaFsStreamReader* Reader;
     uint32_t           Position;
 };
 
@@ -150,8 +151,16 @@ struct VaFsFileHandle* vafs_file_create_handle(
     }
     
     handle->File = fileEntry;
+    handle->Reader = NULL;
     handle->Position = 0;
     handle->State = VaFsFileState_Open;
+
+    if (fileEntry->VaFs->Mode == VaFsMode_Read) {
+        if (vafs_stream_reader_open(fileEntry->VaFs->DataStream, &handle->Reader) != 0) {
+            free(handle);
+            return NULL;
+        }
+    }
     
     return handle;
 }
@@ -177,6 +186,10 @@ int vafs_file_close(
 
     if (handle->State == VaFsFileState_Write) {
         vafs_stream_unlock(handle->File->VaFs->DataStream);
+    }
+
+    if (handle->Reader != NULL) {
+        vafs_stream_reader_close(handle->Reader);
     }
 
     free(handle);
@@ -291,24 +304,21 @@ size_t vafs_file_read(
         return 0;
     }
 
-    status = vafs_stream_lock(handle->File->VaFs->DataStream);
-    if (status) {
-        errno = EBUSY;
+    if (handle->Reader == NULL) {
+        errno = EINVAL;
         return 0;
     }
 
-    status = vafs_stream_seek(
-        handle->File->VaFs->DataStream,
+    status = vafs_stream_reader_seek(
+        handle->Reader,
         handle->File->Descriptor.Data.Index,
         readOffset
     );
     if (status) {
-        vafs_stream_unlock(handle->File->VaFs->DataStream);
         return 0;
     }
 
-    status = vafs_stream_read(handle->File->VaFs->DataStream, buffer, size, &read);
-    vafs_stream_unlock(handle->File->VaFs->DataStream);
+    status = vafs_stream_reader_read(handle->Reader, buffer, size, &read);
 
     if (status) {
         return 0;
