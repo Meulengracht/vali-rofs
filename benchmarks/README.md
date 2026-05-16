@@ -14,6 +14,10 @@ The benchmark suite measures seven core workload categories:
 6. **Deep Path Stat** - Repeated `stat` on a long/deep path
 7. **Wide Directory Stat** - Repeated `stat` across many siblings in a wide directory
 
+The `deepstat` and `wide` benchmarks are the closest stand-ins for hot FUSE `getattr` and `access` workloads because they repeatedly call `vafs_path_stat()` against already-open images.
+
+The `lookup` benchmark is the closest stand-in for repeated open/lookup traffic because it repeatedly resolves the same file path through `vafs_file_open()`.
+
 ## Building
 
 The benchmarks are built automatically with the project if `VAFS_BUILD_BENCHMARKS` is enabled (default: ON).
@@ -161,6 +165,33 @@ You can specify custom paths within the VaFS image for testing:
   benchmark.vafs
 ```
 
+### Threshold-Oriented Wide Directory Checks
+
+Directory lookup uses a thresholded strategy internally: smaller directories stay on the binary-search path, while very large directories switch to a secondary name index.
+
+To benchmark both sides of that threshold with the wide-directory image generator:
+
+```bash
+BUILD_DIR=$PWD/build FILE_COUNT=256 tests/lib/generate_wide_directory_image.sh
+./build/bin/vafs-bench --only=wide --wide-directory=/wide_dir /tmp/vafs-test-wide-dir/wide-directory.vafs
+
+BUILD_DIR=$PWD/build FILE_COUNT=5000 tests/lib/generate_wide_directory_image.sh
+./build/bin/vafs-bench --only=wide --wide-directory=/wide_dir /tmp/vafs-test-wide-dir/wide-directory.vafs
+```
+
+The first command exercises the small-directory fallback path. The second exercises the large-directory secondary index path.
+
+Both runs also cover the read-mode `vafs_path_stat()` fast path, which now reuses the same cached directory lookup structures and cached entry stat metadata used by direct directory operations.
+
+## Readonly Lookup Cache Notes
+
+Mounted images now keep a bounded read-mode component cache keyed by `(parent directory, entry name)`.
+
+- Capacity: 128 sets x 4 ways = 512 cached components per open image.
+- Eviction: least-recently-used within each set.
+- Cached values: both successful entry lookups and failed lookups.
+- Readonly assumption: the cache is only active when reading mounted/opened images. Image creation bypasses it so mutable directory state never has to invalidate cached pointers.
+
 ### Options
 
 - `--format=<format>` - Output format: `human`, `json`, or `csv` (default: human)
@@ -262,6 +293,7 @@ You can specify custom paths within the VaFS image for testing:
 **Purpose**: Measure path resolution and file lookup performance.
 
 **Methodology**:
+- Warms the target path once during setup to exclude one-time directory loading and cache priming
 - Resolves path to a file
 - Opens file handle
 - Closes file handle immediately
@@ -282,6 +314,7 @@ You can specify custom paths within the VaFS image for testing:
 **Purpose**: Measure repeated metadata lookups on a long nested path.
 
 **Methodology**:
+- Warms the target path once during setup to exclude one-time directory loading and cache priming
 - Calls `vafs_path_stat` on a deep path
 - Resolves symlinks when present
 - Repeats 10 times by default

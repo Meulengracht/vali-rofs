@@ -44,7 +44,8 @@ int __vafs_file_open_internal(
     struct VaFsFileHandle** handleOut,
     int                     symlinkDepth)
 {
-    struct VaFsDirectoryEntry* entries;
+    struct VaFsDirectory*      currentDirectory;
+    struct VaFsDirectoryEntry* entry;
     const char*                remainingPath = path;
     char                       token[VAFS_NAME_MAX + 1];
 
@@ -66,7 +67,7 @@ int __vafs_file_open_internal(
         return -1;
     }
 
-    entries = __vafs_directory_entries(vafs->RootDirectory);
+    currentDirectory = vafs->RootDirectory;
     do {
         const char* previousPath = remainingPath;
         int charsConsumed = __vafs_pathtoken(remainingPath, token, sizeof(token));
@@ -75,58 +76,57 @@ int __vafs_file_open_internal(
         }
         remainingPath += charsConsumed;
 
-        // find the name in the directory
-        while (entries != NULL) {
-            if (!strcmp(__vafs_directory_entry_name(entries), token)) {
-                if (entries->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
-                    // If we encounter a directory in this case, we must not
-                    // be at the end of the path
-                    if (remainingPath[0] == '\0') {
-                        errno = EISDIR;
-                        return -1;
-                    }
-
-                    // fall through this entire if/else
-                } else if (entries->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
-                    char* pathBuffer = malloc(VAFS_PATH_MAX);
-                    int   written;
-                    int   status;
-                    if (!pathBuffer) {
-                        VAFS_ERROR("__vafs_file_open_internal: failed to allocate path buffer\n");
-                        errno = ENOMEM;
-                        return -1;
-                    }
-
-                    written = __vafs_resolve_symlink(pathBuffer, VAFS_PATH_MAX, path, previousPath - path, entries->Symlink->Target);
-                    if (written < 0) {
-                        VAFS_ERROR("__vafs_file_open_internal: failed to resolve symlink %s\n", entries->Symlink->Target);
-                        free(pathBuffer);
-                        return -1;
-                    }
-
-                    status = __vafs_file_open_internal(vafs, pathBuffer, handleOut, symlinkDepth + 1);
-                    free(pathBuffer);
-                    return status;
-                } else if (entries->Type == VA_FS_DESCRIPTOR_TYPE_FILE) {
-                    // If we encounter a file in this case, we must be at the end of the path
-                    if (remainingPath[0] != '\0') {
-                        errno = EISDIR;
-                        return -1;
-                    }
-
-                    *handleOut = vafs_file_create_handle(entries->File);
-                    return 0;
-                } else {
-                    errno = ENOENT;
-                    return -1;
-                }
-
-                entries = __vafs_directory_entries(entries->Directory);
-                break;
-            }
-            entries = entries->Link;
+        entry = __vafs_directory_find_entry(currentDirectory, token);
+        if (entry == NULL) {
+            return -1;
         }
+
+        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
+            if (remainingPath[0] == '\0') {
+                errno = EISDIR;
+                return -1;
+            }
+
+            currentDirectory = entry->Directory;
+            continue;
+        }
+
+        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
+            char* pathBuffer = malloc(VAFS_PATH_MAX);
+            int   written;
+            int   status;
+            if (!pathBuffer) {
+                VAFS_ERROR("__vafs_file_open_internal: failed to allocate path buffer\n");
+                errno = ENOMEM;
+                return -1;
+            }
+
+            written = __vafs_resolve_symlink(pathBuffer, VAFS_PATH_MAX, path, previousPath - path, entry->Symlink->Target);
+            if (written < 0) {
+                VAFS_ERROR("__vafs_file_open_internal: failed to resolve symlink %s\n", entry->Symlink->Target);
+                free(pathBuffer);
+                return -1;
+            }
+
+            status = __vafs_file_open_internal(vafs, pathBuffer, handleOut, symlinkDepth + 1);
+            free(pathBuffer);
+            return status;
+        }
+
+        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_FILE) {
+            if (remainingPath[0] != '\0') {
+                errno = ENOTDIR;
+                return -1;
+            }
+
+            *handleOut = vafs_file_create_handle(entry->File);
+            return 0;
+        }
+
+        errno = ENOENT;
+        return -1;
     } while (1);
+    errno = ENOENT;
     return -1;
 }
 
@@ -279,6 +279,10 @@ size_t vafs_file_read(
         size = bytesRemaining;
     }
 
+    if (size == 0) {
+        return 0;
+    }
+
     // Check for integer overflow in offset calculation
     readOffset = handle->File->Descriptor.Data.Offset + handle->Position;
     if (readOffset < handle->File->Descriptor.Data.Offset) {
@@ -303,8 +307,14 @@ size_t vafs_file_read(
         return 0;
     }
 
-    (void)vafs_stream_read(handle->File->VaFs->DataStream, buffer, size, &read);
+    status = vafs_stream_read(handle->File->VaFs->DataStream, buffer, size, &read);
     vafs_stream_unlock(handle->File->VaFs->DataStream);
+
+    if (status) {
+        return 0;
+    }
+
+    handle->Position = handle->Position + (uint32_t)read;
     return read;
 }
 

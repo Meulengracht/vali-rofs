@@ -20,9 +20,22 @@
 #ifndef __VAFS_BENCHMARK_H__
 #define __VAFS_BENCHMARK_H__
 
+/* Suppress MSVC deprecation warnings for POSIX functions */
+#if defined(_MSC_VER)
+#pragma warning(disable:4996)
+#endif
+
 #include <stdint.h>
 #include <time.h>
 
+#if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
+typedef struct {
+    LARGE_INTEGER start;
+    LARGE_INTEGER end;
+    LARGE_INTEGER frequency;
+} BenchmarkTimer;
+#else
 /**
  * @brief Timing utilities for benchmarks
  */
@@ -30,6 +43,7 @@ typedef struct {
     struct timespec start;
     struct timespec end;
 } BenchmarkTimer;
+#endif
 
 /**
  * @brief Benchmark result structure

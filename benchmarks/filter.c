@@ -31,10 +31,10 @@ enum VaFsFilterType {
     VaFsFilterType_BRIEFLZ
 };
 
-struct VaFsFeatureFilter {
+VAFS_ONDISK_STRUCT(VaFsFeatureFilter, {
     struct VaFsFeatureHeader Header;
-    int                      Type;
-};
+    uint32_t                 Type;
+});
 
 static struct VaFsGuid g_filterGuid    = VA_FS_FEATURE_FILTER;
 static struct VaFsGuid g_filterOpsGuid = VA_FS_FEATURE_FILTER_OPS;
@@ -137,7 +137,6 @@ static int __brieflz_encode(void* source, uint32_t sourceLength, void** output, 
     struct __brieflz_block* block;
     uint32_t                compressedSize;
     void*                   workmemory = NULL;
-    char                    header[16];
 
     block = malloc(blz_max_packed_size(sourceLength) + sizeof(struct __brieflz_block));
     if (block == NULL) {
@@ -181,7 +180,7 @@ static int __brieflz_decode(void* source, uint32_t sourceLength, void* output, u
         return -1;
     }
 
-    decompressedSize = blz_depack_safe(&block->payload[0], sourceLength, output, block->usize);
+    decompressedSize = blz_depack_safe(&block->payload[0], sourceLength, output, (unsigned long)block->usize);
     if (decompressedSize == BLZ_ERROR) {
         errno = EINVAL;
         return -1;

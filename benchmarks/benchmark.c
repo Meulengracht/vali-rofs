@@ -23,6 +23,27 @@
 #include <string.h>
 #include <math.h>
 #include <float.h>
+#include <inttypes.h>
+
+#if defined(_WIN32) || defined(_WIN64)
+
+void benchmark_timer_start(BenchmarkTimer* timer)
+{
+    QueryPerformanceFrequency(&timer->frequency);
+    QueryPerformanceCounter(&timer->start);
+}
+
+double benchmark_timer_stop(BenchmarkTimer* timer)
+{
+    QueryPerformanceCounter(&timer->end);
+    
+    // Calculate elapsed time in milliseconds
+    LONGLONG elapsed = timer->end.QuadPart - timer->start.QuadPart;
+    double ms = (double)elapsed * 1000.0 / (double)timer->frequency.QuadPart;
+    return ms;
+}
+
+#else
 
 void benchmark_timer_start(BenchmarkTimer* timer)
 {
@@ -35,6 +56,8 @@ double benchmark_timer_stop(BenchmarkTimer* timer)
     return benchmark_timespec_diff_ms(&timer->start, &timer->end);
 }
 
+#endif
+
 double benchmark_timespec_diff_ms(struct timespec* start, struct timespec* end)
 {
     double sec_diff = (double)(end->tv_sec - start->tv_sec);
@@ -45,14 +68,14 @@ double benchmark_timespec_diff_ms(struct timespec* start, struct timespec* end)
 void benchmark_print_result(const BenchmarkResult* result)
 {
     printf("\n=== %s ===\n", result->name);
-    printf("Iterations:    %lu\n", result->iterations);
+    printf("Iterations:    %" PRIu64 "\n", result->iterations);
     printf("Total time:    %.3f ms\n", result->total_time_ms);
     printf("Average time:  %.3f ms\n", result->avg_time_ms);
     printf("Min time:      %.3f ms\n", result->min_time_ms);
     printf("Max time:      %.3f ms\n", result->max_time_ms);
 
     if (result->bytes_processed > 0) {
-        printf("Bytes:         %lu\n", result->bytes_processed);
+        printf("Bytes:         %" PRIu64 "\n", result->bytes_processed);
         printf("Throughput:    %.2f MB/s\n", result->throughput_mbps);
     }
 }
@@ -61,7 +84,7 @@ void benchmark_print_result_json(const BenchmarkResult* result, int is_last)
 {
     printf("  {\n");
     printf("    \"name\": \"%s\",\n", result->name);
-    printf("    \"iterations\": %lu,\n", result->iterations);
+    printf("    \"iterations\": %" PRIu64 ",\n", result->iterations);
     printf("    \"total_time_ms\": %.3f,\n", result->total_time_ms);
     printf("    \"avg_time_ms\": %.3f,\n", result->avg_time_ms);
     printf("    \"min_time_ms\": %.3f,\n", result->min_time_ms);
@@ -69,7 +92,7 @@ void benchmark_print_result_json(const BenchmarkResult* result, int is_last)
 
     if (result->bytes_processed > 0) {
         printf(",\n");
-        printf("    \"bytes_processed\": %lu,\n", result->bytes_processed);
+        printf("    \"bytes_processed\": %" PRIu64 ",\n", result->bytes_processed);
         printf("    \"throughput_mbps\": %.2f\n", result->throughput_mbps);
     } else {
         printf("\n");
@@ -83,7 +106,7 @@ void benchmark_print_result_csv(const BenchmarkResult* result, int print_header)
     if (print_header) {
         printf("name,iterations,total_time_ms,avg_time_ms,min_time_ms,max_time_ms,bytes_processed,throughput_mbps\n");
     }
-    printf("%s,%lu,%.3f,%.3f,%.3f,%.3f,%lu,%.2f\n",
+    printf("%s,%" PRIu64 ",%.3f,%.3f,%.3f,%.3f,%" PRIu64 ",%.2f\n",
            result->name,
            result->iterations,
            result->total_time_ms,
@@ -148,7 +171,7 @@ BenchmarkResult benchmark_run(
         iteration_times[i] = benchmark_timer_stop(&timer);
 
         if (status != 0) {
-            fprintf(stderr, "Benchmark iteration %lu failed for %s\n", i, name);
+            fprintf(stderr, "Benchmark iteration %" PRIu64 " failed for %s\n", i, name);
             break;
         }
 

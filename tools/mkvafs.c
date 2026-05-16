@@ -19,6 +19,11 @@
  *   This filesystem is used to store the initrd of the kernel.
  */
 
+/* Suppress MSVC deprecation warnings for POSIX functions */
+#if defined(_MSC_VER)
+#pragma warning(disable:4996)
+#endif
+
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
@@ -31,7 +36,7 @@
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <assert.h>
-#include "dirent_win32.h"
+#include "utils/dirent_win32.h"
 #include "ntifs_win32.h"
 #include <sys/stat.h>
 
@@ -84,7 +89,7 @@ static int __readlink_handle(HANDLE handle, char** symlinkBufferOut, uint64_t* s
     WCHAR*               w_target;
     DWORD                w_target_len;
     char*                target;
-    int                  target_len;
+    int                  target_len = 0;
     DWORD                bytes;
     char*                buffer;
     int                  status = -1;
@@ -788,6 +793,10 @@ static void __filters_destroy(struct list* filters)
 void __ignoremap_free(int index, const void* elem, void* userContext)
 {
     struct _ignoremap_entry* entry = (struct _ignoremap_entry*)elem;
+    
+    (void)index;
+    (void)userContext;
+
     __filters_destroy(&entry->filters);
     free((char*)entry->path);
 }

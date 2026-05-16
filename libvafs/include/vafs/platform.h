@@ -21,6 +21,11 @@
 #ifndef __PLATFORM_H__
 #define __PLATFORM_H__
 
+/* Suppress MSVC deprecation warnings for POSIX functions */
+#if defined(_MSC_VER)
+#pragma warning(disable:4996)
+#endif
+
 #ifndef MIN
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #endif
@@ -63,6 +68,18 @@ static inline int mtx_unlock(mtx_t* mtx) {
 
 #if !defined S_ISDIR
     #define S_ISDIR(m) (((m) & _S_IFDIR) == _S_IFDIR)
+#endif
+
+#if !defined S_IFLNK
+    #define S_IFLNK 0xA000
+#endif
+
+#if !defined S_ISLNK
+    #define S_ISLNK(m) (((m) & S_IFLNK) == S_IFLNK)
+#endif
+
+#if !defined CLOCK_MONOTONIC
+    #define CLOCK_MONOTONIC 0
 #endif
 #elif defined(VALI)
 #include <io.h>

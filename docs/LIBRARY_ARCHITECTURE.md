@@ -393,6 +393,23 @@ Implementation: `libvafs/vafs.c:399-530`
 
 Path resolution in VaFS traverses the directory tree, handling symbolic links and path components.
 
+Read-mode directory lookup uses two internal strategies depending on directory size:
+
+- Small directories keep a sorted pointer array and resolve names with binary search.
+- Very large directories build a secondary hash index keyed by entry name and bypass the binary-search path.
+- Directory iteration still follows the stored linked-list order so enumeration semantics do not change when the faster lookup index is enabled.
+- `vafs_path_stat()` reuses that same cached lookup path instead of maintaining a separate linear walk.
+- File, directory, and symlink objects cache their `struct vafs_stat` materialization in read mode so repeated `getattr` and `access`-style calls do not rebuild mode and size metadata on every lookup.
+
+Read-mode path traversal also keeps a bounded component lookup cache keyed by `(parent directory pointer, child name)`:
+
+- The cache stores both positive hits and negative misses, so repeated failed lookups stop re-running the same directory search.
+- The cache is fixed-size at 128 sets with 4 ways each (512 total entries) and uses set-local LRU eviction.
+- The cache is only used in read mode. Writer-side path operations bypass it because directory contents can change while images are being created.
+- This readonly assumption makes cached directory and entry pointers safe to reuse for the lifetime of an opened image.
+
+The current large-directory threshold is 512 entries. Directories below that threshold stay on the lower-overhead binary-search path.
+
 ### Path Resolution Algorithm
 
 ```
@@ -401,7 +418,7 @@ vafs_path_stat(vafs, "/usr/local/bin/app", followLinks, &stat)
     ├─► Check if root path ("/")
     │       └─► Return root directory stat
     │
-    ├─► Start at root directory entries
+    ├─► Start at root directory
     │
     └─► Loop: Extract next path component
             │
@@ -412,12 +429,20 @@ vafs_path_stat(vafs, "/usr/local/bin/app", followLinks, &stat)
             │
             ├─► Search current directory for token
             │       │
+            │       ├─► Read-only lookup cache `(parent, name)`
+            │       │       ├─► Cache HIT: reuse cached entry pointer
+            │       │       ├─► Cache MISS: reuse cached negative result
+            │       │       └─► Not cached: continue to directory-specific lookup
+            │       │
+            │       ├─► __vafs_directory_find_entry(directory, token)
+            │       │       └─► Reuse the cached binary-search or hash-index lookup path
+            │       │
             │       ├─► Found DIRECTORY "usr"
-            │       │       ├─► If end of path: return directory stat
+            │       │       ├─► If end of path: return cached directory stat
             │       │       └─► Else: descend into directory, continue loop
             │       │
             │       ├─► Found SYMLINK "usr"
-            │       │       ├─► If !followLinks and end of path: return symlink stat
+            │       │       ├─► If !followLinks and end of path: return cached symlink stat
             │       │       ├─► Else: resolve symlink
             │       │       │       ├─► __vafs_resolve_symlink(base, symlinkTarget, buffer)
             │       │       │       │       ├─► Copy base path to buffer (clean up "//")
@@ -429,7 +454,7 @@ vafs_path_stat(vafs, "/usr/local/bin/app", followLinks, &stat)
             │       │
             │       └─► Found FILE "app"
             │               ├─► If not end of path: ENOTDIR error
-            │               └─► Else: return file stat
+            │               └─► Else: return cached file stat
             │
             └─► Not found: ENOENT error
 ```

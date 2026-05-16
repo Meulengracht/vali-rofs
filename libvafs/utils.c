@@ -200,7 +200,8 @@ int __vafs_path_stat_internal(
     struct vafs_stat* stat,
     int               symlinkDepth)
 {
-    struct VaFsDirectoryEntry* entries;
+    struct VaFsDirectory*      currentDirectory;
+    struct VaFsDirectoryEntry* entry;
     const char*                remainingPath = path;
     char                       token[VAFS_NAME_MAX + 1];
 
@@ -225,7 +226,7 @@ int __vafs_path_stat_internal(
         return 0;
     }
 
-    entries = __vafs_directory_entries(vafs->RootDirectory);
+    currentDirectory = vafs->RootDirectory;
     do {
         const char* previousPath = remainingPath;
         int         charsConsumed = __vafs_pathtoken(remainingPath, token, sizeof(token));
@@ -234,74 +235,68 @@ int __vafs_path_stat_internal(
         }
         remainingPath += charsConsumed;
 
-        // find the name in the directory
-        while (entries != NULL) {
-            if (!strcmp(__vafs_directory_entry_name(entries), token)) {
-                if (entries->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
-                    if (remainingPath[0] == '\0') {
-                        stat->mode = S_IFDIR | entries->Directory->Descriptor.Permissions;
-                        stat->size = 0;
-                        return 0;
-                    }
+        entry = __vafs_directory_find_entry(currentDirectory, token);
+        if (entry == NULL) {
+            return -1;
+        }
 
-                    // otherwise fall-through and continue
-                } else if (entries->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
-                    if (!followLinks) {
-                        if (remainingPath[0] == '\0') {
-                            stat->mode = S_IFLNK | 0777;
-                            stat->size = strlen(entries->Symlink->Target);
-                            return 0;
-                        } else {
-                            errno = ENOTDIR;
-                            return -1;
-                        }
-                    }
+        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
+            if (remainingPath[0] == '\0') {
+                return __vafs_directory_entry_stat(entry, stat);
+            }
 
-                    char* pathBuffer = malloc(VAFS_PATH_MAX);
-                    int   written;
-                    int   status;
-                    if (!pathBuffer) {
-                        VAFS_ERROR("__vafs_path_stat_internal: failed to allocate path buffer\n");
-                        errno = ENOMEM;
-                        return -1;
-                    }
+            currentDirectory = entry->Directory;
+            continue;
+        }
 
-                    written = __vafs_resolve_symlink(
-                            pathBuffer,
-                            VAFS_PATH_MAX,
-                            path,
-                            previousPath - path,
-                            entries->Symlink->Target
-                    );
-                    if (written < 0) {
-                        VAFS_ERROR("__vafs_path_stat_internal: failed to resolve symlink %s\n", entries->Symlink->Target);
-                        free(pathBuffer);
-                        return -1;
-                    }
-
-                    status = __vafs_path_stat_internal(vafs, pathBuffer, followLinks, stat, symlinkDepth + 1);
-                    free(pathBuffer);
-                    return status;
-                } else if (entries->Type == VA_FS_DESCRIPTOR_TYPE_FILE) {
-                    // If we encounter a file in this case, we must be at the end of the path
-                    if (remainingPath[0] != '\0') {
-                        errno = ENOTDIR;
-                        return -1;
-                    }
-
-                    stat->mode = S_IFREG | entries->File->Descriptor.Permissions;
-                    stat->size = entries->File->Descriptor.FileLength;
-                    return 0;
-                } else {
-                    errno = ENOENT;
-                    return -1;
+        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
+            if (!followLinks) {
+                if (remainingPath[0] == '\0') {
+                    return __vafs_directory_entry_stat(entry, stat);
                 }
 
-                entries = __vafs_directory_entries(entries->Directory);
-                break;
+                errno = ENOTDIR;
+                return -1;
             }
-            entries = entries->Link;
+
+            char* pathBuffer = malloc(VAFS_PATH_MAX);
+            int   written;
+            int   status;
+            if (!pathBuffer) {
+                VAFS_ERROR("__vafs_path_stat_internal: failed to allocate path buffer\n");
+                errno = ENOMEM;
+                return -1;
+            }
+
+            written = __vafs_resolve_symlink(
+                    pathBuffer,
+                    VAFS_PATH_MAX,
+                    path,
+                    previousPath - path,
+                    entry->Symlink->Target
+            );
+            if (written < 0) {
+                VAFS_ERROR("__vafs_path_stat_internal: failed to resolve symlink %s\n", entry->Symlink->Target);
+                free(pathBuffer);
+                return -1;
+            }
+
+            status = __vafs_path_stat_internal(vafs, pathBuffer, followLinks, stat, symlinkDepth + 1);
+            free(pathBuffer);
+            return status;
         }
+
+        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_FILE) {
+            if (remainingPath[0] != '\0') {
+                errno = ENOTDIR;
+                return -1;
+            }
+
+            return __vafs_directory_entry_stat(entry, stat);
+        }
+
+        errno = ENOENT;
+        return -1;
     } while (1);
 
     errno = ENOENT;

@@ -24,6 +24,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <vafs/platform.h>
 
 #define VAFS_PATH_MAX 4096
 #define VAFS_NAME_MAX 255
@@ -33,12 +34,15 @@ struct VaFsDirectoryHandle;
 struct VaFsFileHandle;
 struct VaFsSymlinkHandle;
 
-struct VaFsGuid {
+/**
+ * @brief Identifies a filesystem feature.
+ */
+VAFS_ONDISK_STRUCT(VaFsGuid, {
     uint32_t Data1;
     uint16_t Data2;
     uint16_t Data3;
     uint8_t  Data4[8];
-};
+});
 
 /**
  * List of builtin features for the filesystem
@@ -50,6 +54,9 @@ struct VaFsGuid {
 #define VA_FS_FEATURE_FILTER     { 0x99C25D91, 0xFA99, 0x4A71, { 0x9C, 0xB5, 0x96, 0x1A, 0xA9, 0x3D, 0xDF, 0xBB } }
 #define VA_FS_FEATURE_FILTER_OPS { 0x17BC0212, 0x7DF3, 0x4BDD, { 0x99, 0x24, 0x5A, 0xC8, 0x13, 0xBE, 0x72, 0x49 } }
 
+/**
+ * @brief Verbosity levels for library logging.
+ */
 enum VaFsLogLevel {
     VaFsLogLevel_Error,
     VaFsLogLevel_Warning,
@@ -57,6 +64,9 @@ enum VaFsLogLevel {
     VaFsLogLevel_Debug
 };
 
+/**
+ * @brief Target architecture constraints stored in the image header.
+ */
 enum VaFsArchitecture {
     VaFsArchitecture_UNKNOWN = 0,
     VaFsArchitecture_X86 = 0x8086,
@@ -68,12 +78,18 @@ enum VaFsArchitecture {
     VaFsArchitecture_ALL = 0xDEAD,
 };
 
-struct VaFsFeatureHeader {
+/**
+ * @brief Common header for persisted feature payloads.
+ */
+VAFS_ONDISK_STRUCT(VaFsFeatureHeader, {
     struct VaFsGuid Guid;
     uint32_t        Length; // Length of the entire feature data including this header
-};
+});
 
-struct VaFsFeatureOverview {
+/**
+ * @brief Built-in overview feature describing image size and entry counts.
+ */
+VAFS_ONDISK_STRUCT(VaFsFeatureOverview, {
     struct VaFsFeatureHeader Header;
     uint64_t                 TotalSizeUncompressed;
     
@@ -83,8 +99,11 @@ struct VaFsFeatureOverview {
         uint32_t Directories;
         uint32_t Symlinks;
     } Counts;
-};
+});
 
+/**
+ * @brief Public entry kinds returned by directory enumeration.
+ */
 enum VaFsEntryType {
     VaFsEntryType_Unknown,
     VaFsEntryType_File,
@@ -92,19 +111,13 @@ enum VaFsEntryType {
     VaFsEntryType_Symlink,
 };
 
+/**
+ * @brief Describes a single directory entry returned by vafs_directory_read.
+ */
 struct VaFsEntry {
     const char*        Name;
     enum VaFsEntryType Type;
 };
-
-/**
- * @brief The filter feature must be installed both when creating the image, and
- * when loading the image. The feature is used by the underlying streams to apply data manipulation 
- * while loading/writing. This means the user must supply the filter operations to use,
- * as there is no predefined way of compressing or encrypting data.
- * 
- * This feature data is not transferred to the disk image, but rather used if present.
- */
 
 /**
  * @brief It is expected of the encode function to allocate a buffer of the size of the data and provide
@@ -119,12 +132,21 @@ typedef int(*VaFsFilterEncodeFunc)(void* Input, uint32_t InputLength, void** Out
  */
 typedef int(*VaFsFilterDecodeFunc)(void* Input, uint32_t InputLength, void* Output, uint32_t* OutputLength);
 
+/**
+ * @brief Runtime filter callbacks used when a filesystem image is read or written through filtered streams.
+ *
+ * Install this feature after opening or creating an image and again when reopening that same image later.
+ * The callback table is consumed at runtime and is not serialized into the on-disk image.
+ */
 struct VaFsFeatureFilterOps {
     struct VaFsFeatureHeader Header;
     VaFsFilterEncodeFunc     Encode;
     VaFsFilterDecodeFunc     Decode;
 };
 
+/**
+ * @brief Configuration used when creating a new filesystem image.
+ */
 struct VaFsConfiguration {
     // Allow the filesystem to be valid only for a specific
     // architecture
@@ -136,8 +158,35 @@ struct VaFsConfiguration {
     uint32_t              DataBlockSize;
 };
 
+/**
+ * @brief Initializes a configuration structure with library defaults.
+ *
+ * The default architecture is VaFsArchitecture_UNKNOWN and the block size is the library default.
+ * Passing NULL is a no-op.
+ *
+ * @param configuration Configuration structure to initialize.
+ */
 extern void vafs_config_initialize(struct VaFsConfiguration* configuration);
+
+/**
+ * @brief Sets the architecture constraint to store in a creation configuration.
+ *
+ * Passing NULL is a no-op.
+ *
+ * @param configuration Configuration structure to update.
+ * @param architecture  Architecture value to store in the image header.
+ */
 extern void vafs_config_set_architecture(struct VaFsConfiguration* configuration, enum VaFsArchitecture architecture);
+
+/**
+ * @brief Overrides the data block size used for a newly created image.
+ *
+ * Values outside the supported range are ignored and reported through the library log. Passing NULL
+ * is a no-op.
+ *
+ * @param configuration Configuration structure to update.
+ * @param blockSize     Desired block size in bytes.
+ */
 extern void vafs_config_set_block_size(struct VaFsConfiguration* configuration, uint32_t blockSize);
 
 /**
@@ -273,6 +322,9 @@ extern int vafs_close(
 /**
  * @brief This installs a feature into the filesystem. The features must be installed after
  * creating or opening the image, before any other operations are performed.
+ * Persisted feature payloads are written to the image byte-for-byte, so custom on-disk
+ * feature structs should be declared with VAFS_ONDISK_STRUCT and use fixed-width field types.
+ * Runtime-only features that are never serialized do not need the on-disk macro.
  * 
  * @param[In] vafs    The filesystem to install the feature into.
  * @param[In] feature The feature to install. The feature data is copied, so no need to keep the feature around.
