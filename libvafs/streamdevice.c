@@ -344,10 +344,16 @@ int vafs_streamdevice_read_at(
         return -1;
     }
 
+    // Prefer a native positioned read whenever the backend exposes one. That
+    // path never touches shared cursor state and is the fast path for read-only
+    // images opened through files, memory, or custom readAt backends.
+
     if (device->Operations.readAt != NULL) {
         return device->Operations.readAt(device->UserData, offset, buffer, length, bytesRead);
     }
 
+    // Legacy backends can still satisfy positioned reads by temporarily
+    // borrowing the seek+read API under the device lock.
     if (device->Operations.read == NULL || device->Operations.seek == NULL) {
         errno = ENOTSUP;
         return -1;
@@ -358,6 +364,8 @@ int vafs_streamdevice_read_at(
         return -1;
     }
 
+    // Save and later restore the legacy cursor because the compatibility path
+    // is intentionally invisible to higher-level read-only callers.
     original = device->Operations.seek(device->UserData, 0, SEEK_CUR);
     if (original < 0) {
         mtx_unlock(&device->Lock);
@@ -371,6 +379,8 @@ int vafs_streamdevice_read_at(
 
     status = device->Operations.read(device->UserData, buffer, length, bytesRead);
     if (device->Operations.seek(device->UserData, original, SEEK_SET) < 0 && status == 0) {
+        // A failed restore leaves the legacy cursor in an unknown state, so
+        // treat the whole positioned read as failed even if the bytes arrived.
         status = -1;
     }
 

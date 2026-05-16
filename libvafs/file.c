@@ -55,6 +55,10 @@ int __vafs_file_open_internal(
         return -1;
     }
 
+    // Resolve the path one token at a time until it terminates in a file.
+    // Directory edges advance traversal, symlinks recurse with a depth budget,
+    // and regular files must be the final component.
+
     // Check symlink depth limit
     if (symlinkDepth > VAFS_SYMLINK_MAX_DEPTH) {
         VAFS_ERROR("__vafs_file_open_internal: symlink depth limit exceeded (depth=%d, max=%d)\n",
@@ -73,21 +77,27 @@ int __vafs_file_open_internal(
         const char* previousPath = remainingPath;
         int charsConsumed = __vafs_pathtoken(remainingPath, token, sizeof(token));
         if (!charsConsumed) {
+            // Exhausting the token stream without returning means resolution
+            // never landed on a concrete file entry.
             break;
         }
         remainingPath += charsConsumed;
 
         entry = __vafs_directory_find_entry(currentDirectory, token);
         if (entry == NULL) {
+            // Path resolution stops on the first missing component.
             return -1;
         }
 
         if (entry->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
             if (remainingPath[0] == '\0') {
+                // Opening a directory through the file API is always an error,
+                // even if the path resolved successfully.
                 errno = EISDIR;
                 return -1;
             }
 
+            // Intermediate directory tokens simply move the traversal root.
             currentDirectory = entry->Directory;
             continue;
         }
@@ -102,6 +112,8 @@ int __vafs_file_open_internal(
                 return -1;
             }
 
+            // Rebuild the remaining path through the symlink target, then let
+            // the same resolver continue with an incremented depth budget.
             written = __vafs_resolve_symlink(pathBuffer, VAFS_PATH_MAX, path, previousPath - path, entry->Symlink->Target);
             if (written < 0) {
                 VAFS_ERROR("__vafs_file_open_internal: failed to resolve symlink %s\n", entry->Symlink->Target);
@@ -116,6 +128,8 @@ int __vafs_file_open_internal(
 
         if (entry->Type == VA_FS_DESCRIPTOR_TYPE_FILE) {
             if (remainingPath[0] != '\0') {
+                // Regular files terminate traversal; callers cannot descend
+                // through a file into more path components.
                 errno = ENOTDIR;
                 return -1;
             }
@@ -124,6 +138,8 @@ int __vafs_file_open_internal(
             return 0;
         }
 
+        // Unknown descriptor types are treated as missing entries so callers do
+        // not continue through malformed metadata.
         errno = ENOENT;
         return -1;
     } while (1);
@@ -143,6 +159,10 @@ struct VaFsFileHandle* vafs_file_create_handle(
     struct VaFsFile* fileEntry)
 {
     struct VaFsFileHandle* handle;
+
+    // Read handles get a private stream cursor immediately so later seeks and
+    // staged blocks stay local to the handle. Write handles still share the
+    // stream because write mode appends through one ordered staging buffer.
     
     handle = (struct VaFsFileHandle*)malloc(sizeof(struct VaFsFileHandle));
     if (!handle) {
@@ -157,6 +177,8 @@ struct VaFsFileHandle* vafs_file_create_handle(
 
     if (fileEntry->VaFs->Mode == VaFsMode_Read) {
         if (vafs_stream_reader_open(fileEntry->VaFs->DataStream, &handle->Reader) != 0) {
+            // Avoid returning a half-constructed read handle that is missing
+            // the private cursor it depends on.
             free(handle);
             return NULL;
         }
@@ -188,6 +210,8 @@ int vafs_file_close(
         vafs_stream_unlock(handle->File->VaFs->DataStream);
     }
 
+    // Close whichever read path resources were allocated when the handle was
+    // opened. This is a no-op for pure write-mode handles.
     if (handle->Reader != NULL) {
         vafs_stream_reader_close(handle->Reader);
     }
@@ -227,6 +251,9 @@ int vafs_file_seek(
         errno = EINVAL;
         return -1;
     }
+
+    // File seeks only update the logical file position. The private stream
+    // reader is repositioned lazily on the next read.
 
     // this is not valid when writing files
     if (handle->File->VaFs->Mode == VaFsMode_Write) {
@@ -270,6 +297,9 @@ size_t vafs_file_read(
         return 0;
     }
 
+    // Translate the file-relative position into the file's backing stream
+    // extent, then drive this handle's private stream reader from that point.
+
     // this is not valid when writing files
     if (handle->File->VaFs->Mode == VaFsMode_Write) {
         errno = ENOTSUP;
@@ -293,6 +323,7 @@ size_t vafs_file_read(
     }
 
     if (size == 0) {
+        // Zero-length and EOF reads do not touch the reader cursor.
         return 0;
     }
 
@@ -305,6 +336,8 @@ size_t vafs_file_read(
     }
 
     if (handle->Reader == NULL) {
+        // Read-mode handles should always own a reader; missing one means the
+        // handle was constructed incorrectly or already torn down.
         errno = EINVAL;
         return 0;
     }
@@ -342,6 +375,10 @@ size_t vafs_file_write(
         return -1;
     }
 
+    // Write mode keeps one ordered staging stream per image. The handle grabs
+    // that shared append path on first write, snapshots its starting position,
+    // and then keeps extending the same on-disk extent.
+
     // this is not valid when reading files
     if (handle->File->VaFs->Mode == VaFsMode_Read) {
         errno = ENOTSUP;
@@ -359,6 +396,8 @@ size_t vafs_file_write(
     }
 
     if (handle->File->Descriptor.Data.Offset == VA_FS_INVALID_OFFSET) {
+        // First write captures the file's starting block position so later
+        // reads know where this file begins inside the shared data stream.
         status = vafs_stream_position(handle->File->VaFs->DataStream, &block, &offset);
         if (status) {
             return -1;

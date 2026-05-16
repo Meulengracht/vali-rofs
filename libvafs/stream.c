@@ -94,6 +94,8 @@ static int __new_stream(
     struct VaFsStream* stream;
 
     VAFS_DEBUG("__new_stream(offset=%lu)\n", deviceOffset);
+    // Build the shared stream shell first. Read mode attaches private cursors
+    // later, while write mode keeps its staging buffer directly on the stream.
     
     stream = (struct VaFsStream*)malloc(sizeof(struct VaFsStream));
     if (!stream) {
@@ -127,6 +129,8 @@ static int __allocate_blockbuffer(
 static int __allocate_reader_blockbuffer(
     struct VaFsStreamReader* reader)
 {
+    // Readers stage logical bytes privately so concurrent callers do not share
+    // offsets or block contents.
     reader->BlockBuffer = malloc(reader->Stream->Header.BlockSize);
     if (!reader->BlockBuffer) {
         errno = ENOMEM;
@@ -150,6 +154,8 @@ int vafs_stream_create(
         return -1;
     }
 
+    // Creation is front-loaded: initialize the stream header on disk now, then
+    // keep later writes in memory until finish() serializes the trailing index.
     status = __new_stream(device, deviceOffset, &stream);
     if (status != 0) {
         return -1;
@@ -401,6 +407,8 @@ int vafs_stream_reader_open(
         return -1;
     }
 
+    // Allocate one cursor per caller so sequential reuse stays local to that
+    // handle instead of being serialized through the shared stream object.
     reader = malloc(sizeof(struct VaFsStreamReader));
     if (reader == NULL) {
         errno = ENOMEM;
@@ -426,6 +434,7 @@ void vafs_stream_reader_close(
         return;
     }
 
+    // Readers only own their private staging buffer plus the cursor wrapper.
     free(reader->BlockBuffer);
     free(reader);
 }
@@ -462,6 +471,10 @@ static int __load_blockbuffer(
     int                 status;
     VAFS_DEBUG("__load_blockbuffer(block=%u)\n", blockIndex);
 
+    // Materialize one logical block into the reader-local staging buffer.
+    // The order is cache copy, device read, optional decode, CRC validation,
+    // and finally best-effort cache refill.
+
     // Reads always prefer cached blocks because cache entries already hold the
     // final logical bytes for the block.
     status = vafs_cache_get(
@@ -472,11 +485,15 @@ static int __load_blockbuffer(
         &blockSize
     );
     if (status == 0) {
+        // Cache reads copy into the reader buffer so callers never observe a
+        // cache-owned allocation that another reader could evict underneath.
         reader->BlockBufferLength = (uint32_t)blockSize;
         reader->BlockBufferValid = 1;
         return 0;
     }
 
+    // Cache miss falls back to the persisted block table for the physical
+    // location and storage format of this logical block.
     blockHeader = __get_block_header(stream, blockIndex);
     if (!blockHeader) {
         VAFS_ERROR("__load_blockbuffer: invalid block index: %u\n", blockIndex);
@@ -495,6 +512,8 @@ static int __load_blockbuffer(
 
     status = vafs_streamdevice_read_at(stream->Device, stream->DeviceOffset + blockHeader->Offset, blockData, blockSize, &read);
     if (status || read != blockSize) {
+        // Positioned reads must return the entire persisted block; partial
+        // reads would make decode and CRC verification ambiguous.
         VAFS_ERROR("__load_blockbuffer: failed to read block: %u\n", blockIndex);
         free(blockData);
         return status;
@@ -567,6 +586,9 @@ int vafs_stream_reader_seek(
 
     stream = reader->Stream;
 
+    // Normalize the caller's logical file offset into one concrete block plus
+    // an in-block offset, then reuse or restage bytes for this reader only.
+
     // Resolve the caller's logical position before deciding whether the staged
     // block can satisfy it directly.
     // Validate block index against block count
@@ -631,6 +653,8 @@ int vafs_stream_reader_seek(
     }
 
     if (targetOffset >= reader->BlockBufferLength) {
+        // The tail block can be shorter than the stream block size, so reject
+        // seeks that land past the logical bytes actually materialized.
         errno = EINVAL;
         return -1;
     }
@@ -650,6 +674,8 @@ static int __add_block_header(
 
     offset = vafs_streamdevice_seek(stream->Device, 0, SEEK_CUR);
 
+    // Record where the just-flushed logical block ended up on disk so readers
+    // can map logical block numbers back to physical offsets later.
     VAFS_DEBUG("__add_block_header: adding block mapping %u => %lu\n",
         stream->BlockBufferIndex, offset);
     VAFS_DEBUG("__add_block_header: block length %u\n", blockLength);
@@ -831,6 +857,9 @@ int vafs_stream_reader_read(
 
     stream = reader->Stream;
 
+    // Drain the reader-local staged block first and only fetch a new block
+    // when this cursor reaches the end of the bytes it already owns.
+
     // Drain the currently staged block first and only load the next block when
     // the caller crosses a block boundary.
     // read the data from stream, taking care of block boundaries
@@ -838,6 +867,7 @@ int vafs_stream_reader_read(
         size_t byteCount;
 
         if (!reader->BlockBufferValid) {
+            // Reads must be preceded by a seek that stages the initial block.
             *bytesRead = size - bytesToRead;
             errno = ENODATA;
             return -1;
@@ -845,12 +875,16 @@ int vafs_stream_reader_read(
 
         if (reader->BlockBufferOffset >= reader->BlockBufferLength) {
             if (reader->BlockBufferIndex + 1 >= stream->BlockHeaders.Count) {
+                // The caller asked for bytes beyond the staged tail block and
+                // the stream has no successor block to advance into.
                 *bytesRead = size - bytesToRead;
                 errno = ENODATA;
                 return -1;
             }
 
             if (__load_blockbuffer(reader, reader->BlockBufferIndex + 1)) {
+                // Once sequential read-ahead fails, report the bytes already
+                // copied and stop rather than silently skipping corrupted data.
                 VAFS_ERROR("vafs_stream_read: failed to load block\n");
                 *bytesRead = size - bytesToRead;
                 errno = ENODATA;
@@ -901,6 +935,9 @@ static int __write_block_headers(
     long   offset;
     VAFS_DEBUG("__write_index_mapping()\n");
 
+    // Append the accumulated block table at the device tail, then patch the
+    // stream header to point at that final serialized index.
+
     // get current offset
     offset = vafs_streamdevice_seek(stream->Device, 0, SEEK_CUR);
     status = vafs_streamdevice_write(
@@ -932,6 +969,9 @@ static int __update_stream_header(
     long   original;
     long   position;
     VAFS_DEBUG("__update_stream_header()\n");
+
+    // finish() streams data forward first, so patch the header in place only
+    // after everything else is written and then restore the caller's position.
 
     original = vafs_streamdevice_seek(stream->Device, 0, SEEK_CUR);
     position = (int)vafs_streamdevice_seek(stream->Device, stream->DeviceOffset, SEEK_SET);
@@ -968,6 +1008,8 @@ int vafs_stream_finish(
         return -1;
     }
 
+    // Finalization is ordered: flush the tail block, append the block table,
+    // then update the stream header once its final offsets are known.
     status = __flush_block(stream);
     if (status) {
         VAFS_ERROR("vafs_stream_finish: failed to flush block\n");

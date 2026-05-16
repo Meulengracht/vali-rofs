@@ -313,6 +313,8 @@ static void __free_directory_index(struct VaFsDirectoryEntry** index)
 
 static void __free_directory_name_index(struct VaFsDirectoryReader* reader)
 {
+    // Large read-mode directories build this hash table lazily, so only tear
+    // it down when initialization actually completed.
     if (reader->NameIndexInitialized) {
         vafs_hashtable_destroy(&reader->NameIndex);
         memset(&reader->NameIndex, 0, sizeof(hashtable_t));
@@ -322,6 +324,8 @@ static void __free_directory_name_index(struct VaFsDirectoryReader* reader)
 
 static void __directory_reader_destroy(struct VaFsDirectoryReader* reader)
 {
+    // Reader teardown releases fully materialized entries, any derived lookup
+    // indexes, and finally the private descriptor-stream cursor.
     __cleanup_directory_entries(reader->Entries);
     __free_directory_index(reader->Index);
     __free_directory_name_index(reader);
@@ -810,6 +814,10 @@ static int __read_descriptor(
         return -1;
     }
 
+    // Consume one descriptor record from the reader-local cursor: the generic
+    // base header first, then the fixed type-specific body, then any trailing
+    // variable-length payload such as names or symlink targets.
+
     status = vafs_stream_reader_read(
         reader->Reader,
         buffer, sizeof(VaFsDescriptor_t),
@@ -825,6 +833,8 @@ static int __read_descriptor(
     
     size = __get_descriptor_size(base->Type);
     if (base->Length < sizeof(VaFsDescriptor_t) || !size) {
+        // The fixed descriptor body must be at least the generic base header,
+        // and the type must resolve to a known in-memory descriptor layout.
         VAFS_ERROR("__read_descriptor: invalid descriptor size: %i for type %i\n", base->Length, base->Type);
         errno = EINVAL;
         return -1;
@@ -833,6 +843,9 @@ static int __read_descriptor(
     if (base->Length > sizeof(VaFsDescriptor_t)) {
         VAFS_DEBUG("__read_descriptor: read %u/%u descriptor bytes, reading rest\n", 
             sizeof(VaFsDescriptor_t), size);
+
+        // Some descriptor types have a larger fixed header than the generic
+        // base descriptor, so read that fixed body before any trailing payload.
 
         status = vafs_stream_reader_read(
             reader->Reader,
@@ -848,6 +861,8 @@ static int __read_descriptor(
             VAFS_DEBUG("__read_descriptor: read %u/%u bytes, reading descriptor extension data\n",
                 size, base->Length);
 
+            // Names and symlink targets live beyond the fixed descriptor body,
+            // so preserve the trailing bytes separately for the constructors.
             // read rest of descriptor
             char* extendedBuffer = (char*)malloc(base->Length - size);
             if (!extendedBuffer) {
@@ -920,6 +935,10 @@ static struct VaFsDirectory* __create_directory_from_descriptor(
 {
     struct VaFsDirectoryReader* directory;
 
+    // Read-mode directories stay lazy: keep the on-disk descriptor now and
+    // defer allocating a descriptor reader or parsing child entries until the
+    // first traversal actually needs them.
+
     // Validate the directory descriptor
     if (__validate_directory_descriptor(descriptor, extendedData) != 0) {
         errno = EINVAL;
@@ -988,6 +1007,8 @@ static struct VaFsDirectoryEntry* __create_entry_from_descriptor(
     }
     memset(entry, 0, sizeof(struct VaFsDirectoryEntry));
 
+    // Convert the raw descriptor into the matching in-memory entry wrapper so
+    // later traversal can branch on one normalized entry type.
     entry->Type = descriptor->Type;
     if (entry->Type == VA_FS_DESCRIPTOR_TYPE_FILE) {
         entry->File = __create_file_from_descriptor(vafs, (VaFsFileDescriptor_t*)descriptor, extendedData);
@@ -1011,13 +1032,20 @@ static int __load_directory(
 
     VAFS_DEBUG("__load_directory(directory=%s)\n", reader->Base.Name);
 
+    // Materialize the directory once: create a private descriptor cursor if
+    // needed, seek to the directory payload, stream entries in order, and then
+    // build whichever lookup accelerator matches the directory size.
+
     // if the directory has no entries, we can skip loading it
     if (reader->Base.Descriptor.Descriptor.Index == VA_FS_INVALID_BLOCK) {
+        // Empty directories have no persisted descriptor payload to parse.
         reader->State = VaFsDirectoryState_Loaded;
         return 0;
     }
 
     if (reader->Reader == NULL) {
+        // The descriptor stream reader is allocated lazily so unopened
+        // directories do not pay for a cursor or block buffer up front.
         status = vafs_stream_reader_open(reader->Base.VaFs->DescriptorStream, &reader->Reader);
         if (status != 0) {
             VAFS_ERROR("__load_directory: failed to create stream reader\n");
@@ -1063,6 +1091,8 @@ static int __load_directory(
         char                       buffer[64];
         char*                      extendedData = NULL;
         VAFS_INFO("__load_directory: reading entry %i/%u\n", i, header.Count);
+        // Each loop iteration consumes one on-disk descriptor and immediately
+        // converts it into the normalized in-memory entry type.
         
         status = __read_descriptor(reader, &buffer[0], &extendedData);
         if (status) {
@@ -1088,10 +1118,13 @@ static int __load_directory(
     reader->State = VaFsDirectoryState_Loaded;
     reader->IndexDirty = 1;
     if (__directory_uses_name_index(&reader->Base)) {
+        // Very large directories pay the extra memory for a direct name index.
         if (__vafs_directory_name_index(&reader->Base) == NULL && reader->EntryCount != 0) {
             return -1;
         }
     } else if (__vafs_directory_index(&reader->Base) == NULL && reader->EntryCount != 0) {
+        // Smaller directories keep only the sorted vector used for binary
+        // search and iteration order reconstruction.
         return -1;
     }
     return 0;
@@ -1103,6 +1136,9 @@ int vafs_directory_open_root(
     struct VaFsDirectory** directoryOut)
 {
     struct VaFsDirectoryReader* reader;
+
+    // Root opens as a lazy read-mode wrapper around the persisted root
+    // descriptor position stored in the filesystem header.
     
     if (vafs == NULL || position == NULL || directoryOut == NULL) {
         errno = EINVAL;
@@ -1229,7 +1265,6 @@ int __vafs_directory_open_internal(
 
         entry = __vafs_directory_find_entry(currentDirectory, token);
         if (entry == NULL) {
-            errno = ENOENT;
             return -1;
         }
 
@@ -1492,7 +1527,8 @@ int vafs_directory_read(
         return -1;
     }
 
-    __vafs_directory_entries(handle->Directory);
+    // make sure directory entries are loaded and indexed
+    (void)__vafs_directory_entries(handle->Directory);
 
     count = __directory_entry_count(handle->Directory);
     VAFS_DEBUG("vafs_directory_read: locate index %i\n", handle->Index);
@@ -1504,6 +1540,10 @@ int vafs_directory_read(
 
     // Directory iteration preserves the stored list order for compatibility.
     entry = __vafs_directory_entries(handle->Directory);
+    if (entry == NULL) {
+        return -1;
+    }
+
     for (i = 0; i < (size_t)handle->Index; i++) {
         if (entry == NULL) {
             errno = ENOENT;
@@ -1749,7 +1789,6 @@ int vafs_directory_open_directory(
     // find the name in the directory
     entry = __vafs_directory_find_entry(handle->Directory, token);
     if (entry == NULL) {
-        errno = ENOENT;
         return -1;
     }
 
@@ -1838,7 +1877,6 @@ int vafs_directory_open_file(
     // find the name in the directory
     entry = __vafs_directory_find_entry(handle->Directory, token);
     if (entry == NULL) {
-        errno = ENOENT;
         return -1;
     }
 
@@ -1964,7 +2002,6 @@ int vafs_directory_read_symlink(
     VAFS_DEBUG("vafs_directory_read_symlink: locating %s\n", token);
     entry = __vafs_directory_find_entry(handle->Directory, token);
     if (entry == NULL) {
-        errno = ENOENT;
         return -1;
     }
     

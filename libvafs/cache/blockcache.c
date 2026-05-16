@@ -63,6 +63,10 @@ struct VaFsBlockCache* __block_cache_new(void)
 {
     struct VaFsBlockCache* cache;
     int                    status;
+
+    // Construct the cache as one fully-owned unit: mutex first, then the real
+    // storage table, then the admission heatmap used to decide what is worth
+    // caching in the first place.
     
     cache = malloc(sizeof(struct VaFsBlockCache));
     if (!cache) {
@@ -123,6 +127,8 @@ void vafs_cache_destroy(struct VaFsBlockCache* cache)
     if (!cache) {
         return;
     }
+
+    // The cache owns duplicated block buffers as well as both hashtables.
     
     vafs_hashtable_enumerate(&cache->cache, __cache_enum_free, NULL);
     vafs_hashtable_destroy(&cache->cache);
@@ -134,6 +140,9 @@ void vafs_cache_destroy(struct VaFsBlockCache* cache)
 static void __heatmap_hit(struct VaFsBlockCache* cache, uint32_t index)
 {
     struct __heatmap_entry* entry;
+
+    // Every lookup updates the heatmap, even real cache misses, because block
+    // admission is based on repeated demand rather than first touch.
 
     entry = vafs_hashtable_get(&cache->heatmap, &(struct __heatmap_entry) { .index = index });
     if (entry != NULL) {
@@ -159,6 +168,9 @@ int vafs_cache_get(struct VaFsBlockCache* cache, uint32_t index, void* buffer, s
         return -1;
     }
 
+    // Copy out under the cache lock so readers never borrow raw cache-owned
+    // pointers that another thread could evict immediately after lookup.
+
     if (mtx_lock(&cache->lock) != thrd_success) {
         errno = EBUSY;
         return -1;
@@ -172,6 +184,8 @@ int vafs_cache_get(struct VaFsBlockCache* cache, uint32_t index, void* buffer, s
 
     block = vafs_hashtable_get(&cache->cache, &(struct __block_entry){ .index = index });
     if (!block) {
+        // Misses still count toward future admission through the heatmap, but
+        // there is no resident block to serve right now.
         mtx_unlock(&cache->lock);
         return -1;
     }
@@ -181,6 +195,8 @@ int vafs_cache_get(struct VaFsBlockCache* cache, uint32_t index, void* buffer, s
     block->uses++;
 
     if (bufferCapacity < block->size) {
+        // The caller decides the destination buffer size, so fail rather than
+        // truncating a cached block copy.
         mtx_unlock(&cache->lock);
         errno = EINVAL;
         return -1;
@@ -197,12 +213,17 @@ static void __eject_lowuse(struct VaFsBlockCache* cache)
     struct cache_enum_context context = { .index = UINT_MAX, .uses = INT_MAX };
     struct __block_entry*     block;
 
+    // Once the cache reaches capacity, evict the least-used resident entry
+    // before admitting a new block.
+
     if (cache->cache.element_count < cache->max_blocks) {
         return;
     }
 
     vafs_hashtable_enumerate(&cache->cache, __cache_enum, &context);
     if (context.index == UINT_MAX) {
+        // No victim means the table was empty or inconsistent; either way a
+        // no-op is safer than removing an arbitrary entry.
         return; // what?
     }
     
@@ -236,6 +257,9 @@ int vafs_cache_set(struct VaFsBlockCache* cache, uint32_t index, void* buffer, s
         return -1;
     }
 
+    // Admission is conservative: only frequently reused blocks get duplicated
+    // into cache storage, and duplicate races are treated as success.
+
     if (mtx_lock(&cache->lock) != thrd_success) {
         errno = EBUSY;
         return -1;
@@ -252,6 +276,8 @@ int vafs_cache_set(struct VaFsBlockCache* cache, uint32_t index, void* buffer, s
     // Ensure that the block doesn't already exist in the system.
     block = vafs_hashtable_get(&cache->cache, &(struct __block_entry){ .index = index });
     if (block != NULL) {
+        // Two readers can race to cache the same block; the later insert does
+        // not need to surface an error because the block is already resident.
         mtx_unlock(&cache->lock);
         return 0;
     }

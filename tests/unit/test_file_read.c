@@ -281,6 +281,8 @@ static int blocking_read_at(void* userData, long offset, void* buffer, size_t le
         return -1;
     }
 
+    // When blocking is enabled, hold the first two readAt calls long enough
+    // for the test to observe whether both file handles reach the backend.
     if (InterlockedCompareExchange(&image->BlockingEnabled, 0, 0) != 0) {
         LONG readCalls = InterlockedIncrement(&image->BlockingReadCalls);
 
@@ -306,6 +308,8 @@ static DWORD WINAPI concurrent_read_worker(LPVOID parameter)
 {
     struct ConcurrentReadWorker* worker = parameter;
 
+    // Run one file-handle read to completion and capture both the byte count
+    // and the thread-local errno visible to the caller path.
     worker->BytesRead = vafs_file_read(worker->File, worker->Buffer, worker->Size);
     worker->ErrnoValue = errno;
     return 0;
