@@ -78,7 +78,6 @@ int __vafs_file_open_internal(
 
         entry = __vafs_directory_find_entry(currentDirectory, token);
         if (entry == NULL) {
-            errno = ENOENT;
             return -1;
         }
 
@@ -116,7 +115,7 @@ int __vafs_file_open_internal(
 
         if (entry->Type == VA_FS_DESCRIPTOR_TYPE_FILE) {
             if (remainingPath[0] != '\0') {
-                errno = EISDIR;
+                errno = ENOTDIR;
                 return -1;
             }
 
@@ -280,6 +279,10 @@ size_t vafs_file_read(
         size = bytesRemaining;
     }
 
+    if (size == 0) {
+        return 0;
+    }
+
     // Check for integer overflow in offset calculation
     readOffset = handle->File->Descriptor.Data.Offset + handle->Position;
     if (readOffset < handle->File->Descriptor.Data.Offset) {
@@ -304,8 +307,14 @@ size_t vafs_file_read(
         return 0;
     }
 
-    (void)vafs_stream_read(handle->File->VaFs->DataStream, buffer, size, &read);
+    status = vafs_stream_read(handle->File->VaFs->DataStream, buffer, size, &read);
     vafs_stream_unlock(handle->File->VaFs->DataStream);
+
+    if (status) {
+        return 0;
+    }
+
+    handle->Position = handle->Position + (uint32_t)read;
     return read;
 }
 

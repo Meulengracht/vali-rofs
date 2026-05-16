@@ -378,7 +378,6 @@ static int large_file_read_run(void* user_data)
     // Read entire file in chunks
     while ((bytes_read = vafs_file_read(ctx->handle, ctx->buffer, ctx->buffer_size)) > 0) {
         total_read += bytes_read;
-        vafs_file_seek(ctx->handle, (long)bytes_read, SEEK_CUR);
     }
 
     ctx->bytes_read = total_read;
