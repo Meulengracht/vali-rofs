@@ -27,7 +27,7 @@
 #include <sys/stat.h>
 
 #include "dirent_win32.h"
-#include "../ntifs_win32.h"
+#include "ntifs_win32.h"
 
 static sRtlNtStatusToDosError        pRtlNtStatusToDosError;
 static sNtQueryInformationFile       pNtQueryInformationFile;
