@@ -109,6 +109,10 @@ enum VaFsEntryType {
     VaFsEntryType_File,
     VaFsEntryType_Directory,
     VaFsEntryType_Symlink,
+    VaFsEntryType_CharacterDevice,
+    VaFsEntryType_BlockDevice,
+    VaFsEntryType_Fifo,
+    VaFsEntryType_Hardlink,
 };
 
 /**
@@ -117,6 +121,8 @@ enum VaFsEntryType {
 struct VaFsEntry {
     const char*        Name;
     enum VaFsEntryType Type;
+    uint64_t           ObjectId;
+    uint32_t           MetadataMask;
 };
 
 /**

@@ -399,7 +399,7 @@ Read-mode directory lookup uses two internal strategies depending on directory s
 - Very large directories build a secondary hash index keyed by entry name and bypass the binary-search path.
 - Directory iteration still follows the stored linked-list order so enumeration semantics do not change when the faster lookup index is enabled.
 - `vafs_path_stat()` reuses that same cached lookup path instead of maintaining a separate linear walk.
-- File, directory, and symlink objects cache their `struct vafs_stat` materialization in read mode so repeated `getattr` and `access`-style calls do not rebuild mode and size metadata on every lookup.
+- File, directory, and symlink objects cache their `struct VaFsMetadata` materialization in read mode so repeated `getattr` and `access`-style calls do not rebuild mode, size, and link metadata on every lookup.
 
 Read-mode path traversal also keeps a bounded component lookup cache keyed by `(parent directory pointer, child name)`:
 
@@ -668,15 +668,16 @@ FUSE: stat("/path")
     │
     └─► __vafs_getattr(path, stat, fi)
             ├─► If fi->fh exists: use file handle directly
-            │       ├─► stat->st_mode = vafs_file_permissions(handle)
-            │       ├─► stat->st_size = vafs_file_length(handle)
+            │       ├─► vafs_file_stat(handle, &metadata)
+            │       ├─► stat->st_mode = metadata.Mode
+            │       ├─► stat->st_size = metadata.Size
             │       └─► Return 0
             ├─► Else: use path resolution
-            │       ├─► vafs_path_stat(vafs, path, followLinks=0, &vstat)
-            │       ├─► stat->st_mode = vstat.mode (S_IFREG/S_IFDIR/S_IFLNK + perms)
-            │       ├─► stat->st_size = vstat.size
+            │       ├─► vafs_path_stat(vafs, path, followLinks=0, &metadata)
+            │       ├─► stat->st_mode = metadata.Mode (S_IFREG/S_IFDIR/S_IFLNK + perms)
+            │       ├─► stat->st_size = metadata.Size
             │       └─► Return 0
-            └─► Set other fields: st_blksize=512, st_nlink=1
+            └─► Set other fields: st_blksize=512, st_nlink from metadata when present
 ```
 
 Implementation: `tools/vafs.c:181-213`

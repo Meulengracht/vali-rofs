@@ -23,6 +23,7 @@
 #define __VAFS_SYMLINK_H__
 
 #include <vafs/vafs.h>
+#include <vafs/stat.h>
 
 /**
  * @brief Opens a symbolic link by absolute path without following it.

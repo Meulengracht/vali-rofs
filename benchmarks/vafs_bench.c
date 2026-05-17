@@ -560,7 +560,7 @@ static BenchmarkResult run_path_lookup_benchmark(const char* image_path, const c
 static int path_stat_setup(void* user_data)
 {
     PathStatBenchmarkContext* ctx = (PathStatBenchmarkContext*)user_data;
-    struct vafs_stat          statbuf;
+    struct VaFsMetadata       statbuf;
     int status;
 
     status = vafs_open_file(ctx->image_path, &ctx->vafs);
@@ -591,7 +591,7 @@ static int path_stat_setup(void* user_data)
 static int path_stat_run(void* user_data)
 {
     PathStatBenchmarkContext* ctx = (PathStatBenchmarkContext*)user_data;
-    struct vafs_stat statbuf;
+    struct VaFsMetadata statbuf;
     int status;
 
     status = vafs_path_stat(ctx->vafs, ctx->path, 1, &statbuf);
@@ -708,7 +708,7 @@ static int wide_lookup_setup(void* user_data)
 static int wide_lookup_run(void* user_data)
 {
     WideLookupBenchmarkContext* ctx = (WideLookupBenchmarkContext*)user_data;
-    struct vafs_stat statbuf;
+    struct VaFsMetadata statbuf;
     size_t index;
     char path_buffer[1024];
     int status;

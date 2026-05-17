@@ -47,6 +47,20 @@ struct progress_context {
 
 extern int __install_filters(struct VaFs* vafs, const char* descriptorFilterName, const char* dataFilterName);
 
+static struct VaFsMetadata __metadata_for_mode(
+    enum VaFsEntryType type,
+    uint32_t           mode)
+{
+    struct VaFsMetadata metadata;
+
+    // The builder still discovers host metadata incrementally. Packaging the
+    // common type-plus-mode conversion here keeps the call sites readable while
+    // making the new metadata contract explicit at every creation site.
+    vafs_metadata_initialize(&metadata);
+    vafs_metadata_set_mode(&metadata, type, mode);
+    return metadata;
+}
+
 // Prints usage format of this program
 static void __show_help(void)
 {
@@ -151,6 +165,7 @@ static int __write_file(
     const char*                 filename,
     uint32_t                    permissions)
 {
+    struct VaFsMetadata   metadata = __metadata_for_mode(VaFsEntryType_File, permissions);
     struct VaFsFileHandle* fileHandle;
     FILE*                  file;
     long                   fileSize;
@@ -158,7 +173,7 @@ static int __write_file(
     int                    status;
 
     // create the VaFS file
-    status = vafs_directory_create_file(directoryHandle, filename, permissions, &fileHandle);
+    status = vafs_directory_create_file(directoryHandle, filename, &metadata, &fileHandle);
     if (status) {
         fprintf(stderr, "mkvafs: failed to create file '%s'\n", filename);
         return -1;
@@ -616,13 +631,16 @@ static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, con
         int                         status;
 
         if (vafs_directory_open_directory(handle, &temp[0], &next)) {
+            struct VaFsMetadata metadata;
+
             status = symlink_utils_ministat(&full[0], &filemode);
             if (status) {
                 fprintf(stderr, "mkvafs: failed to stat %s\n", &full[0]);
                 return NULL;
             }
 
-            status = vafs_directory_create_directory(handle, &temp[0], platform_fs_mode_permissions(filemode), &next);
+            metadata = __metadata_for_mode(VaFsEntryType_Directory, platform_fs_mode_permissions(filemode));
+            status = vafs_directory_create_directory(handle, &temp[0], &metadata, &next);
             if (status) {
                 fprintf(stderr, "mkvafs: failed to create directory %s\n", &temp[0]);
                 return NULL;
@@ -723,13 +741,15 @@ static int __create_image(struct __options* opts)
 
         if (entry->type == PLATFORM_FILETYPE_SYMLINK) {
             char* linkpath = NULL;
+            struct VaFsMetadata metadata = __metadata_for_mode(VaFsEntryType_Symlink, 0777);
+
             status = symlink_utils_read(entry->path, &linkpath);
             if (status != 0) {
                 fprintf(stderr, "mkvafs: failed to read link %s\n", entry->path);
                 break;
             }
 
-            status = vafs_directory_create_symlink(directoryHandle, entry->path, linkpath);
+            status = vafs_directory_create_symlink(directoryHandle, entry->path, linkpath, &metadata);
             free(linkpath);
 
             if (status != 0) {

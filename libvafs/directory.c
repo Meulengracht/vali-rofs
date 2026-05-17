@@ -66,45 +66,68 @@ static void __initialize_symlink_descriptor(
 }
 
 static int __vafs_file_stat_internal(
-    struct VaFsFile*  file,
-    struct vafs_stat* stat)
+    struct VaFsFile*     file,
+    struct VaFsMetadata* metadata)
 {
     if (file->VaFs->Mode == VaFsMode_Read && file->StatCached) {
-        *stat = file->Stat;
+        *metadata = file->Stat;
         return 0;
     }
 
-    stat->mode = S_IFREG | file->Descriptor.Permissions;
-    stat->size = file->Descriptor.FileLength;
+    vafs_metadata_initialize(metadata);
+    metadata->Type = VaFsEntryType_File;
+    metadata->Mode = S_IFREG | file->Descriptor.Permissions;
+    metadata->Size = file->Descriptor.FileLength;
+    metadata->LinkCount = 1;
+    metadata->Mask = VaFsMetadataMask_Type |
+        VaFsMetadataMask_Mode |
+        VaFsMetadataMask_Size |
+        VaFsMetadataMask_LinkCount;
+
     if (file->VaFs->Mode == VaFsMode_Read) {
-        file->Stat = *stat;
+        file->Stat = *metadata;
         file->StatCached = 1;
     }
     return 0;
 }
 
 static int __vafs_directory_stat_internal(
-    struct VaFsDirectory* directory,
-    struct vafs_stat*     stat)
+    struct VaFsDirectory*  directory,
+    struct VaFsMetadata*   metadata)
 {
-    stat->mode = S_IFDIR | directory->Descriptor.Permissions;
-    stat->size = 0;
+    vafs_metadata_initialize(metadata);
+    metadata->Type = VaFsEntryType_Directory;
+    metadata->Mode = S_IFDIR | directory->Descriptor.Permissions;
+    metadata->Size = 0;
+    metadata->LinkCount = 1;
+    metadata->Mask = VaFsMetadataMask_Type |
+        VaFsMetadataMask_Mode |
+        VaFsMetadataMask_Size |
+        VaFsMetadataMask_LinkCount;
     return 0;
 }
 
 static int __vafs_symlink_stat_internal(
-    struct VaFsSymlink* symlink,
-    struct vafs_stat*   stat)
+    struct VaFsSymlink*  symlink,
+    struct VaFsMetadata* metadata)
 {
     if (symlink->VaFs->Mode == VaFsMode_Read && symlink->StatCached) {
-        *stat = symlink->Stat;
+        *metadata = symlink->Stat;
         return 0;
     }
 
-    stat->mode = S_IFLNK | 0777;
-    stat->size = strlen(symlink->Target);
+    vafs_metadata_initialize(metadata);
+    metadata->Type = VaFsEntryType_Symlink;
+    metadata->Mode = S_IFLNK | 0777;
+    metadata->Size = strlen(symlink->Target);
+    metadata->LinkCount = 1;
+    metadata->Mask = VaFsMetadataMask_Type |
+        VaFsMetadataMask_Mode |
+        VaFsMetadataMask_Size |
+        VaFsMetadataMask_LinkCount;
+
     if (symlink->VaFs->Mode == VaFsMode_Read) {
-        symlink->Stat = *stat;
+        symlink->Stat = *metadata;
         symlink->StatCached = 1;
     }
     return 0;
@@ -215,20 +238,20 @@ struct VaFsDirectoryEntry* __vafs_directory_find_entry(
 
 int __vafs_directory_entry_stat(
     struct VaFsDirectoryEntry* entry,
-    struct vafs_stat*          stat)
+    struct VaFsMetadata*       metadata)
 {
-    if (entry == NULL || stat == NULL) {
+    if (entry == NULL || metadata == NULL) {
         errno = EINVAL;
         return -1;
     }
 
     switch (entry->Type) {
         case VA_FS_DESCRIPTOR_TYPE_FILE:
-            return __vafs_file_stat_internal(entry->File, stat);
+            return __vafs_file_stat_internal(entry->File, metadata);
         case VA_FS_DESCRIPTOR_TYPE_DIRECTORY:
-            return __vafs_directory_stat_internal(entry->Directory, stat);
+            return __vafs_directory_stat_internal(entry->Directory, metadata);
         case VA_FS_DESCRIPTOR_TYPE_SYMLINK:
-            return __vafs_symlink_stat_internal(entry->Symlink, stat);
+            return __vafs_symlink_stat_internal(entry->Symlink, metadata);
         default:
             errno = EINVAL;
             return -1;
@@ -1092,14 +1115,16 @@ int vafs_directory_flush(
     return 0;
 }
 
-uint32_t vafs_directory_permissions(
-    struct VaFsDirectoryHandle* handle)
+int vafs_directory_stat(
+    struct VaFsDirectoryHandle* handle,
+    struct VaFsMetadata*        metadata)
 {
-    if (handle == NULL) {
+    if (handle == NULL || metadata == NULL) {
         errno = EINVAL;
-        return (uint32_t)-1;
+        return -1;
     }
-    return handle->Directory->Descriptor.Permissions;
+
+    return __vafs_directory_stat_internal(handle->Directory, metadata);
 }
 
 static size_t __directory_entry_count(
@@ -1159,6 +1184,40 @@ int vafs_directory_read(
     // initialize the entry structure
     entryOut->Name = __vafs_directory_entry_name(entry);
     entryOut->Type = (enum VaFsEntryType)entry->Type;
+    entryOut->ObjectId = 0;
+    entryOut->MetadataMask = VaFsMetadataMask_Type |
+        VaFsMetadataMask_Mode |
+        VaFsMetadataMask_Size |
+        VaFsMetadataMask_LinkCount;
+    return 0;
+}
+
+static int __metadata_permissions_for_create(
+    const struct VaFsMetadata* metadata,
+    enum VaFsEntryType         expectedType,
+    uint32_t*                  permissionsOut)
+{
+    if (metadata == NULL || permissionsOut == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if ((metadata->Mask & VaFsMetadataMask_Mode) == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if ((metadata->Mask & VaFsMetadataMask_Type) != 0 &&
+        metadata->Type != VaFsEntryType_Unknown &&
+        metadata->Type != expectedType) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    // The create verb still decides the persisted descriptor type today.
+    // Keeping only the permission subset here avoids pretending the legacy
+    // descriptor format can store the whole metadata struct already.
+    *permissionsOut = metadata->Mode & 07777u;
     return 0;
 }
 
@@ -1386,19 +1445,25 @@ int vafs_directory_open_directory(
 int vafs_directory_create_directory(
     struct VaFsDirectoryHandle*  handle,
     const char*                  name,
-    uint32_t                     permissions,
+    const struct VaFsMetadata*   metadata,
     struct VaFsDirectoryHandle** handleOut)
 {
 
     struct VaFsDirectoryWriter* writer;
     int                         status;
     struct VaFsDirectoryEntry*  entry;
+    uint32_t                    permissions;
     char                        token[VAFS_NAME_MAX + 1];
     VAFS_DEBUG("vafs_directory_create_directory(handle=%p, name=%s, handleOut=%p)\n", handle, name, handleOut);
 
-    if (handle == NULL || name == NULL || handleOut == NULL) {
+    if (handle == NULL || name == NULL || metadata == NULL || handleOut == NULL) {
         errno = EINVAL;
         return -1;
+    }
+
+    status = __metadata_permissions_for_create(metadata, VaFsEntryType_Directory, &permissions);
+    if (status != 0) {
+        return status;
     }
 
     if (handle->Directory->VaFs->Mode != VaFsMode_Write) {
@@ -1474,18 +1539,24 @@ int vafs_directory_open_file(
 int vafs_directory_create_file(
     struct VaFsDirectoryHandle* handle,
     const char*                 name,
-    uint32_t                    permissions,
+    const struct VaFsMetadata*  metadata,
     struct VaFsFileHandle**     handleOut)
 {
     struct VaFsDirectoryWriter* writer;
     int                         status;
     struct VaFsDirectoryEntry*  entry;
+    uint32_t                    permissions;
     char                        token[VAFS_NAME_MAX + 1];
     VAFS_DEBUG("vafs_directory_create_file(name=%s)\n", name);
 
-    if (handle == NULL || name == NULL || handleOut == NULL) {
+    if (handle == NULL || name == NULL || metadata == NULL || handleOut == NULL) {
         errno = EINVAL;
         return -1;
+    }
+
+    status = __metadata_permissions_for_create(metadata, VaFsEntryType_File, &permissions);
+    if (status != 0) {
+        return status;
     }
 
     // verify write mode
@@ -1521,14 +1592,20 @@ int vafs_directory_create_file(
 int vafs_directory_create_symlink(
     struct VaFsDirectoryHandle* handle,
     const char*                 name,
-    const char*                 target)
+    const char*                 target,
+    const struct VaFsMetadata*  metadata)
 {
     struct VaFsDirectoryEntry* entry;
     char                       token[VAFS_NAME_MAX + 1];
+    uint32_t                    ignoredPermissions;
     VAFS_DEBUG("vafs_directory_create_symlink(name=%s, target=%s)\n", name, target);
 
-    if (handle == NULL || name == NULL || target == NULL) {
+    if (handle == NULL || name == NULL || target == NULL || metadata == NULL) {
         errno = EINVAL;
+        return -1;
+    }
+
+    if (__metadata_permissions_for_create(metadata, VaFsEntryType_Symlink, &ignoredPermissions) != 0) {
         return -1;
     }
 
@@ -1552,6 +1629,32 @@ int vafs_directory_create_symlink(
     }
 
     errno = EEXIST;
+    return -1;
+}
+
+int vafs_directory_create_special(
+    struct VaFsDirectoryHandle* handle,
+    const char*                 name,
+    const struct VaFsMetadata*  metadata)
+{
+    (void)handle;
+    (void)name;
+    (void)metadata;
+
+    errno = ENOTSUP;
+    return -1;
+}
+
+int vafs_directory_create_hardlink(
+    struct VaFsDirectoryHandle* handle,
+    const char*                 name,
+    uint64_t                    objectId)
+{
+    (void)handle;
+    (void)name;
+    (void)objectId;
+
+    errno = ENOTSUP;
     return -1;
 }
 

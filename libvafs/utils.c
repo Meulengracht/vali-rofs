@@ -194,18 +194,18 @@ int __vafs_resolve_symlink(
 }
 
 int __vafs_path_stat_internal(
-    struct VaFs*      vafs,
-    const char*       path,
-    int               followLinks,
-    struct vafs_stat* stat,
-    int               symlinkDepth)
+    struct VaFs*         vafs,
+    const char*          path,
+    int                  followLinks,
+    struct VaFsMetadata* metadata,
+    int                  symlinkDepth)
 {
     struct VaFsDirectory*      currentDirectory;
     struct VaFsDirectoryEntry* entry;
     const char*                remainingPath = path;
     char                       token[VAFS_NAME_MAX + 1];
 
-    if (vafs == NULL || path == NULL || stat == NULL) {
+    if (vafs == NULL || path == NULL || metadata == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -221,8 +221,15 @@ int __vafs_path_stat_internal(
     // special case - root directory, we specfiy
     // default access for it for now
     if (__vafs_is_root_path(path)) {
-        stat->mode = S_IFDIR | 0755;
-        stat->size = 0;
+        vafs_metadata_initialize(metadata);
+        metadata->Type = VaFsEntryType_Directory;
+        metadata->Mode = S_IFDIR | 0755;
+        metadata->Size = 0;
+        metadata->LinkCount = 1;
+        metadata->Mask = VaFsMetadataMask_Type |
+            VaFsMetadataMask_Mode |
+            VaFsMetadataMask_Size |
+            VaFsMetadataMask_LinkCount;
         return 0;
     }
 
@@ -242,7 +249,7 @@ int __vafs_path_stat_internal(
 
         if (entry->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
             if (remainingPath[0] == '\0') {
-                return __vafs_directory_entry_stat(entry, stat);
+                return __vafs_directory_entry_stat(entry, metadata);
             }
 
             currentDirectory = entry->Directory;
@@ -252,7 +259,7 @@ int __vafs_path_stat_internal(
         if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
             if (!followLinks) {
                 if (remainingPath[0] == '\0') {
-                    return __vafs_directory_entry_stat(entry, stat);
+                    return __vafs_directory_entry_stat(entry, metadata);
                 }
 
                 errno = ENOTDIR;
@@ -281,7 +288,7 @@ int __vafs_path_stat_internal(
                 return -1;
             }
 
-            status = __vafs_path_stat_internal(vafs, pathBuffer, followLinks, stat, symlinkDepth + 1);
+            status = __vafs_path_stat_internal(vafs, pathBuffer, followLinks, metadata, symlinkDepth + 1);
             free(pathBuffer);
             return status;
         }
@@ -292,7 +299,7 @@ int __vafs_path_stat_internal(
                 return -1;
             }
 
-            return __vafs_directory_entry_stat(entry, stat);
+            return __vafs_directory_entry_stat(entry, metadata);
         }
 
         errno = ENOENT;
@@ -304,10 +311,10 @@ int __vafs_path_stat_internal(
 }
 
 int vafs_path_stat(
-    struct VaFs*      vafs,
-    const char*       path,
-    int               followLinks,
-    struct vafs_stat* stat)
+    struct VaFs*         vafs,
+    const char*          path,
+    int                  followLinks,
+    struct VaFsMetadata* metadata)
 {
-    return __vafs_path_stat_internal(vafs, path, followLinks, stat, 0);
+    return __vafs_path_stat_internal(vafs, path, followLinks, metadata, 0);
 }

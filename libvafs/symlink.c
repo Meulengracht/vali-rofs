@@ -141,3 +141,34 @@ int vafs_symlink_target(
     strncpy(buffer, handle->Symlink->Target, size);
     return 0;
 }
+
+int vafs_symlink_stat(
+        struct VaFsSymlinkHandle* handle,
+        struct VaFsMetadata*      metadata)
+{
+    if (handle == NULL || metadata == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (handle->Symlink->VaFs->Mode == VaFsMode_Read && handle->Symlink->StatCached) {
+        *metadata = handle->Symlink->Stat;
+        return 0;
+    }
+
+    vafs_metadata_initialize(metadata);
+    metadata->Type = VaFsEntryType_Symlink;
+    metadata->Mode = S_IFLNK | 0777;
+    metadata->Size = strlen(handle->Symlink->Target);
+    metadata->LinkCount = 1;
+    metadata->Mask = VaFsMetadataMask_Type |
+        VaFsMetadataMask_Mode |
+        VaFsMetadataMask_Size |
+        VaFsMetadataMask_LinkCount;
+
+    if (handle->Symlink->VaFs->Mode == VaFsMode_Read) {
+        handle->Symlink->Stat = *metadata;
+        handle->Symlink->StatCached = 1;
+    }
+    return 0;
+}

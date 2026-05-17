@@ -78,6 +78,7 @@ static int __extract_file(
     struct VaFsFileHandle* fileHandle,
     const char*            path)
 {
+    struct VaFsMetadata metadata;
     FILE*  file;
     size_t fileSize;
     void*  fileBuffer;
@@ -102,8 +103,12 @@ static int __extract_file(
     }
     fclose(file);
 
+    if (vafs_file_stat(fileHandle, &metadata) != 0) {
+        return -1;
+    }
+
     // update permissions on file
-    return platform_fs_chmod(path, vafs_file_permissions(fileHandle));
+    return platform_fs_chmod(path, metadata.Mode & 07777u);
 }
 
 static void __write_progress(const char* prefix, struct progress_context* context)
@@ -140,6 +145,7 @@ static int __extract_directory(
     const char*                 root,
     const char*                 path)
 {
+    struct VaFsMetadata metadata;
     struct VaFsEntry dp;
     int              status;
     char*            filepathBuffer;
@@ -152,7 +158,12 @@ static int __extract_directory(
             return status;
         }
 
-        if (!status && platform_fs_create_directory(path, vafs_directory_permissions(directoryHandle))) {
+        if (vafs_directory_stat(directoryHandle, &metadata) != 0) {
+            fprintf(stderr, "unmkvafs: failed to read directory metadata for '%s'\n", path);
+            return -1;
+        }
+
+        if (!status && platform_fs_create_directory(path, metadata.Mode & 07777u)) {
             fprintf(stderr, "unmkvafs: unable to create directory %s\n", path);
             return -1;
         }

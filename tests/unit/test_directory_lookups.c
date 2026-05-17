@@ -48,6 +48,17 @@ static void make_prefixed_entry_name(char* buffer, size_t buffer_size, const cha
     snprintf(buffer, buffer_size, "%s_%04d", prefix, index);
 }
 
+static struct VaFsMetadata metadata_for_mode(
+    enum VaFsEntryType type,
+    uint32_t           mode)
+{
+    struct VaFsMetadata metadata;
+
+    vafs_metadata_initialize(&metadata);
+    vafs_metadata_set_mode(&metadata, type, mode);
+    return metadata;
+}
+
 static int lookup_cache_has_state(
     struct VaFs*                vafs,
     struct VaFsDirectory*       parent,
@@ -115,15 +126,15 @@ static int assert_repeated_path_stat(
     size_t        expected_size,
     const char*   message)
 {
-    struct vafs_stat stat;
+    struct VaFsMetadata stat;
     int              status;
     int              i;
 
     for (i = 0; i < 32; i++) {
         status = vafs_path_stat(vafs, path, 1, &stat);
         TEST_ASSERT(status == 0, message);
-        TEST_ASSERT(stat.mode == expected_mode, "Unexpected mode returned from repeated path stat");
-        TEST_ASSERT(stat.size == expected_size, "Unexpected size returned from repeated path stat");
+        TEST_ASSERT(stat.Mode == expected_mode, "Unexpected mode returned from repeated path stat");
+        TEST_ASSERT(stat.Size == expected_size, "Unexpected size returned from repeated path stat");
     }
     return 0;
 }
@@ -139,7 +150,9 @@ static int test_wide_directory_lookup(void)
     struct VaFsFileHandle* file_handle = NULL;
     struct VaFsDirectoryEntry* small_dir_entry = NULL;
     struct VaFsDirectoryEntry* large_dir_entry = NULL;
-    struct vafs_stat statbuf;
+    struct VaFsMetadata statbuf;
+    struct VaFsMetadata dirMetadata = metadata_for_mode(VaFsEntryType_Directory, 0755);
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     char name[32];
     char collision_names[VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY + 1][32];
     char path_buffer[128];
@@ -162,16 +175,16 @@ static int test_wide_directory_lookup(void)
     status = vafs_directory_open(vafs, "/", &root);
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
-    status = vafs_directory_create_directory(root, "small_dir", 0755, &small_dir);
+    status = vafs_directory_create_directory(root, "small_dir", &dirMetadata, &small_dir);
     TEST_ASSERT(status == 0, "Failed to create small directory");
 
-    status = vafs_directory_create_directory(root, "large_dir", 0755, &large_dir);
+    status = vafs_directory_create_directory(root, "large_dir", &dirMetadata, &large_dir);
     TEST_ASSERT(status == 0, "Failed to create large directory");
 
     // Insert names in reverse order so lookup correctness does not depend on insertion order.
     for (i = SMALL_DIR_ENTRY_COUNT - 1; i >= 0; i--) {
         make_prefixed_entry_name(name, sizeof(name), "small", i);
-        status = vafs_directory_create_file(small_dir, name, 0644, &file_handle);
+        status = vafs_directory_create_file(small_dir, name, &fileMetadata, &file_handle);
         TEST_ASSERT(status == 0, "Failed to create small-directory file entry");
 
         if (i == 0) {
@@ -186,7 +199,7 @@ static int test_wide_directory_lookup(void)
 
     for (i = LARGE_DIR_ENTRY_COUNT - 1; i >= 0; i--) {
         make_entry_name(name, sizeof(name), i);
-        status = vafs_directory_create_file(large_dir, name, 0644, &file_handle);
+        status = vafs_directory_create_file(large_dir, name, &fileMetadata, &file_handle);
         TEST_ASSERT(status == 0, "Failed to create file entry");
 
         if (i == 0) {
@@ -200,10 +213,10 @@ static int test_wide_directory_lookup(void)
         file_handle = NULL;
     }
 
-    status = vafs_directory_create_directory(root, "nested_dir", 0755, &nested);
+    status = vafs_directory_create_directory(root, "nested_dir", &dirMetadata, &nested);
     TEST_ASSERT(status == 0, "Failed to create nested directory");
 
-    status = vafs_directory_create_file(nested, "inner_file", 0644, &file_handle);
+    status = vafs_directory_create_file(nested, "inner_file", &fileMetadata, &file_handle);
     TEST_ASSERT(status == 0, "Failed to create nested file");
     vafs_file_close(file_handle);
     file_handle = NULL;

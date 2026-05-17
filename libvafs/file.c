@@ -240,15 +240,35 @@ size_t vafs_file_length(
     return handle->File->Descriptor.FileLength;
 }
 
-uint32_t vafs_file_permissions(
-    struct VaFsFileHandle* handle)
+int vafs_file_stat(
+    struct VaFsFileHandle* handle,
+    struct VaFsMetadata*   metadata)
 {
-    if (!handle) {
+    if (!handle || metadata == NULL) {
         errno = EINVAL;
-        return (uint32_t)-1;
+        return -1;
     }
 
-    return handle->File->Descriptor.Permissions;
+    if (handle->File->VaFs->Mode == VaFsMode_Read && handle->File->StatCached) {
+        *metadata = handle->File->Stat;
+        return 0;
+    }
+
+    vafs_metadata_initialize(metadata);
+    metadata->Type = VaFsEntryType_File;
+    metadata->Mode = S_IFREG | handle->File->Descriptor.Permissions;
+    metadata->Size = handle->File->Descriptor.FileLength;
+    metadata->LinkCount = 1;
+    metadata->Mask = VaFsMetadataMask_Type |
+        VaFsMetadataMask_Mode |
+        VaFsMetadataMask_Size |
+        VaFsMetadataMask_LinkCount;
+
+    if (handle->File->VaFs->Mode == VaFsMode_Read) {
+        handle->File->Stat = *metadata;
+        handle->File->StatCached = 1;
+    }
+    return 0;
 }
 
 int vafs_file_seek(

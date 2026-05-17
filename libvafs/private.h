@@ -155,7 +155,7 @@ struct VaFsFile {
     struct VaFs*         VaFs;
     VaFsFileDescriptor_t Descriptor;
     const char*          Name;
-    struct vafs_stat     Stat;
+    struct VaFsMetadata  Stat;
     int                  StatCached;
 };
 
@@ -170,7 +170,7 @@ struct VaFsSymlink {
     VaFsSymlinkDescriptor_t Descriptor;
     const char*             Name;
     const char*             Target;
-    struct vafs_stat        Stat;
+    struct VaFsMetadata     Stat;
     int                     StatCached;
 };
 
@@ -703,16 +703,16 @@ extern int __vafs_resolve_symlink(char* buffer, size_t bufferLength, const char*
  * @brief Internal path-stat implementation with explicit symlink depth tracking.
  *
  * This resolves the path component-by-component, optionally follows symlinks,
- * and fills the lightweight `vafs_stat` structure for the final entry.
+ * and fills the metadata structure for the final entry.
  *
  * @param[In]  vafs         Filesystem instance to resolve within.
  * @param[In]  path         Absolute or root-relative path to stat.
  * @param[In]  followLinks  Non-zero to follow symlinks, zero to report the symlink itself.
- * @param[Out] stat         Receives the resolved metadata on success.
+ * @param[Out] metadata     Receives the resolved metadata on success.
  * @param[In]  symlinkDepth Current recursive symlink depth.
  * @return 0 on success, otherwise -1 with `errno` set.
  */
-extern int __vafs_path_stat_internal(struct VaFs* vafs, const char* path, int followLinks, struct vafs_stat* stat, int symlinkDepth);
+extern int __vafs_path_stat_internal(struct VaFs* vafs, const char* path, int followLinks, struct VaFsMetadata* metadata, int symlinkDepth);
 
 /**
  * @brief Internal directory-open implementation with explicit symlink depth tracking.
@@ -768,15 +768,15 @@ extern struct VaFsDirectoryEntry* __vafs_directory_find_entry(struct VaFsDirecto
 extern size_t __vafs_directory_lookup_cache_set(const struct VaFsDirectory* directory, const char* token);
 
 /**
- * @brief Materializes a lightweight stat structure for a directory entry.
+ * @brief Materializes metadata for a directory entry.
  *
  * Read mode may satisfy this from cached metadata stored on the entry object.
  *
  * @param[In]  entry Directory entry to describe.
- * @param[Out] stat  Receives the entry metadata on success.
+ * @param[Out] metadata Receives the entry metadata on success.
  * @return 0 on success, otherwise -1 with `errno` set.
  */
-extern int __vafs_directory_entry_stat(struct VaFsDirectoryEntry* entry, struct vafs_stat* stat);
+extern int __vafs_directory_entry_stat(struct VaFsDirectoryEntry* entry, struct VaFsMetadata* metadata);
 
 /**
  * @brief Returns the stable name string associated with a directory entry.

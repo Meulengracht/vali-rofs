@@ -69,6 +69,17 @@ static int g_test_failed = 0;
         return 0; \
     } while (0)
 
+static struct VaFsMetadata metadata_for_mode(
+    enum VaFsEntryType type,
+    uint32_t           mode)
+{
+    struct VaFsMetadata metadata;
+
+    vafs_metadata_initialize(&metadata);
+    vafs_metadata_set_mode(&metadata, type, mode);
+    return metadata;
+}
+
 static void fill_pattern(char* buffer, size_t length)
 {
     for (size_t i = 0; i < length; ++i) {
@@ -342,6 +353,7 @@ static int test_sequential_reads_advance_position(void)
     char* firstChunk = NULL;
     char secondChunk[TEST_TAIL_SIZE] = { 0 };
     size_t expectedLength = TEST_BLOCK_SIZE + TEST_TAIL_SIZE;
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     size_t read;
     int status;
 
@@ -363,7 +375,7 @@ static int test_sequential_reads_advance_position(void)
     status = vafs_directory_open(vafs, "/", &root);
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
-    status = vafs_directory_create_file(root, "payload", 0644, &file);
+    status = vafs_directory_create_file(root, "payload", &fileMetadata, &file);
     TEST_ASSERT(status == 0, "Failed to create test file");
 
     read = vafs_file_write(file, expected, expectedLength);
@@ -407,6 +419,7 @@ static int test_stored_blocks_skip_runtime_decode(void)
     struct VaFsFileHandle* file = NULL;
     const char payload[] = "stored block payload";
     char buffer[sizeof(payload)] = { 0 };
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     size_t read;
     int status;
 
@@ -425,7 +438,7 @@ static int test_stored_blocks_skip_runtime_decode(void)
     status = vafs_directory_open(vafs, "/", &root);
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
-    status = vafs_directory_create_file(root, "stored", 0644, &file);
+    status = vafs_directory_create_file(root, "stored", &fileMetadata, &file);
     TEST_ASSERT(status == 0, "Failed to create filtered test file");
 
     read = vafs_file_write(file, (void*)payload, sizeof(payload) - 1);
@@ -462,6 +475,7 @@ static int test_descriptor_and_data_streams_can_diverge(void)
     uint32_t descriptorBlockSize;
     uint32_t dataBlockSize;
     const char payload[] = "separate stream policies";
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     int status;
 
     // Configure distinct block sizes and runtime callbacks, then verify both
@@ -483,7 +497,7 @@ static int test_descriptor_and_data_streams_can_diverge(void)
     status = vafs_directory_open(vafs, "/", &root);
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
-    status = vafs_directory_create_file(root, "split", 0644, &file);
+    status = vafs_directory_create_file(root, "split", &fileMetadata, &file);
     TEST_ASSERT(status == 0, "Failed to create split test file");
 
     TEST_ASSERT(vafs_file_write(file, (void*)payload, sizeof(payload) - 1) == 0, "Failed to write split test payload");
@@ -517,6 +531,7 @@ static int test_open_ops_accepts_read_at_only_backend(void)
     struct ReadAtOnlyBuffer image = { 0 };
     const char payload[] = "read-at backend";
     char buffer[sizeof(payload)] = { 0 };
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     size_t read;
     int status;
 
@@ -532,7 +547,7 @@ static int test_open_ops_accepts_read_at_only_backend(void)
     status = vafs_directory_open(vafs, "/", &root);
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
-    status = vafs_directory_create_file(root, "ops", 0644, &file);
+    status = vafs_directory_create_file(root, "ops", &fileMetadata, &file);
     TEST_ASSERT(status == 0, "Failed to create readAt-only test file");
 
     TEST_ASSERT(vafs_file_write(file, (void*)payload, sizeof(payload) - 1) == 0, "Failed to write readAt-only payload");
@@ -577,6 +592,7 @@ static int test_boundary_read_does_not_prefetch_next_stream_block(void)
     char* payload = NULL;
     char* buffer = NULL;
     const char tailPayload[] = "tail";
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     size_t read;
     int status;
 
@@ -599,13 +615,13 @@ static int test_boundary_read_does_not_prefetch_next_stream_block(void)
     status = vafs_directory_open(vafs, "/", &root);
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
-    status = vafs_directory_create_file(root, "first", 0644, &first);
+    status = vafs_directory_create_file(root, "first", &fileMetadata, &first);
     TEST_ASSERT(status == 0, "Failed to create first boundary-read file");
     TEST_ASSERT(vafs_file_write(first, payload, TEST_BLOCK_SIZE) == 0, "Failed to write first boundary-read payload");
     vafs_file_close(first);
     first = NULL;
 
-    status = vafs_directory_create_file(root, "second", 0644, &second);
+    status = vafs_directory_create_file(root, "second", &fileMetadata, &second);
     TEST_ASSERT(status == 0, "Failed to create second boundary-read file");
     TEST_ASSERT(vafs_file_write(second, (void*)tailPayload, sizeof(tailPayload) - 1) == 0,
         "Failed to write second boundary-read payload");
@@ -659,6 +675,7 @@ static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
     HANDLE threadB = NULL;
     HANDLE waitHandles[2];
     DWORD waitStatus;
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     int status;
 
     // Hold the first backend read inside readAt, then start a second file
@@ -677,7 +694,7 @@ static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
     status = vafs_directory_open(vafs, "/", &root);
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
-    status = vafs_directory_create_file(root, "parallel", 0644, &writer);
+    status = vafs_directory_create_file(root, "parallel", &fileMetadata, &writer);
     TEST_ASSERT(status == 0, "Failed to create concurrent-read test file");
     TEST_ASSERT(vafs_file_write(writer, payload, sizeof(payload)) == 0, "Failed to write concurrent-read payload");
 
