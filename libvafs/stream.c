@@ -839,14 +839,14 @@ int vafs_stream_write(
 
 int vafs_stream_reader_read(
     struct VaFsStreamReader* reader,
-    void*              buffer,
-    size_t             size,
-    size_t*            bytesRead)
+    void*                    buffer,
+    size_t                   size,
+    size_t*                  bytesRead)
 {
     struct VaFsStream* stream;
-    uint8_t* data        = (uint8_t*)buffer;
-    size_t   bytesToRead = size;
-    size_t   bytesLeftInBlock;
+    uint8_t*           data        = (uint8_t*)buffer;
+    size_t             bytesToRead = size;
+    size_t             bytesLeftInBlock;
     VAFS_DEBUG("vafs_stream_read(size=%u)\n", size);
 
     if (reader == NULL || reader->Stream == NULL || buffer == NULL || size == 0 || bytesRead == NULL) {
