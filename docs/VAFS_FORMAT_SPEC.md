@@ -99,7 +99,7 @@ struct VaFsHeader {
 #define VA_FS_MAGIC                  0x3144524D  // Magic number
 #define VA_FS_VERSION                0x00010000  // Version 1.0.0.0
 #define VA_FS_MAX_FEATURES           16          // Maximum feature count
-#define VA_FS_DESCRIPTOR_BLOCK_SIZE  (8 * 1024)  // Fixed 8KB blocks
+#define VA_FS_DESCRIPTOR_BLOCK_SIZE  (8 * 1024)  // Default descriptor block size
 ```
 
 ## Block Addressing
@@ -201,17 +201,23 @@ struct BlockHeader {
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `LengthOnDisk` | `uint32_t` | Actual size of (potentially compressed) block data on disk |
+| `LengthOnDisk` | `uint32_t` | Actual size of the stored or compressed block data on disk |
 | `Offset` | `uint32_t` | Byte offset from stream start to this block's data |
 | `Crc` | `uint32_t` | CRC32 checksum of uncompressed block data |
-| `Flags` | `uint16_t` | Block flags (currently unused) |
+| `Flags` | `uint16_t` | Block flags. Bit `0x0001` marks a stored block that is kept uncompressed on disk |
 | `Reserved` | `uint16_t` | Reserved for future use |
+
+### Block Flags
+
+- `0x0001` (`BLOCK_FLAG_STORED`): The block is stored uncompressed on disk. Readers must copy the block bytes directly and skip decode even if the stream has filter callbacks installed.
 
 ### Block Size Constraints
 
 #### Descriptor Stream
-- **Fixed Size**: 8 KB (8,192 bytes)
-- All descriptor blocks are exactly 8 KB when uncompressed
+- **Minimum**: 8 KB (8,192 bytes)
+- **Default**: 8 KB (8,192 bytes)
+- **Maximum**: 1 MB (1,048,576 bytes)
+- Configurable per image via `VaFsConfiguration.DescriptorBlockSize`
 
 #### Data Stream
 - **Minimum**: 8 KB (8,192 bytes)
@@ -415,9 +421,17 @@ struct VaFsFeatureOverview {
 
 **GUID:** `{99C25D91-FA99-4A71-9CB5-961AA93DDFBB}`
 
-Indicates that data filtering (compression/encryption) is applied to streams.
+Declares the persisted filter policy for the descriptor and data streams.
 
-**Note:** This feature marks the presence of filtering but does not contain the actual filter implementation. The filter operations must be provided at runtime.
+**Note:** This feature stores the filter identifiers only. The filter operations must still be provided at runtime.
+
+```c
+struct VaFsFeatureFilter {
+    struct VaFsFeatureHeader Header;
+    uint32_t                 DescriptorType;  // enum VaFsFilterType
+    uint32_t                 DataType;        // enum VaFsFilterType
+};
+```
 
 #### Feature Filter Operations (VA_FS_FEATURE_FILTER_OPS)
 
@@ -428,8 +442,10 @@ Runtime-only feature (not persisted to disk) that provides filter encode/decode 
 ```c
 struct VaFsFeatureFilterOps {
     struct VaFsFeatureHeader Header;
-    VaFsFilterEncodeFunc     Encode;  // Compression function
-    VaFsFilterDecodeFunc     Decode;  // Decompression function
+    VaFsFilterEncodeFunc     DescriptorEncode;
+    VaFsFilterDecodeFunc     DescriptorDecode;
+    VaFsFilterEncodeFunc     DataEncode;
+    VaFsFilterDecodeFunc     DataDecode;
 };
 ```
 
@@ -782,7 +798,7 @@ The reference implementation is available in the `libvafs` directory of this rep
 #define VA_FS_DESCRIPTOR_TYPE_SYMLINK   0x03
 
 // Block sizes
-#define VA_FS_DESCRIPTOR_BLOCK_SIZE  (8 * 1024)     // 8KB
+#define VA_FS_DESCRIPTOR_BLOCK_SIZE  (8 * 1024)     // Default descriptor block size
 #define VA_FS_DATA_MIN_BLOCKSIZE     (8 * 1024)     // 8KB
 #define VA_FS_DATA_DEFAULT_BLOCKSIZE (128 * 1024)   // 128KB
 #define VA_FS_DATA_MAX_BLOCKSIZE     (1024 * 1024)  // 1MB

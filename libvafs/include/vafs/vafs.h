@@ -47,7 +47,7 @@ VAFS_ONDISK_STRUCT(VaFsGuid, {
 /**
  * List of builtin features for the filesystem
  * VA_FS_FEATURE_OVERVIEW   - Overview of the filesystem
- * VA_FS_FEATURE_FILTER     - Data filters can be applied for data streams
+ * VA_FS_FEATURE_FILTER     - Stream filter policies for descriptor/data streams
  * VA_FS_FEATURE_FILTER_OPS - Filter operations (Not persistant)
  */
 #define VA_FS_FEATURE_OVERVIEW   { 0xB1382352, 0x4BC7, 0x45D2, { 0xB7, 0x59, 0x61, 0x5A, 0x42, 0xD4, 0x45, 0x2A } }
@@ -120,6 +120,15 @@ struct VaFsEntry {
 };
 
 /**
+ * @brief Built-in filter identifiers stored in persisted filter policy features.
+ */
+enum VaFsFilterType {
+    VaFsFilterType_None = 0,
+    VaFsFilterType_APLIB,
+    VaFsFilterType_BRIEFLZ,
+};
+
+/**
  * @brief It is expected of the encode function to allocate a buffer of the size of the data and provide
  * the size of the allocated buffer for the encoded data in the Output/OutputLength parameters.
  */
@@ -133,6 +142,15 @@ typedef int(*VaFsFilterEncodeFunc)(void* Input, uint32_t InputLength, void** Out
 typedef int(*VaFsFilterDecodeFunc)(void* Input, uint32_t InputLength, void* Output, uint32_t* OutputLength);
 
 /**
+ * @brief Persisted filter policy for descriptor and data streams.
+ */
+VAFS_ONDISK_STRUCT(VaFsFeatureFilter, {
+    struct VaFsFeatureHeader Header;
+    uint32_t                 DescriptorType;
+    uint32_t                 DataType;
+});
+
+/**
  * @brief Runtime filter callbacks used when a filesystem image is read or written through filtered streams.
  *
  * Install this feature after opening or creating an image and again when reopening that same image later.
@@ -140,8 +158,10 @@ typedef int(*VaFsFilterDecodeFunc)(void* Input, uint32_t InputLength, void* Outp
  */
 struct VaFsFeatureFilterOps {
     struct VaFsFeatureHeader Header;
-    VaFsFilterEncodeFunc     Encode;
-    VaFsFilterDecodeFunc     Decode;
+    VaFsFilterEncodeFunc     DescriptorEncode;
+    VaFsFilterDecodeFunc     DescriptorDecode;
+    VaFsFilterEncodeFunc     DataEncode;
+    VaFsFilterDecodeFunc     DataDecode;
 };
 
 /**
@@ -151,6 +171,10 @@ struct VaFsConfiguration {
     // Allow the filesystem to be valid only for a specific
     // architecture
     enum VaFsArchitecture Architecture;
+
+    // The descriptor stream block size. Metadata streams are often smaller and more random-access
+    // friendly than file payload streams, so they can use a different block size.
+    uint32_t              DescriptorBlockSize;
 
     // The data block size can override the dynamic selection of 
     // block sizes, by enforcing all data block sizes to be of this
@@ -179,23 +203,45 @@ extern void vafs_config_initialize(struct VaFsConfiguration* configuration);
 extern void vafs_config_set_architecture(struct VaFsConfiguration* configuration, enum VaFsArchitecture architecture);
 
 /**
+ * @brief Overrides the descriptor block size used for a newly created image.
+ *
+ * Values outside the supported range are ignored and reported through the library log. Passing NULL
+ * is a no-op.
+ *
+ * @param configuration Configuration structure to update.
+ * @param blockSize     Desired descriptor stream block size in bytes.
+ */
+extern void vafs_config_set_descriptor_block_size(struct VaFsConfiguration* configuration, uint32_t blockSize);
+
+/**
  * @brief Overrides the data block size used for a newly created image.
  *
  * Values outside the supported range are ignored and reported through the library log. Passing NULL
  * is a no-op.
  *
  * @param configuration Configuration structure to update.
- * @param blockSize     Desired block size in bytes.
+ * @param blockSize     Desired data stream block size in bytes.
+ */
+extern void vafs_config_set_data_block_size(struct VaFsConfiguration* configuration, uint32_t blockSize);
+
+/**
+ * @brief Backward-compatible alias for vafs_config_set_data_block_size.
+ *
+ * Values outside the supported range are ignored and reported through the library log. Passing NULL
+ * is a no-op.
+ *
+ * @param configuration Configuration structure to update.
+ * @param blockSize     Desired data stream block size in bytes.
  */
 extern void vafs_config_set_block_size(struct VaFsConfiguration* configuration, uint32_t blockSize);
 
 /**
  * @brief Allows custom backends as vafs images. The default API for vafs only supports
  * the standard C file, and memory backed images. To allow scenario's that differ from this
- * we allow the user to supply it's own seek/read/write which can then be used in conjunction
- * with vafs_create_ops/vafs_open_ops. It is the users responsibility to make sure that the implementation
- * of these functions are properly initialized before calling vafs_create_ops/vafs_open_ops, and
- * properly disposed after the call to vafs_close.
+ * we allow the user to supply its own storage callbacks. Read-only backends may implement
+ * either positioned reads through readAt or the legacy seek+read pair. It is the users
+ * responsibility to make sure that the implementation of these functions are properly initialized
+ * before calling vafs_open_ops, and properly disposed after the call to vafs_close.
  */
 struct VaFsOperations {
     /**
@@ -220,6 +266,20 @@ struct VaFsOperations {
      * @return int 0 on success, -1 on failure. See errno for more details.
      */
     int (*read)(void* userData, void*, size_t, size_t*);
+
+    /**
+     * @brief Read bytes from the storage at an absolute offset without mutating
+     * any shared cursor state in the backend.
+     * This callback is optional, but strongly recommended for read-only backends.
+     * If omitted, VaFS falls back to serializing seek+read under an internal device lock.
+     * @param userData  The user-supplied pointer that was given to vafs_open_ops.
+     * @param offset    Absolute byte offset on the storage.
+     * @param buffer    The buffer that will be used to store the data.
+     * @param length    The number of bytes which will be read from the storage.
+     * @param bytesRead The actual number of bytes read, up to max <length>.
+     * @return int 0 on success, -1 on failure. See errno for more details.
+     */
+    int (*readAt)(void* userData, long offset, void* buffer, size_t length, size_t* bytesRead);
 
     /**
      * @brief Write bytes to the storage at the current position. The position will
@@ -299,7 +359,7 @@ extern int vafs_open_memory(
  * also be any other file implementation. The caller is responsible for cleaning up after
  * the call to vafs_close.
  * 
- * @param operations A pointer to the function table providing minimum seek+read.
+ * @param operations A pointer to the function table providing either readAt or the legacy seek+read pair.
  * @param userData   A pointer to user-supplied data which will be passed to operations.
  * @param vafsOut    A pointer where the handle of the filesystem instance will be stored.
  * @return int 0 on success, -1 on failure. See errno for more details

@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <limits.h>
 #if !defined(_WIN32) && !defined(_WIN64)
 #include <unistd.h>
 #else
@@ -99,6 +100,54 @@ typedef struct {
     size_t current_index;
 } WideLookupBenchmarkContext;
 
+typedef struct {
+    uint64_t iteration_override;
+    uint64_t warmup_iterations;
+} BenchmarkCliOptions;
+
+static BenchmarkRunConfig make_benchmark_run_config(
+    uint64_t                  default_iterations,
+    const BenchmarkCliOptions* cli_options)
+{
+    BenchmarkRunConfig config = {
+        .iterations = default_iterations,
+        .warmup_iterations = 0
+    };
+
+    if (cli_options != NULL) {
+        if (cli_options->iteration_override != 0) {
+            config.iterations = cli_options->iteration_override;
+        }
+        config.warmup_iterations = cli_options->warmup_iterations;
+    }
+    return config;
+}
+
+static int parse_uint64_option(
+    const char* option_name,
+    const char* value,
+    int         allow_zero,
+    uint64_t*   out_value)
+{
+    char*              end;
+    unsigned long long parsed;
+
+    if (option_name == NULL || value == NULL || out_value == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    errno = 0;
+    parsed = strtoull(value, &end, 10);
+    if (errno != 0 || value[0] == '\0' || *end != '\0' || (!allow_zero && parsed == 0) || parsed > UINT64_MAX) {
+        fprintf(stderr, "Invalid value for %s: %s\n", option_name, value);
+        return -1;
+    }
+
+    *out_value = (uint64_t)parsed;
+    return 0;
+}
+
 // ============================
 // Mount Latency Benchmark
 // ============================
@@ -138,7 +187,7 @@ static void mount_benchmark_teardown(void* user_data)
     // No teardown needed
 }
 
-static BenchmarkResult run_mount_latency_benchmark(const char* image_path)
+static BenchmarkResult run_mount_latency_benchmark(const char* image_path, const BenchmarkRunConfig* run_config)
 {
     MountBenchmarkContext ctx = {
         .image_path = image_path,
@@ -147,7 +196,7 @@ static BenchmarkResult run_mount_latency_benchmark(const char* image_path)
 
     return benchmark_run(
         "Mount Latency",
-        MOUNT_LATENCY_ITERATIONS,
+        run_config,
         mount_benchmark_setup,
         mount_benchmark_run,
         mount_benchmark_teardown,
@@ -212,7 +261,7 @@ static void traversal_benchmark_teardown(void* user_data)
     }
 }
 
-static BenchmarkResult run_metadata_traversal_benchmark(const char* image_path, const char* directory_path)
+static BenchmarkResult run_metadata_traversal_benchmark(const char* image_path, const char* directory_path, const BenchmarkRunConfig* run_config)
 {
     TraversalBenchmarkContext ctx = {
         .image_path = image_path,
@@ -223,7 +272,7 @@ static BenchmarkResult run_metadata_traversal_benchmark(const char* image_path, 
 
     BenchmarkResult result = benchmark_run(
         "Metadata Traversal",
-        METADATA_TRAVERSAL_ITERATIONS,
+        run_config,
         traversal_benchmark_setup,
         traversal_benchmark_run,
         traversal_benchmark_teardown,
@@ -297,7 +346,7 @@ static void small_file_read_teardown(void* user_data)
     }
 }
 
-static BenchmarkResult run_small_file_read_benchmark(const char* image_path, const char* file_path)
+static BenchmarkResult run_small_file_read_benchmark(const char* image_path, const char* file_path, const BenchmarkRunConfig* run_config)
 {
     FileReadBenchmarkContext ctx = {
         .image_path = image_path,
@@ -311,7 +360,7 @@ static BenchmarkResult run_small_file_read_benchmark(const char* image_path, con
 
     BenchmarkResult result = benchmark_run(
         "Small File Read (4KB)",
-        SMALL_FILE_READ_ITERATIONS,
+        run_config,
         small_file_read_setup,
         small_file_read_run,
         small_file_read_teardown,
@@ -319,7 +368,7 @@ static BenchmarkResult run_small_file_read_benchmark(const char* image_path, con
     );
 
     // Calculate throughput
-    result.bytes_processed = ctx.bytes_read * SMALL_FILE_READ_ITERATIONS;
+    result.bytes_processed = ctx.bytes_read * result.iterations;
     result.throughput_mbps = benchmark_calculate_throughput(result.bytes_processed, result.total_time_ms);
 
     return result;
@@ -398,7 +447,7 @@ static void large_file_read_teardown(void* user_data)
     }
 }
 
-static BenchmarkResult run_large_file_read_benchmark(const char* image_path, const char* file_path)
+static BenchmarkResult run_large_file_read_benchmark(const char* image_path, const char* file_path, const BenchmarkRunConfig* run_config)
 {
     FileReadBenchmarkContext ctx = {
         .image_path = image_path,
@@ -412,7 +461,7 @@ static BenchmarkResult run_large_file_read_benchmark(const char* image_path, con
 
     BenchmarkResult result = benchmark_run(
         "Large File Sequential Read",
-        LARGE_FILE_READ_ITERATIONS,
+        run_config,
         large_file_read_setup,
         large_file_read_run,
         large_file_read_teardown,
@@ -420,7 +469,7 @@ static BenchmarkResult run_large_file_read_benchmark(const char* image_path, con
     );
 
     // Calculate throughput
-    result.bytes_processed = ctx.bytes_read * LARGE_FILE_READ_ITERATIONS;
+    result.bytes_processed = ctx.bytes_read * result.iterations;
     result.throughput_mbps = benchmark_calculate_throughput(result.bytes_processed, result.total_time_ms);
 
     return result;
@@ -486,7 +535,7 @@ static void path_lookup_teardown(void* user_data)
     }
 }
 
-static BenchmarkResult run_path_lookup_benchmark(const char* image_path, const char* path)
+static BenchmarkResult run_path_lookup_benchmark(const char* image_path, const char* path, const BenchmarkRunConfig* run_config)
 {
     PathLookupBenchmarkContext ctx = {
         .image_path = image_path,
@@ -496,7 +545,7 @@ static BenchmarkResult run_path_lookup_benchmark(const char* image_path, const c
 
     return benchmark_run(
         "Repeated Path Lookup",
-        PATH_LOOKUP_ITERATIONS,
+        run_config,
         path_lookup_setup,
         path_lookup_run,
         path_lookup_teardown,
@@ -561,7 +610,7 @@ static void path_stat_teardown(void* user_data)
     }
 }
 
-static BenchmarkResult run_deep_path_stat_benchmark(const char* image_path, const char* path)
+static BenchmarkResult run_deep_path_stat_benchmark(const char* image_path, const char* path, const BenchmarkRunConfig* run_config)
 {
     PathStatBenchmarkContext ctx = {
         .image_path = image_path,
@@ -571,7 +620,7 @@ static BenchmarkResult run_deep_path_stat_benchmark(const char* image_path, cons
 
     return benchmark_run(
         "Deep Path Stat",
-        DEEP_STAT_ITERATIONS,
+        run_config,
         path_stat_setup,
         path_stat_run,
         path_stat_teardown,
@@ -697,7 +746,7 @@ static void wide_lookup_teardown(void* user_data)
     }
 }
 
-static BenchmarkResult run_wide_lookup_benchmark(const char* image_path, const char* directory_path)
+static BenchmarkResult run_wide_lookup_benchmark(const char* image_path, const char* directory_path, const BenchmarkRunConfig* run_config)
 {
     WideLookupBenchmarkContext ctx = {
         .image_path = image_path,
@@ -710,7 +759,7 @@ static BenchmarkResult run_wide_lookup_benchmark(const char* image_path, const c
 
     return benchmark_run(
         "Wide Directory Stat",
-        WIDE_LOOKUP_ITERATIONS,
+        run_config,
         wide_lookup_setup,
         wide_lookup_run,
         wide_lookup_teardown,
@@ -727,6 +776,8 @@ static void print_usage(const char* program_name)
     printf("Usage: %s [OPTIONS] <image_path>\n", program_name);
     printf("\nOptions:\n");
     printf("  --format=<format>    Output format: human (default), json, csv\n");
+    printf("  --iterations=<count> Override measured iterations for every benchmark\n");
+    printf("  --warmup=<count>     Run untimed warmup iterations before each benchmark\n");
     printf("  --small-file=<path>  Path to small file in image for small file read benchmark\n");
     printf("  --large-file=<path>  Path to large file in image for large file read benchmark\n");
     printf("  --directory=<path>   Path to directory in image for traversal benchmark\n");
@@ -738,6 +789,7 @@ static void print_usage(const char* program_name)
     printf("\nExamples:\n");
     printf("  %s test.vafs\n", program_name);
     printf("  %s --format=json --small-file=/config.txt test.vafs\n", program_name);
+    printf("  %s --warmup=10 --iterations=100 test.vafs\n", program_name);
 }
 
 static int should_run_benchmark(const char* only_benchmark, const char* name)
@@ -756,6 +808,7 @@ int main(int argc, char** argv)
     const char* wide_directory_path = "/wide_dir";
     const char* deep_stat_path = "/lookup_test/subdir1/subdir2/subdir3/target.txt";
     const char* only_benchmark = NULL;
+    BenchmarkCliOptions cli_options = { 0 };
     BenchmarkResult results[7];
     int result_count = 0;
     int i;
@@ -764,6 +817,14 @@ int main(int argc, char** argv)
     for (i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--format=", 9) == 0) {
             output_format = argv[i] + 9;
+        } else if (strncmp(argv[i], "--iterations=", 13) == 0) {
+            if (parse_uint64_option("--iterations", argv[i] + 13, 0, &cli_options.iteration_override) != 0) {
+                return 1;
+            }
+        } else if (strncmp(argv[i], "--warmup=", 9) == 0) {
+            if (parse_uint64_option("--warmup", argv[i] + 9, 1, &cli_options.warmup_iterations) != 0) {
+                return 1;
+            }
         } else if (strncmp(argv[i], "--small-file=", 13) == 0) {
             small_file_path = argv[i] + 13;
         } else if (strncmp(argv[i], "--large-file=", 13) == 0) {
@@ -805,7 +866,9 @@ int main(int argc, char** argv)
     // Print header
     if (strcmp(output_format, "json") == 0) {
         printf("{\n");
-        printf("  \"image\": \"%s\",\n", image_path);
+        printf("  \"image\": ");
+        benchmark_print_json_string(image_path);
+        printf(",\n");
         printf("  \"benchmarks\": [\n");
     } else if (strcmp(output_format, "human") == 0) {
         printf("VaFS Benchmark Suite\n");
@@ -815,25 +878,32 @@ int main(int argc, char** argv)
 
     // Run benchmarks
     if (should_run_benchmark(only_benchmark, "mount")) {
-        results[result_count++] = run_mount_latency_benchmark(image_path);
+        BenchmarkRunConfig run_config = make_benchmark_run_config(MOUNT_LATENCY_ITERATIONS, &cli_options);
+        results[result_count++] = run_mount_latency_benchmark(image_path, &run_config);
     }
     if (should_run_benchmark(only_benchmark, "traversal")) {
-        results[result_count++] = run_metadata_traversal_benchmark(image_path, directory_path);
+        BenchmarkRunConfig run_config = make_benchmark_run_config(METADATA_TRAVERSAL_ITERATIONS, &cli_options);
+        results[result_count++] = run_metadata_traversal_benchmark(image_path, directory_path, &run_config);
     }
     if (should_run_benchmark(only_benchmark, "small")) {
-        results[result_count++] = run_small_file_read_benchmark(image_path, small_file_path);
+        BenchmarkRunConfig run_config = make_benchmark_run_config(SMALL_FILE_READ_ITERATIONS, &cli_options);
+        results[result_count++] = run_small_file_read_benchmark(image_path, small_file_path, &run_config);
     }
     if (should_run_benchmark(only_benchmark, "large")) {
-        results[result_count++] = run_large_file_read_benchmark(image_path, large_file_path);
+        BenchmarkRunConfig run_config = make_benchmark_run_config(LARGE_FILE_READ_ITERATIONS, &cli_options);
+        results[result_count++] = run_large_file_read_benchmark(image_path, large_file_path, &run_config);
     }
     if (should_run_benchmark(only_benchmark, "lookup")) {
-        results[result_count++] = run_path_lookup_benchmark(image_path, lookup_path);
+        BenchmarkRunConfig run_config = make_benchmark_run_config(PATH_LOOKUP_ITERATIONS, &cli_options);
+        results[result_count++] = run_path_lookup_benchmark(image_path, lookup_path, &run_config);
     }
     if (should_run_benchmark(only_benchmark, "deepstat")) {
-        results[result_count++] = run_deep_path_stat_benchmark(image_path, deep_stat_path);
+        BenchmarkRunConfig run_config = make_benchmark_run_config(DEEP_STAT_ITERATIONS, &cli_options);
+        results[result_count++] = run_deep_path_stat_benchmark(image_path, deep_stat_path, &run_config);
     }
     if (should_run_benchmark(only_benchmark, "wide")) {
-        results[result_count++] = run_wide_lookup_benchmark(image_path, wide_directory_path);
+        BenchmarkRunConfig run_config = make_benchmark_run_config(WIDE_LOOKUP_ITERATIONS, &cli_options);
+        results[result_count++] = run_wide_lookup_benchmark(image_path, wide_directory_path, &run_config);
     }
 
     // Print results

@@ -65,9 +65,53 @@ double benchmark_timespec_diff_ms(struct timespec* start, struct timespec* end)
     return (sec_diff * 1000.0) + (nsec_diff / 1000000.0);
 }
 
+void benchmark_print_json_string(const char* value)
+{
+    const unsigned char* cursor = (const unsigned char*)(value != NULL ? value : "");
+
+    putchar('"');
+    while (*cursor != '\0') {
+        switch (*cursor) {
+            case '\\':
+                fputs("\\\\", stdout);
+                break;
+            case '"':
+                fputs("\\\"", stdout);
+                break;
+            case '\b':
+                fputs("\\b", stdout);
+                break;
+            case '\f':
+                fputs("\\f", stdout);
+                break;
+            case '\n':
+                fputs("\\n", stdout);
+                break;
+            case '\r':
+                fputs("\\r", stdout);
+                break;
+            case '\t':
+                fputs("\\t", stdout);
+                break;
+            default:
+                if (*cursor < 0x20) {
+                    printf("\\u%04x", *cursor);
+                } else {
+                    putchar((int)*cursor);
+                }
+                break;
+        }
+        cursor++;
+    }
+    putchar('"');
+}
+
 void benchmark_print_result(const BenchmarkResult* result)
 {
     printf("\n=== %s ===\n", result->name);
+    if (result->warmup_iterations > 0) {
+        printf("Warmup:        %" PRIu64 "\n", result->warmup_iterations);
+    }
     printf("Iterations:    %" PRIu64 "\n", result->iterations);
     printf("Total time:    %.3f ms\n", result->total_time_ms);
     printf("Average time:  %.3f ms\n", result->avg_time_ms);
@@ -83,7 +127,10 @@ void benchmark_print_result(const BenchmarkResult* result)
 void benchmark_print_result_json(const BenchmarkResult* result, int is_last)
 {
     printf("  {\n");
-    printf("    \"name\": \"%s\",\n", result->name);
+    printf("    \"name\": ");
+    benchmark_print_json_string(result->name);
+    printf(",\n");
+    printf("    \"warmup_iterations\": %" PRIu64 ",\n", result->warmup_iterations);
     printf("    \"iterations\": %" PRIu64 ",\n", result->iterations);
     printf("    \"total_time_ms\": %.3f,\n", result->total_time_ms);
     printf("    \"avg_time_ms\": %.3f,\n", result->avg_time_ms);
@@ -104,10 +151,11 @@ void benchmark_print_result_json(const BenchmarkResult* result, int is_last)
 void benchmark_print_result_csv(const BenchmarkResult* result, int print_header)
 {
     if (print_header) {
-        printf("name,iterations,total_time_ms,avg_time_ms,min_time_ms,max_time_ms,bytes_processed,throughput_mbps\n");
+        printf("name,warmup_iterations,iterations,total_time_ms,avg_time_ms,min_time_ms,max_time_ms,bytes_processed,throughput_mbps\n");
     }
-    printf("%s,%" PRIu64 ",%.3f,%.3f,%.3f,%.3f,%" PRIu64 ",%.2f\n",
+    printf("%s,%" PRIu64 ",%" PRIu64 ",%.3f,%.3f,%.3f,%.3f,%" PRIu64 ",%.2f\n",
            result->name,
+           result->warmup_iterations,
            result->iterations,
            result->total_time_ms,
            result->avg_time_ms,
@@ -129,7 +177,7 @@ double benchmark_calculate_throughput(uint64_t bytes, double time_ms)
 
 BenchmarkResult benchmark_run(
     const char* name,
-    uint64_t iterations,
+    const BenchmarkRunConfig* config,
     int (*setup_fn)(void* user_data),
     int (*benchmark_fn)(void* user_data),
     void (*teardown_fn)(void* user_data),
@@ -138,12 +186,18 @@ BenchmarkResult benchmark_run(
     BenchmarkResult result;
     BenchmarkTimer timer;
     double* iteration_times;
+    uint64_t iterations;
+    uint64_t warmup_iterations;
     uint64_t i;
     int status;
+
+    iterations = (config != NULL && config->iterations != 0) ? config->iterations : 1;
+    warmup_iterations = (config != NULL) ? config->warmup_iterations : 0;
 
     memset(&result, 0, sizeof(result));
     result.name = name;
     result.iterations = iterations;
+    result.warmup_iterations = warmup_iterations;
     result.min_time_ms = DBL_MAX;
     result.max_time_ms = 0.0;
 
@@ -159,6 +213,20 @@ BenchmarkResult benchmark_run(
         status = setup_fn(user_data);
         if (status != 0) {
             fprintf(stderr, "Benchmark setup failed for %s\n", name);
+            free(iteration_times);
+            return result;
+        }
+    }
+
+    // Warmup iterations are intentionally excluded from timing so caches and
+    // one-time setup costs do not dominate short steady-state workloads.
+    for (i = 0; i < warmup_iterations; i++) {
+        status = benchmark_fn(user_data);
+        if (status != 0) {
+            fprintf(stderr, "Benchmark warmup iteration %" PRIu64 " failed for %s\n", i, name);
+            if (teardown_fn) {
+                teardown_fn(user_data);
+            }
             free(iteration_times);
             return result;
         }

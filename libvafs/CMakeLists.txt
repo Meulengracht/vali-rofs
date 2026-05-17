@@ -6,6 +6,7 @@ add_subdirectory(cache)
 add_library(vafs STATIC
     config.c
     crc.c
+    directory_cache.c
     directory.c
     file.c
     log.c

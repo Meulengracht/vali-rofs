@@ -117,9 +117,7 @@ Max time:      0.003 ms
 
 ## Analysis
 
-(To be filled after capturing actual results)
-
-### Performance Characteristics
+### 2026-03-23 Linux Baseline Snapshot
 
 - **Mount latency**: ~0.023 ms avg
 - **Metadata operations**: ~0.018 ms avg traversal of root
@@ -129,11 +127,49 @@ Max time:      0.003 ms
 - **Deep path stat**: ~0.008 ms avg
 - **Wide directory stat**: ~0.001 ms avg across 500 siblings
 
-### Observations
+### 2026-05-17 Stable Windows Rerun
 
-- Metadata costs are negligible compared to I/O; even deep paths and wide directories resolve in microseconds.
-- Large file sequential reads dominate overall time because of BriefLZ decompression; improving streaming would yield the biggest win.
-- `vafs_file_read` does not advance file position; sequential readers (including the benchmark) must seek manually between reads.
+This rerun was executed on the current Windows workspace using the native `generate_test_data.ps1` generator and the existing `build/bin/Debug` tools.
+
+- **Platform**: Windows 11 Home 10.0.28000
+- **CPU**: Snapdragon(R) X2 Elite Extreme - X2E94100 - Qualcomm Oryon(TM) CPU
+- **Compression**: BriefLZ
+- **Test Image**: `C:\Users\the_m\AppData\Local\Temp\vafs-benchmark-data\benchmark.vafs`
+- **Test Image Size**: 6.73 MiB (7,061,477 bytes)
+- **Source Corpus Size**: 60.75 MiB across 617 files
+- **Methodology**: 3 full-suite runs, each with `--warmup=50 --iterations=1000`, summarized as the median of per-suite averages
+- **Corpus**: deterministic structured text plus record-varying large payloads for reproducible compression behavior
+- **Windows note**: symlink creation was skipped on this host because symbolic-link creation requires elevation or Developer Mode
+
+| Benchmark | Median avg | Avg range across 3 runs | Median throughput | Throughput range |
+| --- | ---: | ---: | ---: | ---: |
+| Mount Latency | 0.076 ms | 0.071-0.076 ms | - | - |
+| Metadata Traversal | 0.000 ms | 0.000-0.000 ms | - | - |
+| Small File Read (4KB) | 0.006 ms | 0.004-0.006 ms | 879.09 MB/s | 636.02-879.09 MB/s |
+| Large File Sequential Read | 10.946 ms | 10.852-10.946 ms | 460.73 MB/s | 456.78-460.73 MB/s |
+| Repeated Path Lookup | 0.000 ms | 0.000-0.000 ms | - | - |
+| Deep Path Stat | 0.001 ms | 0.001-0.001 ms | - | - |
+| Wide Directory Stat | 0.001 ms | 0.001-0.001 ms | - | - |
+
+Additional wide-directory spot checks were rerun with the same stable settings to probe the 512-entry name-index threshold used by the library:
+
+- **256 entries**: 0.001 ms avg with `--warmup=50 --iterations=1000`
+- **5000 entries**: 0.001 ms avg with `--warmup=50 --iterations=1000`
+
+### Updated Observations
+
+- The new warmup and higher iteration counts materially reduced noise on the expensive path. Large sequential read throughput stayed in a tight `456.78-460.73 MB/s` band across the three stable reruns.
+- The deterministic corpus changed the shape of the benchmark in an expected way: the compressed image dropped to `6.73 MiB`, so large sequential reads are much faster than they were on the earlier mostly-random corpus. Cross-run comparisons only make sense when the corpus profile is held constant.
+- Small-file and metadata-heavy paths are now so cheap that several of them hit the formatter's `0.001 ms` precision floor. They are still non-zero operations, but the current output precision no longer distinguishes the smallest steady-state differences.
+- Directory scaling still does not look like the limiting factor. The 256-entry and 5000-entry wide-directory spot checks both stayed at `0.001 ms` average with the stable settings, which suggests the current sorted-index/hash-index and bounded lookup-cache strategy is already doing its job.
+- Large sequential reads remain the dominant absolute cost even on the more compressible deterministic corpus, so the highest-value runtime optimization target is still the read/decompression pipeline rather than directory lookup.
+
+### What Could Be Improved
+
+- **Output precision**: sub-microsecond metadata benchmarks round to `0.000 ms` or `0.001 ms` in the current formatter. For the fast-path benchmarks, the next useful improvement is reporting in microseconds or adding a higher-precision machine-readable field.
+- **Per-benchmark tuning**: the new global `--warmup` and `--iterations` flags are enough for stable whole-suite reruns, but the fastest metadata paths and the large sequential read benchmark still want different ideal iteration counts. Per-benchmark overrides or named profiles would make the tool easier to tune.
+- **Corpus profiles**: the deterministic corpus is reproducible and much more representative than pure random data, but benchmark outcomes still depend strongly on compressibility. It would be useful to ship named corpus profiles such as `mixed`, `compressible`, and `worst-case` so regressions can be checked under multiple workloads.
+- **Large-read path**: sequential reads are still where most absolute time is spent. Improvements here are more likely to matter than additional directory-lookup tuning.
 
 ## Reproducing Results
 
@@ -159,9 +195,24 @@ cd ../benchmarks
 ../build/bin/vafs-bench --format=csv /tmp/vafs-benchmark-data/benchmark.vafs > results.csv
 ```
 
+For a steadier local baseline, rerun with warmup and higher iteration counts:
+
+```bash
+../build/bin/vafs-bench --warmup=50 --iterations=1000 /tmp/vafs-benchmark-data/benchmark.vafs
+```
+
+On Windows, use the native PowerShell generator and the Debug binaries directly:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\generate_test_data.ps1
+..\build\bin\Debug\vafs-bench.exe --warmup=50 --iterations=1000 $env:TEMP\vafs-benchmark-data\benchmark.vafs
+```
+
 ## Notes
 
 - Results may vary based on system load, CPU frequency scaling, and I/O caching
 - For consistent results, disable CPU frequency scaling and clear caches between runs
 - The benchmarks use compressed data (BriefLZ) which adds decompression overhead
 - Mount latency includes filter installation time
+- The source defaults in `vafs_bench.c` are still tuned for quick smoke runs; use `--warmup` and `--iterations` for stable local baselines

@@ -26,16 +26,6 @@
 #include <stdio.h>
 #include <string.h>
 
-enum VaFsFilterType {
-    VaFsFilterType_APLIB,
-    VaFsFilterType_BRIEFLZ
-};
-
-VAFS_ONDISK_STRUCT(VaFsFeatureFilter, {
-    struct VaFsFeatureHeader Header;
-    uint32_t                 Type;
-});
-
 static struct VaFsGuid g_filterGuid    = VA_FS_FEATURE_FILTER;
 static struct VaFsGuid g_filterOpsGuid = VA_FS_FEATURE_FILTER_OPS;
 
@@ -197,24 +187,54 @@ static int __set_filter_ops(
 {
     struct VaFsFeatureFilterOps filterOps;
 
+    // Resolve descriptor and data filters independently so metadata can keep a
+    // cheaper policy without forcing the same codec on file data.
+
     memcpy(&filterOps.Header.Guid, &g_filterOpsGuid, sizeof(struct VaFsGuid));
     filterOps.Header.Length = sizeof(struct VaFsFeatureFilterOps);
 
-    switch (filter->Type) {
+    filterOps.DescriptorEncode = NULL;
+    filterOps.DescriptorDecode = NULL;
+    switch (filter->DescriptorType) {
+        case VaFsFilterType_None:
+            break;
 #if defined(__VAFS_FILTER_APLIB)
         case VaFsFilterType_APLIB: {
-            filterOps.Encode = __aplib_encode;
-            filterOps.Decode = __aplib_decode;
+            filterOps.DescriptorEncode = __aplib_encode;
+            filterOps.DescriptorDecode = __aplib_decode;
         } break;
 #endif
 #if defined(__VAFS_FILTER_BRIEFLZ)
         case VaFsFilterType_BRIEFLZ: {
-            filterOps.Encode = __brieflz_encode;
-            filterOps.Decode = __brieflz_decode;
+            filterOps.DescriptorEncode = __brieflz_encode;
+            filterOps.DescriptorDecode = __brieflz_decode;
         } break;
 #endif
         default: {
-            fprintf(stderr, "unsupported filter type %i\n", filter->Type);
+            fprintf(stderr, "unsupported descriptor filter type %u\n", filter->DescriptorType);
+            return -1;
+        }
+    }
+
+    filterOps.DataEncode = NULL;
+    filterOps.DataDecode = NULL;
+    switch (filter->DataType) {
+        case VaFsFilterType_None:
+            break;
+#if defined(__VAFS_FILTER_APLIB)
+        case VaFsFilterType_APLIB: {
+            filterOps.DataEncode = __aplib_encode;
+            filterOps.DataDecode = __aplib_decode;
+        } break;
+#endif
+#if defined(__VAFS_FILTER_BRIEFLZ)
+        case VaFsFilterType_BRIEFLZ: {
+            filterOps.DataEncode = __brieflz_encode;
+            filterOps.DataDecode = __brieflz_decode;
+        } break;
+#endif
+        default: {
+            fprintf(stderr, "unsupported data filter type %u\n", filter->DataType);
             return -1;
         }
     }
@@ -228,47 +248,92 @@ int __handle_filter(
     struct VaFsFeatureFilter* filter;
     int                       status;
 
+    // Opening an image only installs runtime callbacks when persisted filter
+    // metadata exists and is large enough for the split-stream layout.
+
     status = vafs_feature_query(vafs, &g_filterGuid, (struct VaFsFeatureHeader**)&filter);
     if (status) {
-        // no filter present
+        // Images without a filter feature leave both streams unfiltered.
         return 0;
+    }
+
+    if (filter->Header.Length < sizeof(struct VaFsFeatureFilter)) {
+        // Reject truncated metadata before reading descriptor/data type fields.
+        errno = EINVAL;
+        return -1;
     }
     return __set_filter_ops(vafs, filter);
 }
 
-static enum VaFsFilterType __get_filter_from_name(
-    const char* filterName)
+static int __get_filter_from_name(
+    const char* filterName,
+    uint32_t*   typeOut)
 {
+    // Treat NULL the same as "none" so callers can configure just one stream
+    // and leave the other raw.
+    if (filterName == NULL || !strcmp(filterName, "none")) {
+        *typeOut = VaFsFilterType_None;
+        return 0;
+    }
+
 #if defined(__VAFS_FILTER_APLIB)
-    if (!strcmp(filterName, "aplib"))
-        return VaFsFilterType_APLIB;
+    if (!strcmp(filterName, "aplib")) {
+        *typeOut = VaFsFilterType_APLIB;
+        return 0;
+    }
 #endif
 #if defined(__VAFS_FILTER_BRIEFLZ)
-    if (!strcmp(filterName, "brieflz"))
-        return VaFsFilterType_BRIEFLZ;
+    if (!strcmp(filterName, "brieflz")) {
+        *typeOut = VaFsFilterType_BRIEFLZ;
+        return 0;
+    }
 #endif
+
+    fprintf(stderr, "unsupported filter type %s\n", filterName);
     return -1;
+}
+
+int __install_filters(
+    struct VaFs* vafs,
+    const char*  descriptorFilterName,
+    const char*  dataFilterName)
+{
+    struct VaFsFeatureFilter filter;
+    int                      status;
+
+    // Resolve both stream policies up front so persisted metadata and runtime
+    // callbacks stay aligned.
+
+    memcpy(&filter.Header.Guid, &g_filterGuid, sizeof(struct VaFsGuid));
+    filter.Header.Length = sizeof(struct VaFsFeatureFilter);
+
+    status = __get_filter_from_name(descriptorFilterName, &filter.DescriptorType);
+    if (status != 0) {
+        return -1;
+    }
+
+    status = __get_filter_from_name(dataFilterName, &filter.DataType);
+    if (status != 0) {
+        return -1;
+    }
+
+    if (filter.DescriptorType == VaFsFilterType_None && filter.DataType == VaFsFilterType_None) {
+        // Skip feature emission entirely when neither stream requests a filter.
+        return 0;
+    }
+
+    status = vafs_feature_add(vafs, &filter.Header);
+    if (status) {
+        // Stop here if the persisted policy could not be recorded so we do not
+        // install runtime callbacks that the image metadata does not describe.
+        return 0;
+    }
+    return __set_filter_ops(vafs, &filter);
 }
 
 int __install_filter(
     struct VaFs* vafs,
     const char*  filterName)
 {
-    struct VaFsFeatureFilter filter;
-    int                      status;
-
-    memcpy(&filter.Header.Guid, &g_filterGuid, sizeof(struct VaFsGuid));
-    filter.Header.Length = sizeof(struct VaFsFeatureFilter);
-    filter.Type          = __get_filter_from_name(filterName);
-    if (filter.Type == -1) {
-        fprintf(stderr, "unsupported filter type %s\n", filterName);
-        return -1;
-    }
-
-    status = vafs_feature_add(vafs, &filter.Header);
-    if (status) {
-        // no filter present
-        return 0;
-    }
-    return __set_filter_ops(vafs, &filter);
+    return __install_filters(vafs, filterName, filterName);
 }

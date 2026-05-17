@@ -23,14 +23,31 @@
 #include <vafs/vafs.h>
 #include <string.h>
 
+static void __set_block_size(
+    uint32_t* target,
+    uint32_t  blockSize)
+{
+    // Descriptor and data streams now choose sizes independently, but both use
+    // the same on-disk block container and therefore share the same limits.
+    if (blockSize < VA_FS_DATA_MIN_BLOCKSIZE || blockSize > VA_FS_DATA_MAX_BLOCKSIZE) {
+        VAFS_ERROR("Invalid block size: %u", blockSize);
+        return;
+    }
+
+    *target = blockSize;
+}
+
 void vafs_config_initialize(struct VaFsConfiguration* configuration)
 {
     if (configuration == NULL) {
         return;
     }
 
-    configuration->Architecture  = VaFsArchitecture_UNKNOWN;
-    configuration->DataBlockSize = VA_FS_DATA_DEFAULT_BLOCKSIZE;
+    // Keep descriptor blocks small by default while preserving the existing
+    // data-stream default for file payload throughput.
+    configuration->Architecture        = VaFsArchitecture_UNKNOWN;
+    configuration->DescriptorBlockSize = VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    configuration->DataBlockSize       = VA_FS_DATA_DEFAULT_BLOCKSIZE;
 }
 
 void vafs_config_set_architecture(struct VaFsConfiguration* configuration, enum VaFsArchitecture architecture)
@@ -42,16 +59,27 @@ void vafs_config_set_architecture(struct VaFsConfiguration* configuration, enum 
     configuration->Architecture = architecture;
 }
 
-void vafs_config_set_block_size(struct VaFsConfiguration* configuration, uint32_t blockSize)
+void vafs_config_set_descriptor_block_size(struct VaFsConfiguration* configuration, uint32_t blockSize)
 {
     if (configuration == NULL) {
         return;
     }
 
-    if (blockSize < VA_FS_DATA_MIN_BLOCKSIZE || blockSize > VA_FS_DATA_MAX_BLOCKSIZE) {
-        VAFS_ERROR("Invalid block size: %d", blockSize);
+    __set_block_size(&configuration->DescriptorBlockSize, blockSize);
+}
+
+void vafs_config_set_data_block_size(struct VaFsConfiguration* configuration, uint32_t blockSize)
+{
+    if (configuration == NULL) {
         return;
     }
 
-    configuration->DataBlockSize = blockSize;
+    __set_block_size(&configuration->DataBlockSize, blockSize);
+}
+
+void vafs_config_set_block_size(struct VaFsConfiguration* configuration, uint32_t blockSize)
+{
+    // Preserve the legacy setter as shorthand for the data stream so existing
+    // callers remain source-compatible.
+    vafs_config_set_data_block_size(configuration, blockSize);
 }

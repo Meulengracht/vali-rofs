@@ -25,139 +25,10 @@
 #include <string.h>
 #include <vafs/directory.h>
 
-struct __directory_name_index_entry {
-    const char*                Name;
-    struct VaFsDirectoryEntry* Entry;
-};
-
 struct VaFsDirectoryHandle {
     struct VaFsDirectory* Directory;
     int                   Index;
 };
-
-static uint64_t __directory_lookup_cache_hash(
-    const struct VaFsDirectory* directory,
-    const char*                 token)
-{
-    const unsigned char* name = (const unsigned char*)token;
-    uintptr_t            parent = (uintptr_t)directory;
-    uint64_t             hash = 1469598103934665603ULL;
-
-    for (size_t i = 0; i < sizeof(parent); i++) {
-        hash ^= (uint64_t)((parent >> (i * 8)) & 0xFF);
-        hash *= 1099511628211ULL;
-    }
-
-    while (*name != '\0') {
-        hash ^= (uint64_t)*name++;
-        hash *= 1099511628211ULL;
-    }
-    return hash;
-}
-
-size_t __vafs_directory_lookup_cache_set(
-    const struct VaFsDirectory* directory,
-    const char*                 token)
-{
-    return (size_t)(__directory_lookup_cache_hash(directory, token) & (VAFS_LOOKUP_CACHE_SET_COUNT - 1));
-}
-
-static uint64_t __directory_lookup_cache_generation(
-    struct VaFsLookupCache* cache)
-{
-    cache->Generation++;
-    if (cache->Generation == 0) {
-        cache->Generation = 1;
-    }
-    return cache->Generation;
-}
-
-static struct VaFsLookupCacheEntry* __directory_lookup_cache_entries(
-    struct VaFs* vafs,
-    size_t       setIndex)
-{
-    return &vafs->LookupCache.Entries[setIndex * VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY];
-}
-
-static int __directory_lookup_cache_get(
-    struct VaFsDirectory*       directory,
-    const char*                 token,
-    struct VaFsDirectoryEntry** entryOut)
-{
-    struct VaFsLookupCache*      cache;
-    struct VaFsLookupCacheEntry* entries;
-    size_t                       setIndex;
-
-    if (directory->VaFs->Mode != VaFsMode_Read) {
-        return 0;
-    }
-
-    cache = &directory->VaFs->LookupCache;
-    setIndex = __vafs_directory_lookup_cache_set(directory, token);
-    entries = __directory_lookup_cache_entries(directory->VaFs, setIndex);
-    for (size_t i = 0; i < VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY; i++) {
-        if (entries[i].State == VaFsLookupCacheState_Empty) {
-            continue;
-        }
-
-        if (entries[i].Parent != directory || strcmp(entries[i].Name, token) != 0) {
-            continue;
-        }
-
-        entries[i].Generation = __directory_lookup_cache_generation(cache);
-        if (entries[i].State == VaFsLookupCacheState_Miss) {
-            errno = ENOENT;
-            *entryOut = NULL;
-            return 1;
-        }
-
-        *entryOut = entries[i].Entry;
-        return 1;
-    }
-    return 0;
-}
-
-static void __directory_lookup_cache_store(
-    struct VaFsDirectory*      directory,
-    const char*                token,
-    struct VaFsDirectoryEntry* entry)
-{
-    struct VaFsLookupCache*      cache;
-    struct VaFsLookupCacheEntry* entries;
-    struct VaFsLookupCacheEntry* target;
-    size_t                       setIndex;
-
-    if (directory->VaFs->Mode != VaFsMode_Read) {
-        return;
-    }
-
-    cache = &directory->VaFs->LookupCache;
-    setIndex = __vafs_directory_lookup_cache_set(directory, token);
-    entries = __directory_lookup_cache_entries(directory->VaFs, setIndex);
-    target = &entries[0];
-
-    for (size_t i = 0; i < VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY; i++) {
-        if (entries[i].State == VaFsLookupCacheState_Empty) {
-            target = &entries[i];
-            break;
-        }
-
-        if (entries[i].Parent == directory && strcmp(entries[i].Name, token) == 0) {
-            target = &entries[i];
-            break;
-        }
-
-        if (target->State != VaFsLookupCacheState_Empty && entries[i].Generation < target->Generation) {
-            target = &entries[i];
-        }
-    }
-
-    target->Parent = directory;
-    target->Entry = entry;
-    target->Generation = __directory_lookup_cache_generation(cache);
-    target->State = entry != NULL ? VaFsLookupCacheState_Hit : VaFsLookupCacheState_Miss;
-    memcpy(target->Name, token, strlen(token) + 1);
-}
 
 static void __initialize_file_descriptor(
     VaFsFileDescriptor_t* descriptor,
@@ -216,17 +87,8 @@ static int __vafs_directory_stat_internal(
     struct VaFsDirectory* directory,
     struct vafs_stat*     stat)
 {
-    if (directory->VaFs->Mode == VaFsMode_Read && directory->StatCached) {
-        *stat = directory->Stat;
-        return 0;
-    }
-
     stat->mode = S_IFDIR | directory->Descriptor.Permissions;
     stat->size = 0;
-    if (directory->VaFs->Mode == VaFsMode_Read) {
-        directory->Stat = *stat;
-        directory->StatCached = 1;
-    }
     return 0;
 }
 
@@ -268,7 +130,6 @@ int vafs_directory_create_root(
 
     directory->Base.VaFs = vafs;
     directory->Base.Name = strdup("root");
-    directory->Base.StatCached = 0;
     directory->Index = NULL;
     directory->EntryCount = 0;
     directory->IndexDirty = 1;
@@ -306,195 +167,19 @@ static void __cleanup_directory_entries(struct VaFsDirectoryEntry* entries)
     }
 }
 
-static void __free_directory_index(struct VaFsDirectoryEntry** index)
-{
-    free(index);
-}
-
-static void __free_directory_name_index(struct VaFsDirectoryReader* reader)
-{
-    if (reader->NameIndexInitialized) {
-        vafs_hashtable_destroy(&reader->NameIndex);
-        memset(&reader->NameIndex, 0, sizeof(hashtable_t));
-        reader->NameIndexInitialized = 0;
-    }
-}
-
 static void __directory_reader_destroy(struct VaFsDirectoryReader* reader)
 {
+    // Reader teardown releases fully materialized entries, any derived lookup
+    // indexes, and finally the private descriptor-stream cursor.
     __cleanup_directory_entries(reader->Entries);
-    __free_directory_index(reader->Index);
-    __free_directory_name_index(reader);
+    __directory_reader_index_delete(reader);
+    vafs_stream_reader_close(reader->Reader);
 }
 
 static void __directory_writer_destroy(struct VaFsDirectoryWriter* writer)
 {
     __cleanup_directory_entries(writer->Entries);
-    __free_directory_index(writer->Index);
-}
-
-static int __compare_directory_entries(
-    const void* lhs,
-    const void* rhs)
-{
-    const struct VaFsDirectoryEntry* left = *(const struct VaFsDirectoryEntry* const*)lhs;
-    const struct VaFsDirectoryEntry* right = *(const struct VaFsDirectoryEntry* const*)rhs;
-    const char* leftName = __vafs_directory_entry_name((struct VaFsDirectoryEntry*)left);
-    const char* rightName = __vafs_directory_entry_name((struct VaFsDirectoryEntry*)right);
-
-    return strcmp(leftName, rightName);
-}
-
-static uint64_t __directory_name_hash(
-    const void* element)
-{
-    const struct __directory_name_index_entry* indexEntry = element;
-    const unsigned char*                       name = (const unsigned char*)indexEntry->Name;
-    uint64_t                                   hash = 1469598103934665603ULL;
-
-    while (*name != '\0') {
-        hash ^= (uint64_t)*name++;
-        hash *= 1099511628211ULL;
-    }
-    return hash;
-}
-
-static int __directory_name_cmp(
-    const void* lhs,
-    const void* rhs)
-{
-    const struct __directory_name_index_entry* left = lhs;
-    const struct __directory_name_index_entry* right = rhs;
-
-    return strcmp(left->Name, right->Name);
-}
-
-static size_t __directory_entry_count(
-    struct VaFsDirectory* directory)
-{
-    if (directory->VaFs->Mode == VaFsMode_Read) {
-        return ((struct VaFsDirectoryReader*)directory)->EntryCount;
-    }
-
-    return ((struct VaFsDirectoryWriter*)directory)->EntryCount;
-}
-
-static int __directory_uses_name_index(
-    struct VaFsDirectory* directory)
-{
-    return directory->VaFs->Mode == VaFsMode_Read &&
-        __directory_entry_count(directory) >= VAFS_DIRECTORY_HASH_INDEX_THRESHOLD;
-}
-
-static struct VaFsDirectoryEntry** __vafs_directory_index(
-    struct VaFsDirectory* directory)
-{
-    struct VaFsDirectoryReader* reader;
-    struct VaFsDirectoryWriter* writer;
-    struct VaFsDirectoryEntry*  entry;
-    struct VaFsDirectoryEntry**  index;
-    size_t                      count = __directory_entry_count(directory);
-    size_t                      i;
-
-    if (count == 0) {
-        return NULL;
-    }
-
-    if (directory->VaFs->Mode == VaFsMode_Read) {
-        reader = (struct VaFsDirectoryReader*)directory;
-        // Loaded directories cache a sorted pointer array so repeated lookups stay logarithmic.
-        if (reader->Index != NULL && !reader->IndexDirty) {
-            return reader->Index;
-        }
-
-        index = malloc(sizeof(struct VaFsDirectoryEntry*) * count);
-        if (!index) {
-            errno = ENOMEM;
-            return NULL;
-        }
-
-        entry = reader->Entries;
-        for (i = 0; i < count; i++) {
-            index[i] = entry;
-            entry = entry->Link;
-        }
-
-        qsort(index, count, sizeof(struct VaFsDirectoryEntry*), __compare_directory_entries);
-        __free_directory_index(reader->Index);
-        reader->Index = index;
-        reader->IndexDirty = 0;
-        return reader->Index;
-    }
-
-    writer = (struct VaFsDirectoryWriter*)directory;
-    if (writer->Index != NULL && !writer->IndexDirty) {
-        return writer->Index;
-    }
-
-    index = malloc(sizeof(struct VaFsDirectoryEntry*) * count);
-    if (!index) {
-        errno = ENOMEM;
-        return NULL;
-    }
-
-    entry = writer->Entries;
-    for (i = 0; i < count; i++) {
-        index[i] = entry;
-        entry = entry->Link;
-    }
-
-    qsort(index, count, sizeof(struct VaFsDirectoryEntry*), __compare_directory_entries);
-    __free_directory_index(writer->Index);
-    writer->Index = index;
-    writer->IndexDirty = 0;
-    return writer->Index;
-}
-
-static hashtable_t* __vafs_directory_name_index(
-    struct VaFsDirectory* directory)
-{
-    struct VaFsDirectoryReader* reader = (struct VaFsDirectoryReader*)directory;
-    struct VaFsDirectoryEntry*  entry;
-    size_t                      count;
-    int                         status;
-
-    if (!__directory_uses_name_index(directory)) {
-        return NULL;
-    }
-
-    if (reader->NameIndexInitialized) {
-        return &reader->NameIndex;
-    }
-
-    count = __directory_entry_count(directory);
-    status = vafs_hashtable_construct(
-        &reader->NameIndex,
-        count,
-        sizeof(struct __directory_name_index_entry),
-        __directory_name_hash,
-        __directory_name_cmp
-    );
-    if (status != 0) {
-        return NULL;
-    }
-    reader->NameIndexInitialized = 1;
-
-    entry = reader->Entries;
-    while (entry != NULL) {
-        struct __directory_name_index_entry indexEntry = {
-            .Name = __vafs_directory_entry_name(entry),
-            .Entry = entry
-        };
-
-        errno = 0;
-        if (vafs_hashtable_set(&reader->NameIndex, &indexEntry) == NULL && errno != 0) {
-            __free_directory_name_index(reader);
-            return NULL;
-        }
-        entry = entry->Link;
-    }
-
-    return &reader->NameIndex;
+    __directory_writer_index_delete(writer);
 }
 
 struct VaFsDirectoryEntry* __vafs_directory_find_entry(
@@ -521,70 +206,11 @@ struct VaFsDirectoryEntry* __vafs_directory_find_entry(
         errno = ENOENT;
         return NULL;
     }
-
-    if (__directory_lookup_cache_get(directory, token, &entry)) {
-        return entry;
-    }
-
+    
     if (__vafs_directory_entries(directory) == NULL) {
         return NULL;
     }
-
-    if (__directory_uses_name_index(directory)) {
-        hashtable_t* nameIndex = __vafs_directory_name_index(directory);
-        struct __directory_name_index_entry* indexedEntry;
-
-        if (nameIndex == NULL) {
-            return NULL;
-        }
-
-        indexedEntry = vafs_hashtable_get(
-            nameIndex,
-            &(struct __directory_name_index_entry) { .Name = token }
-        );
-        if (indexedEntry == NULL) {
-            if (errno == ENOENT) {
-                __directory_lookup_cache_store(directory, token, NULL);
-            }
-            return NULL;
-        }
-        __directory_lookup_cache_store(directory, token, indexedEntry->Entry);
-        return indexedEntry->Entry;
-    }
-
-    struct VaFsDirectoryEntry** index;
-    size_t                      count;
-    size_t                      left;
-    size_t                      right;
-
-    // Smaller read-mode directories use the cached sorted view for binary search by entry name.
-    index = __vafs_directory_index(directory);
-    if (!index) {
-        return NULL;
-    }
-
-    count = __directory_entry_count(directory);
-    left = 0;
-    right = count;
-    while (left < right) {
-        size_t middle = left + ((right - left) / 2);
-        int comparison = strcmp(__vafs_directory_entry_name(index[middle]), token);
-
-        if (comparison == 0) {
-            __directory_lookup_cache_store(directory, token, index[middle]);
-            return index[middle];
-        }
-
-        if (comparison < 0) {
-            left = middle + 1;
-        } else {
-            right = middle;
-        }
-    }
-
-    errno = ENOENT;
-    __directory_lookup_cache_store(directory, token, NULL);
-    return NULL;
+    return __vafs_directory_get(directory, token);
 }
 
 int __vafs_directory_entry_stat(
@@ -809,8 +435,12 @@ static int __read_descriptor(
         return -1;
     }
 
-    status = vafs_stream_read(
-        reader->Base.VaFs->DescriptorStream, 
+    // Consume one descriptor record from the reader-local cursor: the generic
+    // base header first, then the fixed type-specific body, then any trailing
+    // variable-length payload such as names or symlink targets.
+
+    status = vafs_stream_reader_read(
+        reader->Reader,
         buffer, sizeof(VaFsDescriptor_t),
         &read
     );
@@ -824,6 +454,8 @@ static int __read_descriptor(
     
     size = __get_descriptor_size(base->Type);
     if (base->Length < sizeof(VaFsDescriptor_t) || !size) {
+        // The fixed descriptor body must be at least the generic base header,
+        // and the type must resolve to a known in-memory descriptor layout.
         VAFS_ERROR("__read_descriptor: invalid descriptor size: %i for type %i\n", base->Length, base->Type);
         errno = EINVAL;
         return -1;
@@ -833,8 +465,11 @@ static int __read_descriptor(
         VAFS_DEBUG("__read_descriptor: read %u/%u descriptor bytes, reading rest\n", 
             sizeof(VaFsDescriptor_t), size);
 
-        status = vafs_stream_read(
-            reader->Base.VaFs->DescriptorStream, 
+        // Some descriptor types have a larger fixed header than the generic
+        // base descriptor, so read that fixed body before any trailing payload.
+
+        status = vafs_stream_reader_read(
+            reader->Reader,
             ext, size - sizeof(VaFsDescriptor_t),
             &read
         );
@@ -847,6 +482,8 @@ static int __read_descriptor(
             VAFS_DEBUG("__read_descriptor: read %u/%u bytes, reading descriptor extension data\n",
                 size, base->Length);
 
+            // Names and symlink targets live beyond the fixed descriptor body,
+            // so preserve the trailing bytes separately for the constructors.
             // read rest of descriptor
             char* extendedBuffer = (char*)malloc(base->Length - size);
             if (!extendedBuffer) {
@@ -855,8 +492,8 @@ static int __read_descriptor(
                 return -1;
             }
 
-            status = vafs_stream_read(
-                reader->Base.VaFs->DescriptorStream, 
+            status = vafs_stream_reader_read(
+                reader->Reader,
                 extendedBuffer, base->Length - size,
                 &read
             );
@@ -872,6 +509,7 @@ static int __read_descriptor(
     return 0;
 }
 
+// Don't use strdup here, since there may be data beyond length
 static const char* __read_extended_string(const char* buffer, size_t length)
 {
     char* str = (char*)malloc(length + 1);
@@ -899,16 +537,14 @@ static struct VaFsFile* __create_file_from_descriptor(
         return NULL;
     }
 
-    file = (struct VaFsFile*)malloc(sizeof(struct VaFsFile));
+    file = (struct VaFsFile*)calloc(1, sizeof(struct VaFsFile));
     if (!file) {
-        errno = ENOMEM;
         return NULL;
     }
 
     memcpy(&file->Descriptor, descriptor, sizeof(VaFsFileDescriptor_t));
     file->Name = __read_extended_string(extendedData, descriptor->Base.Length - sizeof(VaFsFileDescriptor_t));
     file->VaFs = vafs;
-    file->StatCached = 0;
     return file;
 }
 
@@ -919,29 +555,27 @@ static struct VaFsDirectory* __create_directory_from_descriptor(
 {
     struct VaFsDirectoryReader* directory;
 
+    // Read-mode directories stay lazy: keep the on-disk descriptor now and
+    // defer allocating a descriptor reader or parsing child entries until the
+    // first traversal actually needs them.
+
     // Validate the directory descriptor
     if (__validate_directory_descriptor(descriptor, extendedData) != 0) {
         errno = EINVAL;
         return NULL;
     }
 
-    directory = (struct VaFsDirectoryReader*)malloc(sizeof(struct VaFsDirectoryReader));
+    directory = (struct VaFsDirectoryReader*)calloc(1, sizeof(struct VaFsDirectoryReader));
     if (!directory) {
-        errno = ENOMEM;
         return NULL;
     }
 
+    memcpy(&directory->Base.Descriptor, descriptor, sizeof(VaFsDirectoryDescriptor_t));
+
     directory->State     = VaFsDirectoryState_Open;
-    directory->Entries   = NULL;
-    directory->Index     = NULL;
-    directory->EntryCount = 0;
     directory->IndexDirty = 1;
-    directory->NameIndexInitialized = 0;
-    memset(&directory->NameIndex, 0, sizeof(hashtable_t));
     directory->Base.Name = __read_extended_string(extendedData, descriptor->Base.Length - sizeof(VaFsDirectoryDescriptor_t));
     directory->Base.VaFs = vafs;
-    directory->Base.StatCached = 0;
-    memcpy(&directory->Base.Descriptor, descriptor, sizeof(VaFsDirectoryDescriptor_t));
     return &directory->Base;
 }
 
@@ -958,9 +592,8 @@ static struct VaFsSymlink* __create_symlink_from_descriptor(
         return NULL;
     }
 
-    symlink = (struct VaFsSymlink*)malloc(sizeof(struct VaFsSymlink));
+    symlink = (struct VaFsSymlink*)calloc(1, sizeof(struct VaFsSymlink));
     if (!symlink) {
-        errno = ENOMEM;
         return NULL;
     }
 
@@ -968,7 +601,6 @@ static struct VaFsSymlink* __create_symlink_from_descriptor(
     symlink->Name   = __read_extended_string(extendedData, descriptor->NameLength);
     symlink->Target = __read_extended_string(extendedData + descriptor->NameLength, descriptor->TargetLength);
     symlink->VaFs   = vafs;
-    symlink->StatCached = 0;
     return symlink;
 }
 
@@ -979,13 +611,13 @@ static struct VaFsDirectoryEntry* __create_entry_from_descriptor(
 {
     struct VaFsDirectoryEntry* entry;
     
-    entry = (struct VaFsDirectoryEntry*)malloc(sizeof(struct VaFsDirectoryEntry));
+    entry = (struct VaFsDirectoryEntry*)calloc(1, sizeof(struct VaFsDirectoryEntry));
     if (!entry) {
-        errno = ENOMEM;
         return NULL;
     }
-    memset(entry, 0, sizeof(struct VaFsDirectoryEntry));
 
+    // Convert the raw descriptor into the matching in-memory entry wrapper so
+    // later traversal can branch on one normalized entry type.
     entry->Type = descriptor->Type;
     if (entry->Type == VA_FS_DESCRIPTOR_TYPE_FILE) {
         entry->File = __create_file_from_descriptor(vafs, (VaFsFileDescriptor_t*)descriptor, extendedData);
@@ -994,6 +626,7 @@ static struct VaFsDirectoryEntry* __create_entry_from_descriptor(
     } else if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
         entry->Symlink = __create_symlink_from_descriptor(vafs, (VaFsSymlinkDescriptor_t*)descriptor, extendedData);
     } else {
+        free(entry);
         errno = EINVAL;
         return NULL;
     }
@@ -1009,51 +642,52 @@ static int __load_directory(
 
     VAFS_DEBUG("__load_directory(directory=%s)\n", reader->Base.Name);
 
+    // Materialize the directory once: create a private descriptor cursor if
+    // needed, seek to the directory payload, stream entries in order, and then
+    // build whichever lookup accelerator matches the directory size.
+
     // if the directory has no entries, we can skip loading it
     if (reader->Base.Descriptor.Descriptor.Index == VA_FS_INVALID_BLOCK) {
+        // Empty directories have no persisted descriptor payload to parse.
         reader->State = VaFsDirectoryState_Loaded;
         return 0;
     }
 
-    status = vafs_stream_lock(reader->Base.VaFs->DescriptorStream);
-    if (status) {
-        VAFS_ERROR("__load_directory: failed to get lock on stream\n");
-        return status;
+    if (reader->Reader == NULL) {
+        // The descriptor stream reader is allocated lazily so unopened
+        // directories do not pay for a cursor or block buffer up front.
+        status = vafs_stream_reader_open(reader->Base.VaFs->DescriptorStream, &reader->Reader);
+        if (status != 0) {
+            VAFS_ERROR("__load_directory: failed to create stream reader\n");
+            return status;
+        }
     }
 
-    // we lock the descriptor stream while reading the directory
-    // as only one can access the underlying media at the time due
-    // the c file interface.
-    status = vafs_stream_seek(
-        reader->Base.VaFs->DescriptorStream,
+    status = vafs_stream_reader_seek(
+        reader->Reader,
         reader->Base.Descriptor.Descriptor.Index,
         reader->Base.Descriptor.Descriptor.Offset
     );
     if (status) {
         VAFS_ERROR("__load_directory: failed to seek to directory data\n");
-        vafs_stream_unlock(reader->Base.VaFs->DescriptorStream);
         return status;
     }
 
     // read the directory descriptor
-    status = vafs_stream_read(
-        reader->Base.VaFs->DescriptorStream,
+    status = vafs_stream_reader_read(
+        reader->Reader,
         &header, sizeof(VaFsDirectoryHeader_t),
         &read
     );
     if (status) {
         VAFS_ERROR("__load_directory: failed to read directory header\n");
-        vafs_stream_unlock(reader->Base.VaFs->DescriptorStream);
         return status;
     }
 
     // Validate directory entry count is reasonable
-    // A directory with more than 1 million entries is suspicious and likely malformed
-    #define MAX_DIRECTORY_ENTRIES 1000000
-    if (header.Count > MAX_DIRECTORY_ENTRIES) {
+    if (header.Count > VAFS_MAX_DIRECTORY_ENTRIES) {
         VAFS_ERROR("__load_directory: directory entry count %u exceeds maximum %d\n",
-            header.Count, MAX_DIRECTORY_ENTRIES);
-        vafs_stream_unlock(reader->Base.VaFs->DescriptorStream);
+            header.Count, VAFS_MAX_DIRECTORY_ENTRIES);
         errno = EINVAL;
         return -1;
     }
@@ -1065,11 +699,12 @@ static int __load_directory(
         char                       buffer[64];
         char*                      extendedData = NULL;
         VAFS_INFO("__load_directory: reading entry %i/%u\n", i, header.Count);
+        // Each loop iteration consumes one on-disk descriptor and immediately
+        // converts it into the normalized in-memory entry type.
         
         status = __read_descriptor(reader, &buffer[0], &extendedData);
         if (status) {
             VAFS_ERROR("__load_directory: failed to read descriptor\n");
-            vafs_stream_unlock(reader->Base.VaFs->DescriptorStream);
             return status;
         }
 
@@ -1079,7 +714,6 @@ static int __load_directory(
 
         if (!entry) {
             VAFS_ERROR("__load_directory: failed to create entry\n");
-            vafs_stream_unlock(reader->Base.VaFs->DescriptorStream);
             return -1;
         }
 
@@ -1089,19 +723,9 @@ static int __load_directory(
         reader->EntryCount++;
     }
 
-    // unlock the descriptor stream
-    vafs_stream_unlock(reader->Base.VaFs->DescriptorStream);
-
     reader->State = VaFsDirectoryState_Loaded;
     reader->IndexDirty = 1;
-    if (__directory_uses_name_index(&reader->Base)) {
-        if (__vafs_directory_name_index(&reader->Base) == NULL && reader->EntryCount != 0) {
-            return -1;
-        }
-    } else if (__vafs_directory_index(&reader->Base) == NULL && reader->EntryCount != 0) {
-        return -1;
-    }
-    return 0;
+    return __vafs_directory_index_build(reader);
 }
 
 int vafs_directory_open_root(
@@ -1110,6 +734,9 @@ int vafs_directory_open_root(
     struct VaFsDirectory** directoryOut)
 {
     struct VaFsDirectoryReader* reader;
+
+    // Root opens as a lazy read-mode wrapper around the persisted root
+    // descriptor position stored in the filesystem header.
     
     if (vafs == NULL || position == NULL || directoryOut == NULL) {
         errno = EINVAL;
@@ -1118,22 +745,16 @@ int vafs_directory_open_root(
 
     VAFS_DEBUG("vafs_directory_open_root(pos=%u/%u)\n", position->Index, position->Offset);
     
-    reader = (struct VaFsDirectoryReader*)malloc(sizeof(struct VaFsDirectoryReader));
+    reader = (struct VaFsDirectoryReader*)calloc(1, sizeof(struct VaFsDirectoryReader));
     if (!reader) {
         VAFS_ERROR("vafs_directory_open_root: failed to allocate directory reader\n");
-        errno = ENOMEM;
         return -1;
     }
 
     reader->Base.VaFs = vafs;
     reader->Base.Name = strdup("root");
-    reader->Base.StatCached = 0;
     reader->State     = VaFsDirectoryState_Open;
-    reader->Entries   = NULL;
-    reader->Index     = NULL;
-    reader->EntryCount = 0;
     reader->IndexDirty = 1;
-    reader->NameIndexInitialized = 0;
     memset(&reader->NameIndex, 0, sizeof(hashtable_t));
     
     // initialize the root descriptor for the directory
@@ -1160,8 +781,7 @@ struct VaFsDirectoryEntry* __vafs_directory_entries(
             }
         }
         return reader->Entries;
-    }
-    else {
+    } else {
         struct VaFsDirectoryWriter* writer = (struct VaFsDirectoryWriter*)directory;
         return writer->Entries;
     }
@@ -1235,7 +855,6 @@ int __vafs_directory_open_internal(
 
         entry = __vafs_directory_find_entry(currentDirectory, token);
         if (entry == NULL) {
-            errno = ENOENT;
             return -1;
         }
 
@@ -1480,8 +1099,16 @@ uint32_t vafs_directory_permissions(
         errno = EINVAL;
         return (uint32_t)-1;
     }
-
     return handle->Directory->Descriptor.Permissions;
+}
+
+static size_t __directory_entry_count(
+    struct VaFsDirectory* directory)
+{
+    if (directory->VaFs->Mode == VaFsMode_Read) {
+        return ((struct VaFsDirectoryReader*)directory)->EntryCount;
+    }
+    return ((struct VaFsDirectoryWriter*)directory)->EntryCount;
 }
 
 int vafs_directory_read(
@@ -1498,7 +1125,8 @@ int vafs_directory_read(
         return -1;
     }
 
-    __vafs_directory_entries(handle->Directory);
+    // make sure directory entries are loaded and indexed
+    (void)__vafs_directory_entries(handle->Directory);
 
     count = __directory_entry_count(handle->Directory);
     VAFS_DEBUG("vafs_directory_read: locate index %i\n", handle->Index);
@@ -1510,6 +1138,10 @@ int vafs_directory_read(
 
     // Directory iteration preserves the stored list order for compatibility.
     entry = __vafs_directory_entries(handle->Directory);
+    if (entry == NULL) {
+        return -1;
+    }
+
     for (i = 0; i < (size_t)handle->Index; i++) {
         if (entry == NULL) {
             errno = ENOENT;
@@ -1549,9 +1181,8 @@ static int __add_file_entry(
 {
     struct VaFsDirectoryEntry* newEntry;
 
-    newEntry = (struct VaFsDirectoryEntry*)malloc(sizeof(struct VaFsDirectoryEntry));
+    newEntry = (struct VaFsDirectoryEntry*)calloc(1, sizeof(struct VaFsDirectoryEntry));
     if (!newEntry) {
-        errno = ENOMEM;
         return -1;
     }
 
@@ -1572,18 +1203,15 @@ static int __create_file_entry(
     struct VaFsFile* entry;
     int              status;
 
-    entry = (struct VaFsFile*)malloc(sizeof(struct VaFsFile));
+    entry = (struct VaFsFile*)calloc(1, sizeof(struct VaFsFile));
     if (!entry) {
-        errno = ENOMEM;
         return -1;
     }
 
     entry->VaFs = writer->Base.VaFs;
     entry->Name = strdup(name);
-    entry->StatCached = 0;
     if (!entry->Name) {
         free(entry);
-        errno = ENOMEM;
         return -1;
     }
 
@@ -1605,9 +1233,8 @@ static int __add_symlink_entry(
 {
     struct VaFsDirectoryEntry* newEntry;
 
-    newEntry = (struct VaFsDirectoryEntry*)malloc(sizeof(struct VaFsDirectoryEntry));
+    newEntry = (struct VaFsDirectoryEntry*)calloc(1, sizeof(struct VaFsDirectoryEntry));
     if (!newEntry) {
-        errno = ENOMEM;
         return -1;
     }
 
@@ -1629,18 +1256,15 @@ static int __create_symlink_entry(
     struct VaFsSymlink* entry;
     int                 status;
 
-    entry = (struct VaFsSymlink*)malloc(sizeof(struct VaFsSymlink));
+    entry = (struct VaFsSymlink*)calloc(1, sizeof(struct VaFsSymlink));
     if (!entry) {
-        errno = ENOMEM;
         return -1;
     }
 
     entry->VaFs = writer->Base.VaFs;
     entry->Name = strdup(name);
-    entry->StatCached = 0;
     if (!entry->Name) {
         free(entry);
-        errno = ENOMEM;
         return -1;
     }
 
@@ -1648,12 +1272,10 @@ static int __create_symlink_entry(
     if (!entry->Target) {
         free((void*)entry->Name);
         free(entry);
-        errno = ENOMEM;
         return -1;
     }
 
     __initialize_symlink_descriptor(&entry->Descriptor);
-    entry->StatCached = 0;
     status = __add_symlink_entry(writer, entry);
     if (status) {
         free((void*)entry->Target);
@@ -1672,9 +1294,8 @@ static int __add_directory_entry(
 {
     struct VaFsDirectoryEntry* newEntry;
 
-    newEntry = (struct VaFsDirectoryEntry*)malloc(sizeof(struct VaFsDirectoryEntry));
+    newEntry = (struct VaFsDirectoryEntry*)calloc(1, sizeof(struct VaFsDirectoryEntry));
     if (!newEntry) {
-        errno = ENOMEM;
         return -1;
     }
 
@@ -1696,22 +1317,17 @@ static int __create_directory_entry(
     int                         status;
     VAFS_DEBUG("__create_directory_entry(name=%s)\n", name);
 
-    entry = (struct VaFsDirectoryWriter*)malloc(sizeof(struct VaFsDirectoryWriter));
+    entry = (struct VaFsDirectoryWriter*)calloc(1, sizeof(struct VaFsDirectoryWriter));
     if (!entry) {
         errno = ENOMEM;
         return -1;
     }
 
-    entry->Entries = NULL;
-    entry->Index = NULL;
-    entry->EntryCount = 0;
     entry->IndexDirty = 1;
     entry->Base.VaFs = writer->Base.VaFs;
     entry->Base.Name = strdup(name);
-    entry->Base.StatCached = 0;
     if (!entry->Base.Name) {
         free(entry);
-        errno = ENOMEM;
         return -1;
     }
 
@@ -1755,7 +1371,6 @@ int vafs_directory_open_directory(
     // find the name in the directory
     entry = __vafs_directory_find_entry(handle->Directory, token);
     if (entry == NULL) {
-        errno = ENOENT;
         return -1;
     }
 
@@ -1844,7 +1459,6 @@ int vafs_directory_open_file(
     // find the name in the directory
     entry = __vafs_directory_find_entry(handle->Directory, token);
     if (entry == NULL) {
-        errno = ENOENT;
         return -1;
     }
 
@@ -1970,7 +1584,6 @@ int vafs_directory_read_symlink(
     VAFS_DEBUG("vafs_directory_read_symlink: locating %s\n", token);
     entry = __vafs_directory_find_entry(handle->Directory, token);
     if (entry == NULL) {
-        errno = ENOENT;
         return -1;
     }
     

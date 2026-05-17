@@ -46,11 +46,20 @@ typedef struct {
 #endif
 
 /**
+ * @brief Benchmark run configuration
+ */
+typedef struct {
+    uint64_t iterations;
+    uint64_t warmup_iterations;
+} BenchmarkRunConfig;
+
+/**
  * @brief Benchmark result structure
  */
 typedef struct {
     const char*  name;
     uint64_t     iterations;
+    uint64_t     warmup_iterations;
     double       total_time_ms;
     double       avg_time_ms;
     double       min_time_ms;
@@ -80,6 +89,11 @@ double benchmark_timespec_diff_ms(struct timespec* start, struct timespec* end);
 void benchmark_print_result(const BenchmarkResult* result);
 
 /**
+ * @brief Print a JSON-escaped string value, including quotes
+ */
+void benchmark_print_json_string(const char* value);
+
+/**
  * @brief Print benchmark result in JSON format
  */
 void benchmark_print_result_json(const BenchmarkResult* result, int is_last);
@@ -98,7 +112,8 @@ double benchmark_calculate_throughput(uint64_t bytes, double time_ms);
  * @brief Run a benchmark function multiple times and collect statistics
  *
  * @param name Benchmark name
- * @param iterations Number of iterations to run
+ * @param config Run configuration; `iterations` defaults to 1 and `warmup_iterations`
+ *               defaults to 0 when `config` is `NULL`
  * @param setup_fn Setup function called once before all iterations (can be NULL)
  * @param benchmark_fn Benchmark function to time (returns 0 on success, -1 on error)
  * @param teardown_fn Teardown function called once after all iterations (can be NULL)
@@ -107,7 +122,7 @@ double benchmark_calculate_throughput(uint64_t bytes, double time_ms);
  */
 BenchmarkResult benchmark_run(
     const char* name,
-    uint64_t iterations,
+    const BenchmarkRunConfig* config,
     int (*setup_fn)(void* user_data),
     int (*benchmark_fn)(void* user_data),
     void (*teardown_fn)(void* user_data),
