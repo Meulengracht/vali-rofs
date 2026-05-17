@@ -906,10 +906,12 @@ int vafs_stream_reader_read(
         data                      += byteCount;
         bytesToRead               -= byteCount;
 
-        if (reader->BlockBufferOffset == reader->BlockBufferLength &&
+        if (bytesToRead != 0 &&
+            reader->BlockBufferOffset == reader->BlockBufferLength &&
             reader->BlockBufferIndex + 1 < stream->BlockHeaders.Count) {
             // Crossing the boundary stages the next block so sequential reads
-            // continue forward without an explicit seek from the caller.
+            // continue forward without an explicit seek from the caller, but
+            // only while the current request still needs more bytes.
             VAFS_DEBUG("vafs_stream_read: loading block %u\n", reader->BlockBufferIndex);
             if (__load_blockbuffer(reader, reader->BlockBufferIndex + 1)) {
                 VAFS_ERROR("vafs_stream_read: failed to load block\n");

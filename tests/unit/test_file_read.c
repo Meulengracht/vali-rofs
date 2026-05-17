@@ -565,6 +565,81 @@ static int test_open_ops_accepts_read_at_only_backend(void)
     TEST_PASS("Read-only custom backends can rely on readAt without seek+read");
 }
 
+static int test_boundary_read_does_not_prefetch_next_stream_block(void)
+{
+    struct VaFs* vafs = NULL;
+    struct VaFsConfiguration config;
+    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsFileHandle* first = NULL;
+    struct VaFsFileHandle* second = NULL;
+    struct VaFsOperations ops = { 0 };
+    struct ReadAtOnlyBuffer image = { 0 };
+    char* payload = NULL;
+    char* buffer = NULL;
+    const char tailPayload[] = "tail";
+    size_t read;
+    int status;
+
+    // Read exactly one logical block from the first file while a later block
+    // exists in the same stream. The read path should not fetch the successor
+    // block once the caller's request is already complete.
+
+    payload = malloc(TEST_BLOCK_SIZE);
+    buffer = malloc(TEST_BLOCK_SIZE);
+    TEST_ASSERT(payload != NULL && buffer != NULL, "Failed to allocate boundary-read buffers");
+
+    fill_pattern(payload, TEST_BLOCK_SIZE);
+
+    vafs_config_initialize(&config);
+    vafs_config_set_block_size(&config, TEST_BLOCK_SIZE);
+
+    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    TEST_ASSERT(status == 0, "Failed to create boundary-read test image");
+
+    status = vafs_directory_open(vafs, "/", &root);
+    TEST_ASSERT(status == 0, "Failed to open root directory");
+
+    status = vafs_directory_create_file(root, "first", 0644, &first);
+    TEST_ASSERT(status == 0, "Failed to create first boundary-read file");
+    TEST_ASSERT(vafs_file_write(first, payload, TEST_BLOCK_SIZE) == 0, "Failed to write first boundary-read payload");
+    vafs_file_close(first);
+    first = NULL;
+
+    status = vafs_directory_create_file(root, "second", 0644, &second);
+    TEST_ASSERT(status == 0, "Failed to create second boundary-read file");
+    TEST_ASSERT(vafs_file_write(second, (void*)tailPayload, sizeof(tailPayload) - 1) == 0,
+        "Failed to write second boundary-read payload");
+    vafs_file_close(second);
+    second = NULL;
+
+    vafs_directory_close(root);
+    root = NULL;
+    vafs_close(vafs);
+    vafs = NULL;
+
+    status = load_image_bytes((void**)&image.Data, &image.Length);
+    TEST_ASSERT(status == 0, "Failed to load boundary-read image");
+
+    ops.readAt = read_at_only;
+    status = vafs_open_ops(&ops, &image, &vafs);
+    TEST_ASSERT(status == 0, "Failed to reopen boundary-read image");
+
+    status = vafs_file_open(vafs, "/first", &first);
+    TEST_ASSERT(status == 0, "Failed to open first boundary-read file");
+
+    image.ReadAtCalls = 0;
+    read = vafs_file_read(first, buffer, TEST_BLOCK_SIZE);
+    TEST_ASSERT(read == TEST_BLOCK_SIZE, "Boundary read size mismatch");
+    TEST_ASSERT(memcmp(buffer, payload, TEST_BLOCK_SIZE) == 0, "Boundary read content mismatch");
+    TEST_ASSERT(image.ReadAtCalls == 1, "Boundary read should consume exactly one backend block read");
+
+    cleanup_image(vafs, NULL, first);
+    free((void*)image.Data);
+    free(buffer);
+    free(payload);
+    TEST_PASS("Reads that finish on a block boundary do not prefetch the next stream block");
+}
+
 static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
 {
 #if defined(_WIN32) || defined(_WIN64)
@@ -699,6 +774,10 @@ int main(void)
 
     if (status == 0) {
         status = test_open_ops_accepts_read_at_only_backend();
+    }
+
+    if (status == 0) {
+        status = test_boundary_read_does_not_prefetch_next_stream_block();
     }
 
     if (status == 0) {

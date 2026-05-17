@@ -38,6 +38,24 @@ struct VaFsFileHandle {
     uint32_t           Position;
 };
 
+static int __ensure_file_reader(
+    struct VaFsFileHandle* handle)
+{
+    if (handle == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (handle->Reader != NULL) {
+        return 0;
+    }
+
+    // Read handles defer their private stream cursor until the first data
+    // access so open/close-heavy callers do not pay for a block buffer they
+    // never touch.
+    return vafs_stream_reader_open(handle->File->VaFs->DataStream, &handle->Reader);
+}
+
 
 int __vafs_file_open_internal(
     struct VaFs*            vafs,
@@ -160,9 +178,9 @@ struct VaFsFileHandle* vafs_file_create_handle(
 {
     struct VaFsFileHandle* handle;
 
-    // Read handles get a private stream cursor immediately so later seeks and
-    // staged blocks stay local to the handle. Write handles still share the
-    // stream because write mode appends through one ordered staging buffer.
+    // Read handles still use a private stream cursor, but they create it on
+    // first data access so open/close-heavy workloads avoid a block-buffer
+    // allocation when the handle never actually reads.
     
     handle = (struct VaFsFileHandle*)malloc(sizeof(struct VaFsFileHandle));
     if (!handle) {
@@ -174,15 +192,6 @@ struct VaFsFileHandle* vafs_file_create_handle(
     handle->Reader = NULL;
     handle->Position = 0;
     handle->State = VaFsFileState_Open;
-
-    if (fileEntry->VaFs->Mode == VaFsMode_Read) {
-        if (vafs_stream_reader_open(fileEntry->VaFs->DataStream, &handle->Reader) != 0) {
-            // Avoid returning a half-constructed read handle that is missing
-            // the private cursor it depends on.
-            free(handle);
-            return NULL;
-        }
-    }
     
     return handle;
 }
@@ -210,8 +219,8 @@ int vafs_file_close(
         vafs_stream_unlock(handle->File->VaFs->DataStream);
     }
 
-    // Close whichever read path resources were allocated when the handle was
-    // opened. This is a no-op for pure write-mode handles.
+    // Close whichever read path resources were actually needed. Handles that
+    // never reached a data read stay allocation-free on the read side.
     if (handle->Reader != NULL) {
         vafs_stream_reader_close(handle->Reader);
     }
@@ -335,10 +344,7 @@ size_t vafs_file_read(
         return 0;
     }
 
-    if (handle->Reader == NULL) {
-        // Read-mode handles should always own a reader; missing one means the
-        // handle was constructed incorrectly or already torn down.
-        errno = EINVAL;
+    if (__ensure_file_reader(handle) != 0) {
         return 0;
     }
 
