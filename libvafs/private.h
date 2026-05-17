@@ -75,6 +75,9 @@ typedef uint32_t vafsblock_t;
 // This prevents infinite loops from cyclic symlinks and limits resource consumption
 #define VAFS_SYMLINK_MAX_DEPTH 40
 
+// A directory with more than 1 million entries is suspicious and likely malformed
+#define VAFS_MAX_DIRECTORY_ENTRIES 1000000
+
 VAFS_ONDISK_STRUCT(VaFsBlockPosition, {
     vafsblock_t Index;
     uint32_t    Offset;
@@ -160,8 +163,6 @@ struct VaFsDirectory {
     struct VaFs*              VaFs;
     VaFsDirectoryDescriptor_t Descriptor;
     const char*               Name;
-    struct vafs_stat          Stat;
-    int                       StatCached;
 };
 
 struct VaFsSymlink {
@@ -784,5 +785,25 @@ extern int __vafs_directory_entry_stat(struct VaFsDirectoryEntry* entry, struct 
  * @return Entry name string, or `NULL` if the entry type is invalid.
  */
 extern const char* __vafs_directory_entry_name(struct VaFsDirectoryEntry* entry);
+
+/**
+ * @brief Builds whichever read-mode lookup accelerator matches the directory size.
+ *
+ * @param[In] reader Read-mode directory whose indexes should be materialized.
+ * @return 0 on success, otherwise -1 with `errno` set.
+ */
+extern int __vafs_directory_index_build(struct VaFsDirectoryReader* reader);
+
+/**
+ * @brief Resolves a child entry from the immutable read-mode directory cache paths.
+ *
+ * @param[In] directory Directory to search.
+ * @param[In] token Child entry name to resolve.
+ * @return Matching entry on success, otherwise `NULL` with `errno` set.
+ */
+extern struct VaFsDirectoryEntry* __vafs_directory_get(struct VaFsDirectory* directory, const char* token);
+
+extern void __directory_reader_index_delete(struct VaFsDirectoryReader* reader);
+extern void __directory_writer_index_delete(struct VaFsDirectoryWriter* writer);
 
 #endif // __VAFS_PRIVATE_H__
