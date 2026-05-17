@@ -850,7 +850,6 @@ int vafs_stream_reader_read(
     VAFS_DEBUG("vafs_stream_read(size=%u)\n", size);
 
     if (reader == NULL || reader->Stream == NULL || buffer == NULL || size == 0 || bytesRead == NULL) {
-        *bytesRead = 0;
         errno = EINVAL;
         return -1;
     }

@@ -65,10 +65,10 @@ int symlink_utils_init(void)
 
 void symlink_utils_cleanup(void)
 {
-    if (hNtdll != NULL) {
-        FreeLibrary(hNtdll);
-        hNtdll = NULL;
-    }
+    pRtlNtStatusToDosError = NULL;
+    pNtQueryInformationFile = NULL;
+    pNtQueryVolumeInformationFile = NULL;
+    hNtdll = NULL;
 }
 
 static int __readlink_handle(HANDLE handle, char** symlinkBufferOut, uint64_t* symlinkLengthOut)
@@ -475,7 +475,7 @@ int symlink_utils_read(const char* path, char** bufferOut)
 
     buffer = (char*)calloc(1, PATH_MAX);
     if (buffer == NULL) {
-        errno = ENOMEM;
+        return -1;
     }
 
     if (readlink(path, buffer, PATH_MAX - 1) == -1) {
