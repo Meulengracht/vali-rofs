@@ -30,6 +30,7 @@
 #include <vafs/stat.h>
 
 struct VaFsStream;
+struct VaFsStreamReader;
 struct VaFsStreamDevice;
 
 typedef uint32_t vafsblock_t;
@@ -44,8 +45,8 @@ typedef uint32_t vafsblock_t;
 // decision this.
 #define VA_FS_MAX_FEATURES 16
 
-// The default block size for the descriptor stream is 8kb
-// The allowed block sizes for data streams are between 16kb - 1mb
+// The default block size for the descriptor stream is 8kb.
+// Both descriptor and data streams currently use the same supported range.
 #define VA_FS_DESCRIPTOR_BLOCK_SIZE  (8 * 1024)
 #define VA_FS_DATA_MIN_BLOCKSIZE     (8 * 1024)
 #define VA_FS_DATA_DEFAULT_BLOCKSIZE (128 * 1024)
@@ -73,6 +74,9 @@ typedef uint32_t vafsblock_t;
 // Maximum number of symlinks that can be traversed in a single path resolution
 // This prevents infinite loops from cyclic symlinks and limits resource consumption
 #define VAFS_SYMLINK_MAX_DEPTH 40
+
+// A directory with more than 1 million entries is suspicious and likely malformed
+#define VAFS_MAX_DIRECTORY_ENTRIES 1000000
 
 VAFS_ONDISK_STRUCT(VaFsBlockPosition, {
     vafsblock_t Index;
@@ -159,8 +163,6 @@ struct VaFsDirectory {
     struct VaFs*              VaFs;
     VaFsDirectoryDescriptor_t Descriptor;
     const char*               Name;
-    struct vafs_stat          Stat;
-    int                       StatCached;
 };
 
 struct VaFsSymlink {
@@ -295,6 +297,27 @@ extern int vafs_streamdevice_read(
     size_t*                  bytesRead);
 
 /**
+ * @brief Reads bytes from a stream device at an absolute offset.
+ *
+ * This is the read-only fast path used by stream and metadata loaders. Devices
+ * with native positioned reads can avoid shared cursor mutations entirely.
+ * Devices without that support fall back to an internal seek+read sequence.
+ *
+ * @param[In]  device    The stream device to read from.
+ * @param[In]  offset    Absolute byte offset to read from.
+ * @param[Out] buffer    Destination buffer for the bytes read.
+ * @param[In]  length    Number of bytes requested.
+ * @param[Out] bytesRead Receives the number of bytes actually read.
+ * @return 0 on success, otherwise -1 with `errno` set.
+ */
+extern int vafs_streamdevice_read_at(
+    struct VaFsStreamDevice* device,
+    long                     offset,
+    void*                    buffer,
+    size_t                   length,
+    size_t*                  bytesRead);
+
+/**
  * @brief Writes bytes directly to a stream device.
  *
  * @param[In]  device       The stream device to write to.
@@ -386,7 +409,7 @@ extern int vafs_stream_set_filter(
     VaFsFilterDecodeFunc decode);
 
 /**
- * @brief Retrieves the current logical position inside a stream.
+ * @brief Retrieves the current logical write position inside a stream.
  *
  * @param[In]  stream    The stream to query.
  * @param[Out] blockOut  Receives the current block index.
@@ -399,6 +422,37 @@ extern int vafs_stream_position(
     uint32_t*          offsetOut);
 
 /**
+ * @brief Creates a read cursor for a stream.
+ *
+ * Each reader owns its own staged block buffer and logical position so
+ * independent callers can read the same stream concurrently.
+ *
+ * @param[In]  stream     Stream instance to read from.
+ * @param[Out] readerOut  Receives the allocated reader.
+ * @return 0 on success, otherwise -1 with `errno` set.
+ */
+extern int vafs_stream_reader_open(
+    struct VaFsStream*        stream,
+    struct VaFsStreamReader** readerOut);
+
+/**
+ * @brief Destroys a previously created stream reader.
+ *
+ * @param[In] reader Reader to destroy. NULL is ignored.
+ */
+extern void vafs_stream_reader_close(
+    struct VaFsStreamReader* reader);
+
+/**
+ * @brief Retrieves the configured block size for a stream.
+ *
+ * @param[In] stream Stream instance to query.
+ * @return Stream block size in bytes, or 0 if stream is invalid.
+ */
+extern uint32_t vafs_stream_block_size(
+    struct VaFsStream* stream);
+
+/**
  * @brief Seeks to a logical block and offset within a stream.
  *
  * @param[In] stream      The stream to reposition.
@@ -406,8 +460,8 @@ extern int vafs_stream_position(
  * @param[In] blockOffset Destination byte offset within the block.
  * @return 0 on success, otherwise -1 with `errno` set.
  */
-extern int vafs_stream_seek(
-    struct VaFsStream* stream, 
+extern int vafs_stream_reader_seek(
+    struct VaFsStreamReader* reader,
     vafsblock_t        blockIndex,
     uint32_t           blockOffset);
 
@@ -436,8 +490,8 @@ extern int vafs_stream_write(
  * @param[Out] bytesRead Receives the number of bytes actually read.
  * @return 0 on success, otherwise -1 with `errno` set.
  */
-extern int vafs_stream_read(
-    struct VaFsStream* stream,
+extern int vafs_stream_reader_read(
+    struct VaFsStreamReader* reader,
     void*              buffer,
     size_t             size,
     size_t*            bytesRead);
@@ -577,6 +631,7 @@ struct VaFsDirectoryReader {
     struct VaFsDirectory       Base;
     enum VaFsDirectoryState    State;
     struct VaFsDirectoryEntry* Entries;
+    struct VaFsStreamReader*   Reader;
     // Small read-mode directories use this sorted view for binary search by name.
     struct VaFsDirectoryEntry** Index;
     // Very large directories build a secondary name index to avoid binary-search overhead.
@@ -730,5 +785,25 @@ extern int __vafs_directory_entry_stat(struct VaFsDirectoryEntry* entry, struct 
  * @return Entry name string, or `NULL` if the entry type is invalid.
  */
 extern const char* __vafs_directory_entry_name(struct VaFsDirectoryEntry* entry);
+
+/**
+ * @brief Builds whichever read-mode lookup accelerator matches the directory size.
+ *
+ * @param[In] reader Read-mode directory whose indexes should be materialized.
+ * @return 0 on success, otherwise -1 with `errno` set.
+ */
+extern int __vafs_directory_index_build(struct VaFsDirectoryReader* reader);
+
+/**
+ * @brief Resolves a child entry from the immutable read-mode directory cache paths.
+ *
+ * @param[In] directory Directory to search.
+ * @param[In] token Child entry name to resolve.
+ * @return Matching entry on success, otherwise `NULL` with `errno` set.
+ */
+extern struct VaFsDirectoryEntry* __vafs_directory_get(struct VaFsDirectory* directory, const char* token);
+
+extern void __directory_reader_index_delete(struct VaFsDirectoryReader* reader);
+extern void __directory_writer_index_delete(struct VaFsDirectoryWriter* writer);
 
 #endif // __VAFS_PRIVATE_H__

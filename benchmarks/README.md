@@ -46,9 +46,18 @@ cd benchmarks
 ./generate_test_data.sh
 ```
 
+On Windows, use the native PowerShell generator instead:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\generate_test_data.ps1
+```
+
 This creates:
 - `/tmp/vafs-benchmark-data/source/` - Test files and directories
 - `/tmp/vafs-benchmark-data/benchmark.vafs` - VaFS image for benchmarking
+
+The generated corpus is deterministic and reproducible. It mixes structured text payloads, record-oriented large files, zero-filled regions, and wide/deep directory layouts so repeated runs stay comparable across hosts.
 
 The test data includes:
 - 100 small files (1-10KB each)
@@ -62,12 +71,24 @@ You can customize the output location:
 TEST_DATA_DIR=/path/to/data OUTPUT_IMAGE=/path/to/image.vafs ./generate_test_data.sh
 ```
 
+```powershell
+$env:TEST_DATA_DIR = 'C:\temp\vafs-benchmark-data'
+$env:OUTPUT_IMAGE = 'C:\temp\benchmark.vafs'
+.\generate_test_data.ps1
+```
+
 ## Running Benchmarks
 
 ### Basic Usage
 
 ```bash
 ./build/bin/vafs-bench /tmp/vafs-benchmark-data/benchmark.vafs
+```
+
+For steadier measurements on very fast workloads, use warmup and higher iteration counts:
+
+```bash
+./build/bin/vafs-bench --warmup=50 --iterations=1000 /tmp/vafs-benchmark-data/benchmark.vafs
 ```
 
 ### Output Formats
@@ -87,6 +108,7 @@ VaFS Benchmark Suite
 Image: benchmark.vafs
 
 === Mount Latency ===
+Warmup:        10
 Iterations:    100
 Total time:    245.123 ms
 Average time:  2.451 ms
@@ -115,6 +137,7 @@ Example output:
   "benchmarks": [
     {
       "name": "Mount Latency",
+      "warmup_iterations": 10,
       "iterations": 100,
       "total_time_ms": 245.123,
       "avg_time_ms": 2.451,
@@ -123,6 +146,7 @@ Example output:
     },
     {
       "name": "Small File Read (4KB)",
+      "warmup_iterations": 10,
       "iterations": 1000,
       "total_time_ms": 456.789,
       "avg_time_ms": 0.457,
@@ -143,10 +167,10 @@ Example output:
 
 Example output:
 ```csv
-name,iterations,total_time_ms,avg_time_ms,min_time_ms,max_time_ms,bytes_processed,throughput_mbps
-Mount Latency,100,245.123,2.451,2.123,5.678,0,0.00
-Metadata Traversal,50,123.456,2.469,2.123,3.456,0,0.00
-Small File Read (4KB),1000,456.789,0.457,0.234,1.234,4096000,8.54
+name,warmup_iterations,iterations,total_time_ms,avg_time_ms,min_time_ms,max_time_ms,bytes_processed,throughput_mbps
+Mount Latency,10,100,245.123,2.451,2.123,5.678,0,0.00
+Metadata Traversal,10,50,123.456,2.469,2.123,3.456,0,0.00
+Small File Read (4KB),10,1000,456.789,0.457,0.234,1.234,4096000,8.54
 ...
 ```
 
@@ -195,6 +219,8 @@ Mounted images now keep a bounded read-mode component cache keyed by `(parent di
 ### Options
 
 - `--format=<format>` - Output format: `human`, `json`, or `csv` (default: human)
+- `--iterations=<count>` - Override measured iterations for every benchmark
+- `--warmup=<count>` - Run untimed warmup iterations before each benchmark
 - `--small-file=<path>` - Path to small file in image (default: `/small.txt`)
 - `--large-file=<path>` - Path to large file in image (default: `/large.bin`)
 - `--directory=<path>` - Directory path for traversal benchmark (default: `/`)
@@ -359,7 +385,7 @@ The default iteration counts are defined in `vafs_bench.c`:
 #define DEEP_STAT_ITERATIONS           10
 ```
 
-These can be adjusted by modifying the source and rebuilding, or you can focus on a single benchmark with `--only=<name>`.
+These defaults can now be overridden at runtime with `--iterations=<count>` and `--warmup=<count>`. The source defaults remain useful for quick smoke runs, while a command such as `--warmup=50 --iterations=1000` is better suited for stable local baselines.
 
 ## Output Format Specification
 
@@ -367,6 +393,7 @@ These can be adjusted by modifying the source and rebuilding, or you can focus o
 
 Plain text format designed for terminal display. Each benchmark shows:
 - Name
+- Warmup iterations when non-zero
 - Number of iterations
 - Total time in milliseconds
 - Average, minimum, and maximum time per iteration
@@ -382,6 +409,7 @@ Machine-readable JSON with the following structure:
   "benchmarks": [
     {
       "name": "Benchmark Name",
+      "warmup_iterations": 50,
       "iterations": 100,
       "total_time_ms": 123.456,
       "avg_time_ms": 1.234,
@@ -401,7 +429,7 @@ All time values are in milliseconds with 3 decimal places. Throughput is in MB/s
 Comma-separated values suitable for spreadsheet import and analysis:
 
 ```
-name,iterations,total_time_ms,avg_time_ms,min_time_ms,max_time_ms,bytes_processed,throughput_mbps
+name,warmup_iterations,iterations,total_time_ms,avg_time_ms,min_time_ms,max_time_ms,bytes_processed,throughput_mbps
 ```
 
 For non-I/O benchmarks, `bytes_processed` is 0 and `throughput_mbps` is 0.00.
@@ -471,9 +499,14 @@ static void my_benchmark_teardown(void* user_data) {
 
 static BenchmarkResult run_my_benchmark(const char* image_path) {
     MyBenchmarkContext ctx = { .image_path = image_path };
+  BenchmarkRunConfig config = {
+    .iterations = 100,
+    .warmup_iterations = 10
+  };
+
     return benchmark_run(
         "My Benchmark Name",
-        ITERATIONS,
+    &config,
         my_benchmark_setup,
         my_benchmark_run,
         my_benchmark_teardown,
@@ -507,7 +540,7 @@ void benchmark_print_result_csv(const BenchmarkResult* result, int print_header)
 ```c
 BenchmarkResult benchmark_run(
     const char* name,
-    uint64_t iterations,
+  const BenchmarkRunConfig* config,
     int (*setup_fn)(void* user_data),
     int (*benchmark_fn)(void* user_data),
     void (*teardown_fn)(void* user_data),

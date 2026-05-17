@@ -24,28 +24,38 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32) || defined(_WIN64)
+#include <io.h>
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #define __TRANSFER_BUFFER_SIZE 1024*1024
 
 static long __file_seek(void*, long, int);
 static int  __file_read(void*, void*, size_t, size_t*);
+static int  __file_read_at(void*, long, void*, size_t, size_t*);
 static int  __file_write(void*, const void*, size_t, size_t*);
 static int  __file_close(void*);
 
 static long __memory_seek(void*, long, int);
 static int  __memory_read(void*, void*, size_t, size_t*);
+static int  __memory_read_at(void*, long, void*, size_t, size_t*);
 static int  __memory_write(void*, const void*, size_t, size_t*);
 static int  __memory_close(void*);
 
 static struct VaFsOperations g_fileOperations = {
     .seek = __file_seek,
     .read = __file_read,
+    .readAt = __file_read_at,
     .write = __file_write,
     .close = __file_close
 };
 static struct VaFsOperations g_memoryOperations = {
     .seek = __memory_seek,
     .read = __memory_read,
+    .readAt = __memory_read_at,
     .write = __memory_write,
     .close = __memory_close
 };
@@ -77,7 +87,13 @@ static int __validate_ops(
     struct VaFsOperations* operations,
     int                    readOnly)
 {
-    if (operations->read == NULL || operations->seek == NULL) {
+    if (readOnly) {
+        if (operations->readAt == NULL && (operations->read == NULL || operations->seek == NULL)) {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+    else if (operations->read == NULL || operations->seek == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -313,6 +329,68 @@ int vafs_streamdevice_read(
     return device->Operations.read(device->UserData, buffer, length, bytesRead);
 }
 
+int vafs_streamdevice_read_at(
+    struct VaFsStreamDevice* device,
+    long                     offset,
+    void*                    buffer,
+    size_t                   length,
+    size_t*                  bytesRead)
+{
+    long original;
+    int  status;
+
+    if (device == NULL || buffer == NULL || length == 0 || bytesRead == NULL || offset < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    // Prefer a native positioned read whenever the backend exposes one. That
+    // path never touches shared cursor state and is the fast path for read-only
+    // images opened through files, memory, or custom readAt backends.
+
+    if (device->Operations.readAt != NULL) {
+        return device->Operations.readAt(device->UserData, offset, buffer, length, bytesRead);
+    }
+
+    // Legacy backends can still satisfy positioned reads by temporarily
+    // borrowing the seek+read API under the device lock.
+    if (device->Operations.read == NULL || device->Operations.seek == NULL) {
+        errno = ENOTSUP;
+        return -1;
+    }
+
+    if (mtx_lock(&device->Lock) != thrd_success) {
+        errno = EBUSY;
+        return -1;
+    }
+
+    // Save and later restore the legacy cursor because the compatibility path
+    // is intentionally invisible to higher-level read-only callers.
+    original = device->Operations.seek(device->UserData, 0, SEEK_CUR);
+    if (original < 0) {
+        mtx_unlock(&device->Lock);
+        return -1;
+    }
+
+    if (device->Operations.seek(device->UserData, offset, SEEK_SET) < 0) {
+        mtx_unlock(&device->Lock);
+        return -1;
+    }
+
+    status = device->Operations.read(device->UserData, buffer, length, bytesRead);
+    if (device->Operations.seek(device->UserData, original, SEEK_SET) < 0 && status == 0) {
+        // A failed restore leaves the legacy cursor in an unknown state, so
+        // treat the whole positioned read as failed even if the bytes arrived.
+        status = -1;
+    }
+
+    if (mtx_unlock(&device->Lock) != thrd_success && status == 0) {
+        errno = ENOTSUP;
+        return -1;
+    }
+    return status;
+}
+
 int vafs_streamdevice_write(
     struct VaFsStreamDevice* device,
     void*                    buffer,
@@ -440,6 +518,74 @@ static int __file_read(void* data, void* buffer, size_t length, size_t* bytesRea
     return 0;
 }
 
+static int __file_read_at(void* data, long offset, void* buffer, size_t length, size_t* bytesRead)
+{
+    struct VaFsStreamDevice* device = data;
+
+#if defined(_WIN32) || defined(_WIN64)
+    HANDLE handle;
+    intptr_t osHandle;
+    size_t totalRead = 0;
+
+    osHandle = _get_osfhandle(_fileno(device->File));
+    if (osHandle == -1) {
+        errno = EIO;
+        return -1;
+    }
+
+    handle = (HANDLE)osHandle;
+    while (totalRead < length) {
+        OVERLAPPED overlapped;
+        uint64_t   currentOffset = (uint64_t)(uint32_t)offset + (uint64_t)totalRead;
+        DWORD      chunkLength = (DWORD)MIN(length - totalRead, (size_t)0xFFFFFFFFu);
+        DWORD      chunkRead = 0;
+
+        memset(&overlapped, 0, sizeof(OVERLAPPED));
+        overlapped.Offset = (DWORD)(currentOffset & 0xFFFFFFFFu);
+        overlapped.OffsetHigh = (DWORD)(currentOffset >> 32);
+
+        if (!ReadFile(handle, (uint8_t*)buffer + totalRead, chunkLength, &chunkRead, &overlapped)) {
+            errno = EIO;
+            *bytesRead = totalRead;
+            return -1;
+        }
+
+        totalRead += chunkRead;
+        if (chunkRead != chunkLength) {
+            break;
+        }
+    }
+
+    *bytesRead = totalRead;
+    if (totalRead != length) {
+        errno = EIO;
+        return -1;
+    }
+    return 0;
+#else
+    int     descriptor;
+    ssize_t result;
+
+    descriptor = fileno(device->File);
+    if (descriptor < 0) {
+        errno = EIO;
+        return -1;
+    }
+
+    result = pread(descriptor, buffer, length, (off_t)offset);
+    if (result < 0) {
+        return -1;
+    }
+
+    *bytesRead = (size_t)result;
+    if ((size_t)result != length) {
+        errno = EIO;
+        return -1;
+    }
+    return 0;
+#endif
+}
+
 static int __file_write(void* data, const void* buffer, size_t length, size_t* bytesWritten)
 {
     struct VaFsStreamDevice* device = data;
@@ -514,6 +660,27 @@ static int __memory_read(void* data, void* buffer, size_t length, size_t* bytesR
     memcpy(buffer, device->Memory.Buffer + device->Memory.Position, byteCount);
     device->Memory.Position += (long)byteCount;
     *bytesRead = byteCount;
+    return 0;
+}
+
+static int __memory_read_at(void* data, long offset, void* buffer, size_t length, size_t* bytesRead)
+{
+    struct VaFsStreamDevice* device = data;
+    size_t                   byteCount;
+
+    if (offset < 0 || offset > device->Memory.Size) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    byteCount = MIN(length, (size_t)(device->Memory.Size - offset));
+    memcpy(buffer, device->Memory.Buffer + offset, byteCount);
+    *bytesRead = byteCount;
+
+    if (byteCount != length) {
+        errno = EIO;
+        return -1;
+    }
     return 0;
 }
 

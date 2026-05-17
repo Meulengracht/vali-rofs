@@ -46,15 +46,19 @@ extern int vafs_cache_create(int maxBlocks, struct VaFsBlockCache** cacheOut);
 extern void vafs_cache_destroy(struct VaFsBlockCache* cache);
 
 /**
- * @brief Retrieves a block from the cache.
+ * @brief Retrieves a block from the cache by copying it into a caller buffer.
  * 
- * @param[In]  cache     The cache to retrieve the block from. 
- * @param[In]  index     The index of the block to retrieve.
- * @param[Out] bufferOut A pointer where a buffer pointer will be stored. 
- * @param[Out] sizeOut   A pointer where the size of the block will be stored.
+ * The copy is performed while the cache is locked so callers never observe an
+ * internal buffer that can be concurrently evicted.
+ *
+ * @param[In]  cache          The cache to retrieve the block from. 
+ * @param[In]  index          The index of the block to retrieve.
+ * @param[Out] buffer         Destination buffer for the cached block.
+ * @param[In]  bufferCapacity Capacity of `buffer` in bytes.
+ * @param[Out] sizeOut        Receives the size of the cached block.
  * @return int 0 on success, -1 on failure, errno will be set accordingly. 
  */
-extern int vafs_cache_get(struct VaFsBlockCache* cache, uint32_t index, void** bufferOut, size_t* sizeOut);
+extern int vafs_cache_get(struct VaFsBlockCache* cache, uint32_t index, void* buffer, size_t bufferCapacity, size_t* sizeOut);
 
 /**
  * @brief Stores a block in the cache.
