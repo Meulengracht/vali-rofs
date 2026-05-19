@@ -431,12 +431,18 @@ static int __validate_descriptor_length(
         return -1;
     }
 
-    // Check for reasonable maximum length (prevent massive allocations)
-    // Maximum descriptor size should be type size + reasonable name length
-    // Use VAFS_NAME_MAX * 2 to allow for file name + symlink target
-    if (descriptor->Length > (uint16_t)expectedSize + (VAFS_NAME_MAX * 2)) {
+    // Bound variable-sized payloads before allocating trailing storage from
+    // image data. Symlinks legitimately carry a full path-sized target while
+    // the other descriptor kinds only carry entry names.
+    if (descriptor->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
+        if (descriptor->Length > (uint16_t)(expectedSize + VAFS_NAME_MAX + VAFS_PATH_MAX)) {
+            VAFS_ERROR("__validate_descriptor_length: descriptor length %u exceeds maximum %d\n",
+                descriptor->Length, expectedSize + VAFS_NAME_MAX + VAFS_PATH_MAX);
+            return -1;
+        }
+    } else if (descriptor->Length > (uint16_t)(expectedSize + VAFS_NAME_MAX)) {
         VAFS_ERROR("__validate_descriptor_length: descriptor length %u exceeds maximum %d\n",
-            descriptor->Length, expectedSize + (VAFS_NAME_MAX * 2));
+            descriptor->Length, expectedSize + VAFS_NAME_MAX);
         return -1;
     }
 
@@ -519,11 +525,6 @@ static int __validate_symlink_descriptor(
     // Validate name and target lengths are non-zero
     if (descriptor->NameLength == 0) {
         VAFS_ERROR("__validate_symlink_descriptor: symlink has no name\n");
-        return -1;
-    }
-
-    if (descriptor->TargetLength == 0) {
-        VAFS_ERROR("__validate_symlink_descriptor: symlink has no target\n");
         return -1;
     }
 
@@ -1234,6 +1235,10 @@ static int __write_symlink_descriptor(
         return status;
     }
 
+    if (entry->Symlink->Descriptor.TargetLength == 0) {
+        return 0;
+    }
+
     status = vafs_stream_write(
         writer->Base.VaFs->DescriptorStream,
         entry->Symlink->Target,
@@ -1935,6 +1940,7 @@ int vafs_directory_create_symlink(
     struct VaFsDirectoryEntry* entry;
     char                       token[VAFS_NAME_MAX + 1];
     struct VaFsMetadata        preparedMetadata;
+    size_t                     targetLength;
     VAFS_DEBUG("vafs_directory_create_symlink(name=%s, target=%s)\n", name, target);
 
     if (handle == NULL || name == NULL || target == NULL || metadata == NULL) {
@@ -1942,7 +1948,13 @@ int vafs_directory_create_symlink(
         return -1;
     }
 
-    if (__prepare_metadata_for_create(metadata, VaFsEntryType_Symlink, strlen(target), &preparedMetadata) != 0) {
+    targetLength = strlen(target);
+    if (targetLength > VAFS_PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    if (__prepare_metadata_for_create(metadata, VaFsEntryType_Symlink, targetLength, &preparedMetadata) != 0) {
         return -1;
     }
 

@@ -16,7 +16,7 @@
 #include <vafs/directory.h>
 #include <vafs/file.h>
 
-#define TEST_IMAGE_PATH "/tmp/test_symlinks.vafs"
+#define TEST_IMAGE_PATH "test_symlinks.vafs"
 
 static int g_test_passed = 0;
 static int g_test_failed = 0;
