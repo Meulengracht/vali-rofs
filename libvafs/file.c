@@ -107,6 +107,16 @@ int __vafs_file_open_internal(
             return -1;
         }
 
+        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
+            // Resolve aliases before any type-specific branching so a hardlink
+            // to a symlink inherits normal symlink traversal instead of acting
+            // like a separate terminal file type.
+            entry = __vafs_resolve_hardlink(vafs, entry);
+            if (entry == NULL) {
+                return -1;
+            }
+        }
+
         if (entry->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
             if (remainingPath[0] == '\0') {
                 // Opening a directory through the file API is always an error,

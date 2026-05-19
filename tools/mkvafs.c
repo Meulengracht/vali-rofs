@@ -168,9 +168,8 @@ static int __write_file(
     struct VaFsDirectoryHandle* directoryHandle,
     const char*                 path,
     const char*                 filename,
-    uint32_t                    permissions)
+    const struct VaFsMetadata*  metadata)
 {
-    struct VaFsMetadata   metadata = __metadata_for_mode(VaFsEntryType_File, permissions);
     struct VaFsFileHandle* fileHandle;
     FILE*                  file;
     long                   fileSize;
@@ -178,7 +177,7 @@ static int __write_file(
     int                    status;
 
     // create the VaFS file
-    status = vafs_directory_create_file(directoryHandle, filename, &metadata, &fileHandle);
+    status = vafs_directory_create_file(directoryHandle, filename, metadata, &fileHandle);
     if (status) {
         fprintf(stderr, "mkvafs: failed to create file '%s'\n", filename);
         return -1;
@@ -214,6 +213,71 @@ static int __write_file(
         return -1;
     }
     return 0;
+}
+
+struct __hardlink_object {
+    struct list_item list_header;
+    uint64_t         objectId;
+};
+
+static int __metadata_needs_hardlink(
+    const struct VaFsMetadata* metadata)
+{
+    // Object ids exist for more than hardlinks, so we only switch to alias
+    // emission when the host metadata proves this path participates in a
+    // shared on-disk object.
+    return metadata != NULL &&
+        metadata->LinkCount > 1 &&
+        (metadata->Mask & VaFsMetadataMask_ObjectId) != 0 &&
+        metadata->ObjectId != 0;
+}
+
+static int __hardlink_object_seen(
+    struct list* objects,
+    uint64_t     objectId)
+{
+    struct list_item* it;
+
+    list_foreach(objects, it) {
+        struct __hardlink_object* object = (struct __hardlink_object*)it;
+        if (object->objectId == objectId) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int __remember_hardlink_object(
+    struct list* objects,
+    uint64_t     objectId)
+{
+    struct __hardlink_object* object;
+
+    if (__hardlink_object_seen(objects, objectId)) {
+        return 0;
+    }
+
+    object = calloc(1, sizeof(struct __hardlink_object));
+    if (object == NULL) {
+        return -1;
+    }
+
+    object->objectId = objectId;
+    list_add(objects, &object->list_header);
+    return 0;
+}
+
+static void __destroy_hardlink_objects(
+    struct list* objects)
+{
+    struct list_item* it;
+
+    for (it = objects->head; it != NULL;) {
+        struct __hardlink_object* object = (struct __hardlink_object*)it;
+        it = it->next;
+        free(object);
+    }
+    list_init(objects);
 }
 
 static int __write_special(
@@ -744,6 +808,7 @@ static int __create_image(struct __options* opts)
 {
     struct VaFs*             vafsHandle;
     struct VaFsConfiguration configuration;
+    struct list              hardlinkObjects = LIST_INIT;
     int                      status;
     struct list_item*        it;
     struct progress_context  progressContext = { 
@@ -841,14 +906,27 @@ static int __create_image(struct __options* opts)
             }
             progressContext.specials++;
         } else if (entry->type == PLATFORM_FILETYPE_FILE) {
-            uint32_t filemode;
-            status = symlink_utils_ministat(entry->path, &filemode);
+            struct VaFsMetadata metadata;
+
+            status = platform_fs_read_metadata(entry->path, &metadata);
             if (status) {
                 fprintf(stderr, "mkvafs: cannot stat file/directory: %s\n", entry->path);
                 break;
             }
 
-            status = __write_file(directoryHandle, entry->path, entry->name, platform_fs_mode_permissions(filemode));
+            // The first path that names a shared host object becomes the
+            // canonical payload owner; later siblings are emitted as aliases so
+            // the archive preserves link identity without duplicating data.
+            if (__metadata_needs_hardlink(&metadata) &&
+                __hardlink_object_seen(&hardlinkObjects, metadata.ObjectId)) {
+                status = vafs_directory_create_hardlink(directoryHandle, entry->name, metadata.ObjectId);
+            } else {
+                status = __write_file(directoryHandle, entry->path, entry->name, &metadata);
+                if (status == 0 && __metadata_needs_hardlink(&metadata)) {
+                    status = __remember_hardlink_object(&hardlinkObjects, metadata.ObjectId);
+                }
+            }
+
             if (status != 0) {
                 fprintf(stderr, "mkvafs: unable to write file %s\n", entry->path);
                 break;
@@ -867,6 +945,7 @@ static int __create_image(struct __options* opts)
     if (vafs_close(vafsHandle)) {
         fprintf(stderr, "mkvafs: failed to finalize image\n");
     }
+    __destroy_hardlink_objects(&hardlinkObjects);
     return status;
 }
 

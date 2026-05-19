@@ -51,6 +51,23 @@ struct progress_context {
     int files_total;
     int directories_total;
     int symlinks_total;
+
+    // Hardlink extraction is two-phase because directory enumeration order is
+    // not guaranteed to materialize the payload-bearing path before its alias.
+    struct list extracted_objects;
+    struct list pending_hardlinks;
+};
+
+struct extracted_object {
+    struct list_item list_header;
+    uint64_t         objectId;
+    char*            path;
+};
+
+struct pending_hardlink {
+    struct list_item list_header;
+    uint64_t         objectId;
+    char*            path;
 };
 
 extern int __handle_filter(struct VaFs* vafs);
@@ -107,6 +124,170 @@ static int __is_nonfatal_special_create_error(
         error == EPERM ||
         error == ENOTSUP ||
         error == ENOSYS;
+}
+
+static int __is_nonfatal_hardlink_create_error(
+    int error)
+{
+    // Match the special-file policy: privilege- or platform-limited host
+    // recreation should warn and continue instead of discarding the full image.
+    return error == EACCES ||
+        error == EPERM ||
+        error == ENOTSUP ||
+        error == ENOSYS;
+}
+
+static struct extracted_object* __find_extracted_object(
+    struct progress_context* progress,
+    uint64_t                 objectId)
+{
+    struct list_item* it;
+
+    list_foreach(&progress->extracted_objects, it) {
+        struct extracted_object* object = (struct extracted_object*)it;
+        if (object->objectId == objectId) {
+            return object;
+        }
+    }
+    return NULL;
+}
+
+static int __remember_extracted_object(
+    struct progress_context* progress,
+    uint64_t                 objectId,
+    const char*              path)
+{
+    struct extracted_object* object;
+
+    if (__find_extracted_object(progress, objectId) != NULL) {
+        return 0;
+    }
+
+    object = calloc(1, sizeof(struct extracted_object));
+    if (object == NULL) {
+        return -1;
+    }
+
+    object->objectId = objectId;
+    object->path = strdup(path);
+    if (object->path == NULL) {
+        free(object);
+        return -1;
+    }
+
+    list_add(&progress->extracted_objects, &object->list_header);
+    return 0;
+}
+
+static int __queue_pending_hardlink(
+    struct progress_context* progress,
+    uint64_t                 objectId,
+    const char*              path)
+{
+    struct pending_hardlink* hardlink;
+
+    hardlink = calloc(1, sizeof(struct pending_hardlink));
+    if (hardlink == NULL) {
+        return -1;
+    }
+
+    hardlink->objectId = objectId;
+    hardlink->path = strdup(path);
+    if (hardlink->path == NULL) {
+        free(hardlink);
+        return -1;
+    }
+
+    list_add(&progress->pending_hardlinks, &hardlink->list_header);
+    return 0;
+}
+
+static int __register_extracted_file(
+    struct VaFs*             vafsHandle,
+    struct progress_context* progress,
+    const char*              imagePath,
+    const char*              outputPath)
+{
+    struct VaFsMetadata metadata;
+
+    if (vafs_path_stat(vafsHandle, imagePath, 1, &metadata) != 0) {
+        return -1;
+    }
+
+    if (metadata.Type != VaFsEntryType_File ||
+        (metadata.Mask & VaFsMetadataMask_ObjectId) == 0 ||
+        metadata.ObjectId == 0 ||
+        metadata.LinkCount <= 1) {
+        return 0;
+    }
+
+    // Only concrete file extracts can satisfy later aliases; hardlink entries
+    // themselves never carry the payload that future siblings should target.
+    return __remember_extracted_object(progress, metadata.ObjectId, outputPath);
+}
+
+static int __create_pending_hardlinks(
+    struct progress_context* progress,
+    const char*              root)
+{
+    struct list_item* it;
+
+    // Replay aliases after the tree walk so images remain extractable even
+    // when an alias appears before the first payload-bearing path.
+    for (it = progress->pending_hardlinks.head; it != NULL; it = it->next) {
+        struct pending_hardlink* hardlink = (struct pending_hardlink*)it;
+        struct extracted_object* target = __find_extracted_object(progress, hardlink->objectId);
+        int                      status;
+
+        if (target == NULL) {
+            errno = ENOENT;
+            fprintf(stderr,
+                "unmkvafs: failed to resolve hardlink target for '%s'\n",
+                __get_relative_path(root, hardlink->path));
+            return -1;
+        }
+
+        status = platform_fs_create_hardlink(target->path, hardlink->path);
+        if (status != 0) {
+            int createError = errno;
+
+            if (__is_nonfatal_hardlink_create_error(createError)) {
+                fprintf(stderr,
+                    "unmkvafs: warning: skipping hardlink '%s' (%s)\n",
+                    __get_relative_path(root, hardlink->path),
+                    strerror(createError));
+                continue;
+            }
+
+            fprintf(stderr,
+                "unmkvafs: failed to create hardlink '%s'\n",
+                __get_relative_path(root, hardlink->path));
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static void __destroy_extraction_state(
+    struct progress_context* progress)
+{
+    struct list_item* it;
+
+    for (it = progress->extracted_objects.head; it != NULL;) {
+        struct extracted_object* object = (struct extracted_object*)it;
+        it = it->next;
+        free(object->path);
+        free(object);
+    }
+    list_init(&progress->extracted_objects);
+
+    for (it = progress->pending_hardlinks.head; it != NULL;) {
+        struct pending_hardlink* hardlink = (struct pending_hardlink*)it;
+        it = it->next;
+        free(hardlink->path);
+        free(hardlink);
+    }
+    list_init(&progress->pending_hardlinks);
 }
 
 static int __extract_file(
@@ -258,6 +439,23 @@ static int __extract_directory(
                 return -1;
             }
             progress->directories++;
+        } else if (dp.Type == VaFsEntryType_Hardlink) {
+            // Queue aliases instead of creating them inline because the first
+            // concrete file path for this object may still be later in the walk.
+            if (dp.ObjectId == 0) {
+                fprintf(stderr, "unmkvafs: hardlink '%s' is missing an object id\n",
+                    __get_relative_path(root, filepathBuffer));
+                free(imagePathBuffer);
+                free(filepathBuffer);
+                return -1;
+            }
+
+            status = __queue_pending_hardlink(progress, dp.ObjectId, filepathBuffer);
+            if (status != 0) {
+                free(imagePathBuffer);
+                free(filepathBuffer);
+                return -1;
+            }
         } else if (dp.Type == VaFsEntryType_Symlink) {
             const char* symlinkTarget;
             
@@ -331,6 +529,13 @@ static int __extract_directory(
             status = vafs_file_close(fileHandle);
             if (status) {
                 fprintf(stderr, "unmkvafs: failed to close file '%s'\n", __get_relative_path(root, filepathBuffer));
+                free(imagePathBuffer);
+                free(filepathBuffer);
+                return -1;
+            }
+
+            status = __register_extracted_file(vafsHandle, progress, imagePathBuffer, filepathBuffer);
+            if (status != 0) {
                 free(imagePathBuffer);
                 free(filepathBuffer);
                 return -1;
@@ -413,6 +618,9 @@ int main(int argc, char *argv[])
         progressContext.disabled = 1;
     }
 
+    list_init(&progressContext.extracted_objects);
+    list_init(&progressContext.pending_hardlinks);
+
     status = vafs_open_file(opts.image_path, &vafsHandle);
     if (status) {
         fprintf(stderr, "unmkvafs: cannot open vafs image: %s\n", opts.image_path);
@@ -443,6 +651,11 @@ int main(int argc, char *argv[])
         goto error;
     }
 
+    status = __create_pending_hardlinks(&progressContext, opts.out_path);
+    if (status != 0) {
+        goto error;
+    }
+
     if (!progressContext.disabled) {
         printf("\n");
     }
@@ -459,6 +672,7 @@ exit:
             fprintf(stderr, "unmkvafs: failed to close root directory handle\n");
         }
     }
+    __destroy_extraction_state(&progressContext);
     status = vafs_close(vafsHandle);
     if (status) {
         fprintf(stderr, "unmkvafs: failed to close image handle\n");

@@ -132,6 +132,7 @@ extern int platform_fs_read_metadata(const char* path, struct VaFsMetadata* meta
 
 extern int platform_fs_directory_exists(const char* path);
 extern int platform_fs_create_directory(const char* path, uint32_t permissions);
+extern int platform_fs_create_hardlink(const char* targetPath, const char* path);
 extern int platform_fs_create_special(const char* path, const struct VaFsMetadata* metadata);
 extern int platform_fs_chmod(const char* path, uint32_t permissions);
 

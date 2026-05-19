@@ -22,6 +22,7 @@
 #include <vafs/stat.h>
 
 #if defined(_WIN32) || defined(_WIN64)
+#include <Windows.h>
 #include "dirent_win32.h"
 #include <direct.h>
 #include <io.h>
@@ -33,6 +34,26 @@
 #include <sys/sysmacros.h>
 #endif
 #endif
+
+static uint64_t __platform_fs_make_object_id(
+    const struct stat* st)
+{
+    uint64_t hash = 1469598103934665603ULL;
+    uint64_t device;
+    uint64_t inode;
+
+    device = (uint64_t)(unsigned long long)st->st_dev;
+    inode = (uint64_t)(unsigned long long)st->st_ino;
+
+    // Host inode and device identifiers are platform-specific in width, so we
+    // fold both into one stable 64-bit token before persisting the image-level
+    // object id used to reconstruct hardlink groups.
+    hash ^= device;
+    hash *= 1099511628211ULL;
+    hash ^= inode;
+    hash *= 1099511628211ULL;
+    return hash != 0 ? hash : 1;
+}
 
 static enum VaFsEntryType __platform_fs_mode_to_entry_type(uint32_t mode)
 {
@@ -134,6 +155,11 @@ int platform_fs_read_metadata(const char* path, struct VaFsMetadata* metadata)
 
     vafs_metadata_initialize(metadata);
     vafs_metadata_set_mode(metadata, type, platform_fs_mode_permissions((uint32_t)st.st_mode));
+    // Tooling persists host link identity here so mkvafs can collapse shared
+    // files into aliases and unmkvafs can rebuild the same relationship later.
+    metadata->LinkCount = (uint32_t)st.st_nlink;
+    metadata->ObjectId = __platform_fs_make_object_id(&st);
+    metadata->Mask |= VaFsMetadataMask_LinkCount | VaFsMetadataMask_ObjectId;
 
 #if !defined(_WIN32) && !defined(_WIN64)
     if (type == VaFsEntryType_CharacterDevice || type == VaFsEntryType_BlockDevice) {
@@ -175,6 +201,52 @@ int platform_fs_create_directory(const char* path, uint32_t permissions)
     return _mkdir(path);
 #else
     return mkdir(path, (mode_t)permissions);
+#endif
+}
+
+int platform_fs_create_hardlink(const char* targetPath, const char* path)
+{
+    if (targetPath == NULL || path == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+#if defined(_WIN32) || defined(_WIN64)
+    if (!CreateHardLinkA(path, targetPath, NULL)) {
+        DWORD error = GetLastError();
+
+        // Normalize native errors here so the higher-level extraction policy
+        // can treat special-file and hardlink host limitations consistently.
+        switch (error) {
+            case ERROR_ACCESS_DENIED:
+                errno = EACCES;
+                break;
+            case ERROR_PRIVILEGE_NOT_HELD:
+                errno = EPERM;
+                break;
+            case ERROR_NOT_SUPPORTED:
+            case ERROR_INVALID_FUNCTION:
+                errno = ENOTSUP;
+                break;
+            case ERROR_FILE_NOT_FOUND:
+            case ERROR_PATH_NOT_FOUND:
+                errno = ENOENT;
+                break;
+            case ERROR_ALREADY_EXISTS:
+                errno = EEXIST;
+                break;
+            default:
+                errno = EIO;
+                break;
+        }
+        return -1;
+    }
+    return 0;
+#else
+    if (link(targetPath, path) != 0 && errno != EEXIST) {
+        return -1;
+    }
+    return 0;
 #endif
 }
 

@@ -427,6 +427,110 @@ static int test_special_roundtrip(void)
     TEST_PASS("Special files survive descriptor-stream round-trip");
 }
 
+static int test_hardlink_roundtrip(void)
+{
+    struct VaFs* vafs = NULL;
+    struct VaFsConfiguration config;
+    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsDirectoryHandle* links = NULL;
+    struct VaFsDirectoryHandle* reopened = NULL;
+    struct VaFsFileHandle* file_handle = NULL;
+    struct VaFsMetadata dirMetadata = metadata_for_mode(VaFsEntryType_Directory, 0755);
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
+    struct VaFsMetadata statbuf;
+    struct VaFsEntry entry;
+    const char* payload = "hardlink-roundtrip";
+    char buffer[32];
+    size_t read;
+    int saw_payload = 0;
+    int saw_alias = 0;
+    int status;
+
+    fileMetadata.ObjectId = 0x70010002ULL;
+    fileMetadata.Mask |= VaFsMetadataMask_ObjectId;
+
+    vafs_config_initialize(&config);
+    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    TEST_ASSERT(status == 0, "Failed to create hardlink test image");
+
+    status = vafs_directory_open(vafs, "/", &root);
+    TEST_ASSERT(status == 0, "Failed to open root directory for hardlink test");
+
+    status = vafs_directory_create_directory(root, "links", &dirMetadata, &links);
+    TEST_ASSERT(status == 0, "Failed to create hardlink test directory");
+
+    status = vafs_directory_create_file(links, "payload", &fileMetadata, &file_handle);
+    TEST_ASSERT(status == 0, "Failed to create hardlink target file");
+
+    status = vafs_file_write(file_handle, (void*)payload, strlen(payload));
+    TEST_ASSERT(status == 0, "Failed to write hardlink test payload");
+    vafs_file_close(file_handle);
+    file_handle = NULL;
+
+    status = vafs_directory_create_hardlink(links, "payload_alias", fileMetadata.ObjectId);
+    TEST_ASSERT(status == 0, "Failed to create hardlink alias");
+
+    vafs_directory_close(links);
+    links = NULL;
+    vafs_directory_close(root);
+    root = NULL;
+    vafs_close(vafs);
+    vafs = NULL;
+
+    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    TEST_ASSERT(status == 0, "Failed to reopen hardlink test image");
+
+    status = vafs_path_stat(vafs, "/links/payload", 1, &statbuf);
+    TEST_ASSERT(status == 0, "Failed to stat hardlink target file");
+    TEST_ASSERT(statbuf.Type == VaFsEntryType_File, "Hardlink target type should remain a file");
+    TEST_ASSERT(statbuf.ObjectId == fileMetadata.ObjectId, "Hardlink target object id did not round-trip");
+    TEST_ASSERT(statbuf.LinkCount == 2, "Hardlink target link count should be incremented");
+    TEST_ASSERT(statbuf.Size == strlen(payload), "Hardlink target size did not round-trip");
+
+    status = vafs_path_stat(vafs, "/links/payload_alias", 1, &statbuf);
+    TEST_ASSERT(status == 0, "Failed to stat hardlink alias path");
+    TEST_ASSERT(statbuf.Type == VaFsEntryType_File, "Hardlink alias path should resolve to file metadata");
+    TEST_ASSERT(statbuf.ObjectId == fileMetadata.ObjectId, "Hardlink alias object id did not round-trip");
+    TEST_ASSERT(statbuf.LinkCount == 2, "Hardlink alias link count should match shared target");
+    TEST_ASSERT(statbuf.Size == strlen(payload), "Hardlink alias size did not round-trip");
+
+    status = vafs_directory_open(vafs, "/links", &reopened);
+    TEST_ASSERT(status == 0, "Failed to reopen hardlink directory");
+
+    status = vafs_directory_open_file(reopened, "payload_alias", &file_handle);
+    TEST_ASSERT(status == 0, "Failed to open hardlink alias through directory lookup");
+
+    TEST_ASSERT(vafs_file_length(file_handle) == strlen(payload), "Hardlink alias length did not resolve to target file length");
+    memset(buffer, 0, sizeof(buffer));
+    read = vafs_file_read(file_handle, buffer, sizeof(buffer) - 1);
+    TEST_ASSERT(read == strlen(payload), "Hardlink alias read returned unexpected length");
+    TEST_ASSERT(strcmp(buffer, payload) == 0, "Hardlink alias read returned unexpected payload");
+    vafs_file_close(file_handle);
+    file_handle = NULL;
+
+    while (vafs_directory_read(reopened, &entry) == 0) {
+        if (strcmp(entry.Name, "payload") == 0) {
+            TEST_ASSERT(entry.Type == VaFsEntryType_File, "Enumerated hardlink target should remain a file entry");
+            TEST_ASSERT(entry.ObjectId == fileMetadata.ObjectId, "Enumerated hardlink target object id did not round-trip");
+            saw_payload = 1;
+        } else if (strcmp(entry.Name, "payload_alias") == 0) {
+            TEST_ASSERT(entry.Type == VaFsEntryType_Hardlink, "Enumerated alias should report hardlink entry type");
+            TEST_ASSERT(entry.ObjectId == fileMetadata.ObjectId, "Enumerated hardlink alias object id did not round-trip");
+            saw_alias = 1;
+        }
+    }
+
+    TEST_ASSERT(saw_payload, "Enumerated hardlink directory did not include target file");
+    TEST_ASSERT(saw_alias, "Enumerated hardlink directory did not include alias entry");
+
+    vafs_directory_close(reopened);
+    reopened = NULL;
+    vafs_close(vafs);
+    remove(TEST_IMAGE_PATH);
+
+    TEST_PASS("Hardlinks resolve shared metadata while preserving alias entry type");
+}
+
 static int test_wide_directory_lookup(void)
 {
     struct VaFs* vafs = NULL;
@@ -681,6 +785,7 @@ int main(int argc, char** argv)
 
     test_metadata_roundtrip();
     test_special_roundtrip();
+    test_hardlink_roundtrip();
     test_wide_directory_lookup();
 
     printf("\n========================================\n");

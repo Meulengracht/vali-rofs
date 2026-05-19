@@ -102,6 +102,7 @@ VAFS_ONDISK_STRUCT(VaFsHeader, {
 #define VA_FS_DESCRIPTOR_TYPE_DIRECTORY 0x02
 #define VA_FS_DESCRIPTOR_TYPE_SYMLINK   0x03
 #define VA_FS_DESCRIPTOR_TYPE_SPECIAL   0x04
+#define VA_FS_DESCRIPTOR_TYPE_HARDLINK  0x05
 
 VAFS_ONDISK_STRUCT(VaFsDescriptor, {
     uint16_t Type;
@@ -161,10 +162,29 @@ VAFS_ONDISK_STRUCT(VaFsSpecialDescriptor, {
     VaFsDescriptorMetadata_t Metadata;
 });
 
+VAFS_ONDISK_STRUCT(VaFsHardlinkDescriptor, {
+    VaFsDescriptor_t Base;
+    uint16_t         NameLength;
+    uint16_t         Reserved;
+    uint64_t         ObjectId;
+});
+
 #define VA_FS_MAX_DESCRIPTOR_SIZE \
     (sizeof(VaFsFileDescriptor_t) > sizeof(VaFsDirectoryDescriptor_t) ? \
-        (sizeof(VaFsFileDescriptor_t) > sizeof(VaFsSymlinkDescriptor_t) ? sizeof(VaFsFileDescriptor_t) : sizeof(VaFsSymlinkDescriptor_t)) : \
-        (sizeof(VaFsDirectoryDescriptor_t) > sizeof(VaFsSymlinkDescriptor_t) ? sizeof(VaFsDirectoryDescriptor_t) : sizeof(VaFsSymlinkDescriptor_t)))
+        (sizeof(VaFsFileDescriptor_t) > sizeof(VaFsSymlinkDescriptor_t) ? \
+            (sizeof(VaFsFileDescriptor_t) > sizeof(VaFsSpecialDescriptor_t) ? \
+                (sizeof(VaFsFileDescriptor_t) > sizeof(VaFsHardlinkDescriptor_t) ? sizeof(VaFsFileDescriptor_t) : sizeof(VaFsHardlinkDescriptor_t)) : \
+                (sizeof(VaFsSpecialDescriptor_t) > sizeof(VaFsHardlinkDescriptor_t) ? sizeof(VaFsSpecialDescriptor_t) : sizeof(VaFsHardlinkDescriptor_t))) : \
+            (sizeof(VaFsSymlinkDescriptor_t) > sizeof(VaFsSpecialDescriptor_t) ? \
+                (sizeof(VaFsSymlinkDescriptor_t) > sizeof(VaFsHardlinkDescriptor_t) ? sizeof(VaFsSymlinkDescriptor_t) : sizeof(VaFsHardlinkDescriptor_t)) : \
+                (sizeof(VaFsSpecialDescriptor_t) > sizeof(VaFsHardlinkDescriptor_t) ? sizeof(VaFsSpecialDescriptor_t) : sizeof(VaFsHardlinkDescriptor_t)))) : \
+        (sizeof(VaFsDirectoryDescriptor_t) > sizeof(VaFsSymlinkDescriptor_t) ? \
+            (sizeof(VaFsDirectoryDescriptor_t) > sizeof(VaFsSpecialDescriptor_t) ? \
+                (sizeof(VaFsDirectoryDescriptor_t) > sizeof(VaFsHardlinkDescriptor_t) ? sizeof(VaFsDirectoryDescriptor_t) : sizeof(VaFsHardlinkDescriptor_t)) : \
+                (sizeof(VaFsSpecialDescriptor_t) > sizeof(VaFsHardlinkDescriptor_t) ? sizeof(VaFsSpecialDescriptor_t) : sizeof(VaFsHardlinkDescriptor_t))) : \
+            (sizeof(VaFsSymlinkDescriptor_t) > sizeof(VaFsSpecialDescriptor_t) ? \
+                (sizeof(VaFsSymlinkDescriptor_t) > sizeof(VaFsHardlinkDescriptor_t) ? sizeof(VaFsSymlinkDescriptor_t) : sizeof(VaFsHardlinkDescriptor_t)) : \
+                (sizeof(VaFsSpecialDescriptor_t) > sizeof(VaFsHardlinkDescriptor_t) ? sizeof(VaFsSpecialDescriptor_t) : sizeof(VaFsHardlinkDescriptor_t)))))
 
 enum VaFsMode {
     VaFsMode_Read,
@@ -221,6 +241,12 @@ struct VaFsSpecial {
     const char*             Name;
     struct VaFsMetadata     Stat;
     int                     StatCached;
+};
+
+struct VaFsHardlink {
+    struct VaFs*             VaFs;
+    VaFsHardlinkDescriptor_t Descriptor;
+    const char*              Name;
 };
 
 struct VaFs {
@@ -706,6 +732,7 @@ struct VaFsDirectoryEntry {
         struct VaFsDirectory* Directory;
         struct VaFsSymlink*   Symlink;
         struct VaFsSpecial*   Special;
+        struct VaFsHardlink*  Hardlink;
     };
     struct VaFsDirectoryEntry* Link;
 };
@@ -785,6 +812,7 @@ extern int __vafs_directory_open_internal(struct VaFs* vafs, const char* path, s
  * @return 0 on success, otherwise -1 with `errno` set.
  */
 extern int __vafs_file_open_internal(struct VaFs* vafs, const char* path, struct VaFsFileHandle** handleOut, int symlinkDepth);
+extern struct VaFsDirectoryEntry* __vafs_resolve_hardlink(struct VaFs* vafs, struct VaFsDirectoryEntry* entry);
 
 /**
  * @brief Returns the linked-list entries for a directory, loading them on demand in read mode.

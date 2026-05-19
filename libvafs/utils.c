@@ -244,6 +244,16 @@ int __vafs_path_stat_internal(
             return -1;
         }
 
+        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
+            // Path stat follows the same alias rules as open so callers never
+            // see different answers for the same shared object depending on
+            // which API they chose.
+            entry = __vafs_resolve_hardlink(vafs, entry);
+            if (entry == NULL) {
+                return -1;
+            }
+        }
+
         if (entry->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
             if (remainingPath[0] == '\0') {
                 return __vafs_directory_entry_stat(entry, metadata);

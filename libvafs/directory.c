@@ -291,6 +291,10 @@ static void __directory_entry_destroy(struct VaFsDirectoryEntry* entry)
             free((void*)entry->Special->Name);
             free(entry->Special);
             break;
+        case VA_FS_DESCRIPTOR_TYPE_HARDLINK:
+            free((void*)entry->Hardlink->Name);
+            free(entry->Hardlink);
+            break;
     }
     free(entry);
 }
@@ -351,6 +355,10 @@ struct VaFsDirectoryEntry* __vafs_directory_find_entry(
     return __vafs_directory_get(directory, token);
 }
 
+static struct VaFsDirectoryEntry* __find_entry_by_object_id(
+    struct VaFsDirectory* directory,
+    uint64_t             objectId);
+
 int __vafs_directory_entry_stat(
     struct VaFsDirectoryEntry* entry,
     struct VaFsMetadata*       metadata)
@@ -369,10 +377,74 @@ int __vafs_directory_entry_stat(
             return __vafs_symlink_stat_internal(entry->Symlink, metadata);
         case VA_FS_DESCRIPTOR_TYPE_SPECIAL:
             return __vafs_special_stat_internal(entry->Special, metadata);
+        case VA_FS_DESCRIPTOR_TYPE_HARDLINK:
+            // Hardlinks intentionally borrow the target object's metadata so
+            // open/stat callers observe shared-object semantics instead of a
+            // second independent inode snapshot.
+            entry = __vafs_resolve_hardlink(entry->Hardlink->VaFs, entry);
+            if (entry == NULL) {
+                return -1;
+            }
+            return __vafs_directory_entry_stat(entry, metadata);
         default:
             errno = EINVAL;
             return -1;
     }
+}
+
+static struct VaFsDirectoryEntry* __find_entry_by_object_id(
+    struct VaFsDirectory* directory,
+    uint64_t             objectId)
+{
+    struct VaFsDirectoryEntry* entry;
+    struct VaFsMetadata        metadata;
+
+    // Hardlink resolution stays tree-based on purpose so readers and writers
+    // agree on one source of truth instead of maintaining a separate object-id
+    // index that could drift from the materialized directory tree.
+    entry = __vafs_directory_entries(directory);
+    while (entry != NULL) {
+        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
+            struct VaFsDirectoryEntry* nested = __find_entry_by_object_id(entry->Directory, objectId);
+            if (nested != NULL) {
+                return nested;
+            }
+        } else if (entry->Type != VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
+            if (__vafs_directory_entry_stat(entry, &metadata) == 0 &&
+                (metadata.Mask & VaFsMetadataMask_ObjectId) != 0 &&
+                metadata.ObjectId == objectId) {
+                return entry;
+            }
+        }
+        entry = entry->Link;
+    }
+    return NULL;
+}
+
+struct VaFsDirectoryEntry* __vafs_resolve_hardlink(
+    struct VaFs*            vafs,
+    struct VaFsDirectoryEntry* entry)
+{
+    if (vafs == NULL || entry == NULL) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    if (entry->Type != VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
+        return entry;
+    }
+
+    if (entry->Hardlink->Descriptor.ObjectId == 0) {
+        errno = ENOENT;
+        return NULL;
+    }
+
+    entry = __find_entry_by_object_id(vafs->RootDirectory, entry->Hardlink->Descriptor.ObjectId);
+    if (entry == NULL) {
+        errno = ENOENT;
+        return NULL;
+    }
+    return entry;
 }
 
 void vafs_directory_destroy(struct VaFsDirectory* directory)
@@ -408,6 +480,8 @@ static int __get_descriptor_size(
             return sizeof(VaFsSymlinkDescriptor_t);
         case VA_FS_DESCRIPTOR_TYPE_SPECIAL:
             return sizeof(VaFsSpecialDescriptor_t);
+        case VA_FS_DESCRIPTOR_TYPE_HARDLINK:
+            return sizeof(VaFsHardlinkDescriptor_t);
         default:
             return 0;
     }
@@ -594,9 +668,48 @@ static int __validate_special_descriptor(
         return -1;
     }
 
+    // Device nodes cannot be reconstructed from mode bits alone, so images
+    // must reject descriptors that would lose their major/minor identity.
     if ((entryType == VaFsEntryType_CharacterDevice || entryType == VaFsEntryType_BlockDevice) &&
         (descriptor->Metadata.Mask & VaFsMetadataMask_Device) == 0) {
         VAFS_ERROR("__validate_special_descriptor: device nodes require persisted major/minor metadata\n");
+        return -1;
+    }
+    return 0;
+}
+
+static int __validate_hardlink_descriptor(
+    VaFsHardlinkDescriptor_t* descriptor,
+    const char*               extendedData)
+{
+    size_t nameLength;
+
+    (void)extendedData;
+
+    if (__validate_descriptor_length(&descriptor->Base, sizeof(VaFsHardlinkDescriptor_t)) != 0) {
+        return -1;
+    }
+
+    if (descriptor->ObjectId == 0) {
+        VAFS_ERROR("__validate_hardlink_descriptor: hardlink has no target object id\n");
+        return -1;
+    }
+
+    if (descriptor->NameLength == 0) {
+        VAFS_ERROR("__validate_hardlink_descriptor: hardlink has no name\n");
+        return -1;
+    }
+
+    if (descriptor->NameLength > VAFS_NAME_MAX) {
+        VAFS_ERROR("__validate_hardlink_descriptor: name length %u exceeds maximum %d\n",
+            descriptor->NameLength, VAFS_NAME_MAX);
+        return -1;
+    }
+
+    nameLength = descriptor->Base.Length - sizeof(VaFsHardlinkDescriptor_t);
+    if (nameLength != descriptor->NameLength) {
+        VAFS_ERROR("__validate_hardlink_descriptor: descriptor length %u does not match name length %u\n",
+            descriptor->Base.Length, descriptor->NameLength);
         return -1;
     }
     return 0;
@@ -813,6 +926,9 @@ static struct VaFsSpecial* __create_special_from_descriptor(
     memcpy(&special->Descriptor, descriptor, sizeof(VaFsSpecialDescriptor_t));
     special->Name = __read_extended_string(extendedData, descriptor->Base.Length - sizeof(VaFsSpecialDescriptor_t));
     special->VaFs = vafs;
+    // Special entries persist an explicit subtype so reload does not have to
+    // guess character-vs-block-vs-fifo meaning from platform-specific mode
+    // interpretations alone.
     __materialize_descriptor_metadata(
         &descriptor->Metadata,
         (enum VaFsEntryType)descriptor->EntryType,
@@ -821,6 +937,31 @@ static struct VaFsSpecial* __create_special_from_descriptor(
     );
     special->StatCached = 1;
     return special;
+}
+
+static struct VaFsHardlink* __create_hardlink_from_descriptor(
+    struct VaFs*              vafs,
+    VaFsHardlinkDescriptor_t* descriptor,
+    const char*               extendedData)
+{
+    struct VaFsHardlink* hardlink;
+
+    if (__validate_hardlink_descriptor(descriptor, extendedData) != 0) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    hardlink = (struct VaFsHardlink*)calloc(1, sizeof(struct VaFsHardlink));
+    if (!hardlink) {
+        return NULL;
+    }
+
+    // Hardlink descriptors stay intentionally thin; resolving the target on
+    // demand keeps every alias tied to one canonical metadata record.
+    memcpy(&hardlink->Descriptor, descriptor, sizeof(VaFsHardlinkDescriptor_t));
+    hardlink->Name = __read_extended_string(extendedData, descriptor->NameLength);
+    hardlink->VaFs = vafs;
+    return hardlink;
 }
 
 static struct VaFsDirectoryEntry* __create_entry_from_descriptor(
@@ -846,6 +987,8 @@ static struct VaFsDirectoryEntry* __create_entry_from_descriptor(
         entry->Symlink = __create_symlink_from_descriptor(vafs, (VaFsSymlinkDescriptor_t*)descriptor, extendedData);
     } else if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SPECIAL) {
         entry->Special = __create_special_from_descriptor(vafs, (VaFsSpecialDescriptor_t*)descriptor, extendedData);
+    } else if (entry->Type == VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
+        entry->Hardlink = __create_hardlink_from_descriptor(vafs, (VaFsHardlinkDescriptor_t*)descriptor, extendedData);
     } else {
         free(entry);
         errno = EINVAL;
@@ -1021,6 +1164,8 @@ const char* __vafs_directory_entry_name(
         return entry->Symlink->Name;
     } else if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SPECIAL) {
         return entry->Special->Name;
+    } else if (entry->Type == VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
+        return entry->Hardlink->Name;
     }
     return NULL;
 }
@@ -1081,6 +1226,13 @@ int __vafs_directory_open_internal(
         entry = __vafs_directory_find_entry(currentDirectory, token);
         if (entry == NULL) {
             return -1;
+        }
+
+        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
+            entry = __vafs_resolve_hardlink(vafs, entry);
+            if (entry == NULL) {
+                return -1;
+            }
         }
 
         if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
@@ -1255,6 +1407,8 @@ static int __write_special_descriptor(
 
     VAFS_DEBUG("__write_special_descriptor(name=%s)\n", entry->Special->Name);
 
+    // Persist the explicit entry subtype because host recreation cares about
+    // more than permission bits when deciding which special node to create.
     __finalize_entry_metadata(&entry->Special->Stat, entry->Special->Stat.Type, 0);
     __descriptor_metadata_initialize(&entry->Special->Descriptor.Metadata, &entry->Special->Stat);
     entry->Special->Descriptor.EntryType = (uint16_t)entry->Special->Stat.Type;
@@ -1273,6 +1427,35 @@ static int __write_special_descriptor(
         writer->Base.VaFs->DescriptorStream,
         entry->Special->Name,
         strlen(entry->Special->Name)
+    );
+}
+
+static int __write_hardlink_descriptor(
+    struct VaFsDirectoryWriter* writer,
+    struct VaFsDirectoryEntry*  entry)
+{
+    int status;
+
+    VAFS_DEBUG("__write_hardlink_descriptor(name=%s)\n", entry->Hardlink->Name);
+
+    // Only the alias name and target object id are serialized here because
+    // duplicating metadata would let aliases diverge from their shared target.
+    entry->Hardlink->Descriptor.NameLength = (uint16_t)strlen(entry->Hardlink->Name);
+    entry->Hardlink->Descriptor.Base.Length = (uint16_t)(sizeof(VaFsHardlinkDescriptor_t) + entry->Hardlink->Descriptor.NameLength);
+
+    status = vafs_stream_write(
+        writer->Base.VaFs->DescriptorStream,
+        &entry->Hardlink->Descriptor,
+        sizeof(VaFsHardlinkDescriptor_t)
+    );
+    if (status != 0) {
+        return status;
+    }
+
+    return vafs_stream_write(
+        writer->Base.VaFs->DescriptorStream,
+        entry->Hardlink->Name,
+        strlen(entry->Hardlink->Name)
     );
 }
 
@@ -1336,6 +1519,8 @@ int vafs_directory_flush(
             status = __write_symlink_descriptor(writer, entry);
         } else if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SPECIAL) {
             status = __write_special_descriptor(writer, entry);
+        } else if (entry->Type == VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
+            status = __write_hardlink_descriptor(writer, entry);
         } else {
             VAFS_ERROR("vafs_directory_flush: unknown descriptor type\n");
             return -1;
@@ -1423,7 +1608,9 @@ int vafs_directory_read(
 
     // initialize the entry structure
     entryOut->Name = __vafs_directory_entry_name(entry);
-    entryOut->Type = metadata.Type;
+    // Enumeration still needs to expose that this name is an alias even though
+    // stat/open semantics resolve to the shared target object.
+    entryOut->Type = (entry->Type == VA_FS_DESCRIPTOR_TYPE_HARDLINK) ? VaFsEntryType_Hardlink : metadata.Type;
     entryOut->ObjectId = metadata.ObjectId;
     entryOut->MetadataMask = metadata.Mask;
     return 0;
@@ -1687,6 +1874,83 @@ static int __create_special_entry(
     return 0;
 }
 
+static int __add_hardlink_entry(
+    struct VaFsDirectoryWriter* writer,
+    struct VaFsHardlink*        entry)
+{
+    struct VaFsDirectoryEntry* newEntry;
+
+    newEntry = (struct VaFsDirectoryEntry*)calloc(1, sizeof(struct VaFsDirectoryEntry));
+    if (!newEntry) {
+        return -1;
+    }
+
+    newEntry->Type = VA_FS_DESCRIPTOR_TYPE_HARDLINK;
+    newEntry->Hardlink = entry;
+    newEntry->Link = writer->Entries;
+    writer->Entries = newEntry;
+    writer->EntryCount++;
+    writer->IndexDirty = 1;
+    return 0;
+}
+
+static int __directory_entry_increment_link_count(
+    struct VaFsDirectoryEntry* entry)
+{
+    // Writers bump the canonical entry immediately so every later stat or
+    // enumeration sees the final shared link count before serialization.
+    switch (entry->Type) {
+        case VA_FS_DESCRIPTOR_TYPE_FILE:
+            entry->File->Stat.LinkCount++;
+            entry->File->Stat.Mask |= VaFsMetadataMask_LinkCount;
+            return 0;
+        case VA_FS_DESCRIPTOR_TYPE_SYMLINK:
+            entry->Symlink->Stat.LinkCount++;
+            entry->Symlink->Stat.Mask |= VaFsMetadataMask_LinkCount;
+            return 0;
+        case VA_FS_DESCRIPTOR_TYPE_SPECIAL:
+            entry->Special->Stat.LinkCount++;
+            entry->Special->Stat.Mask |= VaFsMetadataMask_LinkCount;
+            return 0;
+        default:
+            errno = EINVAL;
+            return -1;
+    }
+}
+
+static int __create_hardlink_entry(
+    struct VaFsDirectoryWriter* writer,
+    const char*                 name,
+    uint64_t                    objectId)
+{
+    struct VaFsHardlink* entry;
+    int                  status;
+
+    entry = (struct VaFsHardlink*)calloc(1, sizeof(struct VaFsHardlink));
+    if (!entry) {
+        return -1;
+    }
+
+    entry->VaFs = writer->Base.VaFs;
+    entry->Name = strdup(name);
+    if (!entry->Name) {
+        free(entry);
+        return -1;
+    }
+
+    entry->Descriptor.Base.Type = VA_FS_DESCRIPTOR_TYPE_HARDLINK;
+    entry->Descriptor.Base.Length = sizeof(VaFsHardlinkDescriptor_t);
+    entry->Descriptor.NameLength = (uint16_t)strlen(name);
+    entry->Descriptor.ObjectId = objectId;
+    status = __add_hardlink_entry(writer, entry);
+    if (status != 0) {
+        free((void*)entry->Name);
+        free(entry);
+        return status;
+    }
+    return 0;
+}
+
 static int __add_directory_entry(
     struct VaFsDirectoryWriter* writer,
     struct VaFsDirectory*       entry)
@@ -1773,6 +2037,13 @@ int vafs_directory_open_directory(
     entry = __vafs_directory_find_entry(handle->Directory, token);
     if (entry == NULL) {
         return -1;
+    }
+
+    if (entry->Type == VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
+        entry = __vafs_resolve_hardlink(handle->Directory->VaFs, entry);
+        if (entry == NULL) {
+            return -1;
+        }
     }
 
     if (entry->Type != VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
@@ -1867,6 +2138,13 @@ int vafs_directory_open_file(
     entry = __vafs_directory_find_entry(handle->Directory, token);
     if (entry == NULL) {
         return -1;
+    }
+
+    if (entry->Type == VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
+        entry = __vafs_resolve_hardlink(handle->Directory->VaFs, entry);
+        if (entry == NULL) {
+            return -1;
+        }
     }
 
     if (entry->Type != VA_FS_DESCRIPTOR_TYPE_FILE) {
@@ -2027,12 +2305,53 @@ int vafs_directory_create_hardlink(
     const char*                 name,
     uint64_t                    objectId)
 {
-    (void)handle;
-    (void)name;
-    (void)objectId;
+    struct VaFsDirectoryWriter* writer;
+    struct VaFsDirectoryEntry*  entry;
+    struct VaFsDirectoryEntry*  targetEntry;
+    char                        token[VAFS_NAME_MAX + 1];
 
-    errno = ENOTSUP;
-    return -1;
+    if (handle == NULL || name == NULL || objectId == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (handle->Directory->VaFs->Mode != VaFsMode_Write) {
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!__vafs_pathtoken(name, token, sizeof(token))) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    entry = __vafs_directory_find_entry(handle->Directory, token);
+    if (entry != NULL) {
+        errno = EEXIST;
+        return -1;
+    }
+
+    targetEntry = __find_entry_by_object_id(handle->Directory->VaFs->RootDirectory, objectId);
+    if (targetEntry == NULL) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    // Only canonical non-directory entries may anchor aliases; allowing a
+    // hardlink-to-hardlink chain or directory alias would complicate lookup
+    // semantics without preserving any extra image information.
+    if (targetEntry->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY ||
+        targetEntry->Type == VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (__directory_entry_increment_link_count(targetEntry) != 0) {
+        return -1;
+    }
+
+    writer = (struct VaFsDirectoryWriter*)handle->Directory;
+    return __create_hardlink_entry(writer, token, objectId);
 }
 
 int vafs_directory_read_symlink(
@@ -2065,6 +2384,13 @@ int vafs_directory_read_symlink(
     entry = __vafs_directory_find_entry(handle->Directory, token);
     if (entry == NULL) {
         return -1;
+    }
+
+    if (entry->Type == VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
+        entry = __vafs_resolve_hardlink(handle->Directory->VaFs, entry);
+        if (entry == NULL) {
+            return -1;
+        }
     }
     
     if (entry->Type != VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
