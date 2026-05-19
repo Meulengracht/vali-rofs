@@ -292,6 +292,141 @@ static int test_metadata_roundtrip(void)
     TEST_PASS("Metadata survives descriptor-stream round-trip");
 }
 
+static int test_special_roundtrip(void)
+{
+    struct VaFs* vafs = NULL;
+    struct VaFsConfiguration config;
+    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsDirectoryHandle* specials = NULL;
+    struct VaFsDirectoryHandle* reopened = NULL;
+    struct VaFsMetadata dirMetadata = metadata_for_mode(VaFsEntryType_Directory, 0755);
+    struct VaFsMetadata invalidMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
+    struct VaFsMetadata charMetadata = metadata_for_mode(VaFsEntryType_CharacterDevice, 0600);
+    struct VaFsMetadata blockMetadata = metadata_for_mode(VaFsEntryType_BlockDevice, 0640);
+    struct VaFsMetadata fifoMetadata = metadata_for_mode(VaFsEntryType_Fifo, 0660);
+    struct VaFsMetadata statbuf;
+    struct VaFsEntry entry;
+    int saw_null = 0;
+    int saw_loop = 0;
+    int saw_pipe = 0;
+    int status;
+
+    charMetadata.Uid = 41;
+    charMetadata.ObjectId = 0x4100;
+    charMetadata.Device.Major = 1;
+    charMetadata.Device.Minor = 3;
+    charMetadata.MTime.Seconds = 1715981000;
+    charMetadata.MTime.Nanoseconds = 10;
+    charMetadata.Mask |= VaFsMetadataMask_Uid |
+        VaFsMetadataMask_ObjectId |
+        VaFsMetadataMask_Device |
+        VaFsMetadataMask_MTime;
+
+    blockMetadata.Gid = 51;
+    blockMetadata.ObjectId = 0x5100;
+    blockMetadata.Device.Major = 8;
+    blockMetadata.Device.Minor = 1;
+    blockMetadata.MTime.Seconds = 1715981010;
+    blockMetadata.MTime.Nanoseconds = 20;
+    blockMetadata.Mask |= VaFsMetadataMask_Gid |
+        VaFsMetadataMask_ObjectId |
+        VaFsMetadataMask_Device |
+        VaFsMetadataMask_MTime;
+
+    fifoMetadata.ObjectId = 0x6100;
+    fifoMetadata.MTime.Seconds = 1715981020;
+    fifoMetadata.MTime.Nanoseconds = 30;
+    fifoMetadata.Mask |= VaFsMetadataMask_ObjectId |
+        VaFsMetadataMask_MTime;
+
+    vafs_config_initialize(&config);
+    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    TEST_ASSERT(status == 0, "Failed to create special-file test image");
+
+    status = vafs_directory_open(vafs, "/", &root);
+    TEST_ASSERT(status == 0, "Failed to open root directory for special-file test");
+
+    status = vafs_directory_create_directory(root, "specials", &dirMetadata, &specials);
+    TEST_ASSERT(status == 0, "Failed to create special-file test directory");
+
+    status = vafs_directory_create_special(specials, "invalid", &invalidMetadata);
+    TEST_ASSERT(status != 0 && errno == EINVAL, "Regular file metadata should be rejected for special entries");
+
+    status = vafs_directory_create_special(specials, "null", &charMetadata);
+    TEST_ASSERT(status == 0, "Failed to create character device entry");
+
+    status = vafs_directory_create_special(specials, "loop", &blockMetadata);
+    TEST_ASSERT(status == 0, "Failed to create block device entry");
+
+    status = vafs_directory_create_special(specials, "pipe", &fifoMetadata);
+    TEST_ASSERT(status == 0, "Failed to create fifo entry");
+
+    vafs_directory_close(specials);
+    specials = NULL;
+    vafs_directory_close(root);
+    root = NULL;
+    vafs_close(vafs);
+    vafs = NULL;
+
+    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    TEST_ASSERT(status == 0, "Failed to reopen special-file test image");
+
+    status = vafs_path_stat(vafs, "/specials/null", 1, &statbuf);
+    TEST_ASSERT(status == 0, "Failed to stat character device entry");
+    TEST_ASSERT(statbuf.Type == VaFsEntryType_CharacterDevice, "Character device type did not round-trip");
+    TEST_ASSERT(statbuf.Mode == charMetadata.Mode, "Character device mode did not round-trip");
+    TEST_ASSERT(statbuf.Device.Major == charMetadata.Device.Major, "Character device major did not round-trip");
+    TEST_ASSERT(statbuf.Device.Minor == charMetadata.Device.Minor, "Character device minor did not round-trip");
+    TEST_ASSERT(statbuf.ObjectId == charMetadata.ObjectId, "Character device object id did not round-trip");
+    TEST_ASSERT(timestamps_equal(&statbuf.MTime, &charMetadata.MTime), "Character device mtime did not round-trip");
+
+    status = vafs_path_stat(vafs, "/specials/loop", 1, &statbuf);
+    TEST_ASSERT(status == 0, "Failed to stat block device entry");
+    TEST_ASSERT(statbuf.Type == VaFsEntryType_BlockDevice, "Block device type did not round-trip");
+    TEST_ASSERT(statbuf.Mode == blockMetadata.Mode, "Block device mode did not round-trip");
+    TEST_ASSERT(statbuf.Device.Major == blockMetadata.Device.Major, "Block device major did not round-trip");
+    TEST_ASSERT(statbuf.Device.Minor == blockMetadata.Device.Minor, "Block device minor did not round-trip");
+    TEST_ASSERT(statbuf.ObjectId == blockMetadata.ObjectId, "Block device object id did not round-trip");
+    TEST_ASSERT(timestamps_equal(&statbuf.MTime, &blockMetadata.MTime), "Block device mtime did not round-trip");
+
+    status = vafs_path_stat(vafs, "/specials/pipe", 1, &statbuf);
+    TEST_ASSERT(status == 0, "Failed to stat fifo entry");
+    TEST_ASSERT(statbuf.Type == VaFsEntryType_Fifo, "Fifo type did not round-trip");
+    TEST_ASSERT(statbuf.Mode == fifoMetadata.Mode, "Fifo mode did not round-trip");
+    TEST_ASSERT(statbuf.ObjectId == fifoMetadata.ObjectId, "Fifo object id did not round-trip");
+    TEST_ASSERT(timestamps_equal(&statbuf.MTime, &fifoMetadata.MTime), "Fifo mtime did not round-trip");
+
+    status = vafs_directory_open(vafs, "/specials", &reopened);
+    TEST_ASSERT(status == 0, "Failed to reopen special-file directory");
+
+    while (vafs_directory_read(reopened, &entry) == 0) {
+        if (strcmp(entry.Name, "null") == 0) {
+            TEST_ASSERT(entry.Type == VaFsEntryType_CharacterDevice, "Enumerated character device type did not round-trip");
+            TEST_ASSERT((entry.MetadataMask & VaFsMetadataMask_Device) != 0, "Enumerated character device lost device metadata");
+            saw_null = 1;
+        } else if (strcmp(entry.Name, "loop") == 0) {
+            TEST_ASSERT(entry.Type == VaFsEntryType_BlockDevice, "Enumerated block device type did not round-trip");
+            TEST_ASSERT((entry.MetadataMask & VaFsMetadataMask_Device) != 0, "Enumerated block device lost device metadata");
+            saw_loop = 1;
+        } else if (strcmp(entry.Name, "pipe") == 0) {
+            TEST_ASSERT(entry.Type == VaFsEntryType_Fifo, "Enumerated fifo type did not round-trip");
+            TEST_ASSERT((entry.MetadataMask & VaFsMetadataMask_Device) == 0, "Enumerated fifo should not advertise device metadata");
+            saw_pipe = 1;
+        }
+    }
+
+    TEST_ASSERT(saw_null, "Enumerated directory did not include character device entry");
+    TEST_ASSERT(saw_loop, "Enumerated directory did not include block device entry");
+    TEST_ASSERT(saw_pipe, "Enumerated directory did not include fifo entry");
+
+    vafs_directory_close(reopened);
+    reopened = NULL;
+    vafs_close(vafs);
+    remove(TEST_IMAGE_PATH);
+
+    TEST_PASS("Special files survive descriptor-stream round-trip");
+}
+
 static int test_wide_directory_lookup(void)
 {
     struct VaFs* vafs = NULL;
@@ -545,6 +680,7 @@ int main(int argc, char** argv)
     printf("Running VaFS wide directory lookup tests...\n\n");
 
     test_metadata_roundtrip();
+    test_special_roundtrip();
     test_wide_directory_lookup();
 
     printf("\n========================================\n");

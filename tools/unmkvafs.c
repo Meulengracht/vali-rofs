@@ -226,6 +226,14 @@ static int __extract_directory(
                 return -1;
             }
             progress->symlinks++;
+        } else if (dp.Type == VaFsEntryType_CharacterDevice ||
+            dp.Type == VaFsEntryType_BlockDevice ||
+            dp.Type == VaFsEntryType_Fifo) {
+            errno = ENOTSUP;
+            fprintf(stderr,
+                "unmkvafs: extracting special entry '%s' is not implemented yet\n",
+                __get_relative_path(root, filepathBuffer));
+            return -1;
         } else {
             struct VaFsFileHandle* fileHandle;
             status = vafs_directory_open_file(directoryHandle, dp.Name, &fileHandle);

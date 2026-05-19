@@ -161,9 +161,8 @@ extern int vafs_directory_create_file(
 /**
  * @brief Creates a special file entry while building an image.
  *
- * The API surface needs to converge before the descriptor format does, so the
- * initial implementation may report `ENOTSUP` until special-file serialization
- * support lands in the image format.
+ * Character devices, block devices, and FIFOs are persisted as dedicated
+ * descriptor entries so their type and device metadata round-trip cleanly.
  *
  * @param handle   Parent directory handle opened in write mode.
  * @param name     Name of the special-file entry.

@@ -163,6 +163,25 @@ static void __initialize_symlink_descriptor(
     __descriptor_metadata_initialize(&descriptor->Metadata, metadata);
 }
 
+static void __initialize_special_descriptor(
+    VaFsSpecialDescriptor_t* descriptor,
+    const struct VaFsMetadata* metadata)
+{
+    descriptor->Base.Type = VA_FS_DESCRIPTOR_TYPE_SPECIAL;
+    descriptor->Base.Length = sizeof(VaFsSpecialDescriptor_t);
+    descriptor->EntryType = (uint16_t)metadata->Type;
+    descriptor->Reserved = 0;
+    __descriptor_metadata_initialize(&descriptor->Metadata, metadata);
+}
+
+static int __is_special_entry_type(
+    enum VaFsEntryType type)
+{
+    return type == VaFsEntryType_CharacterDevice ||
+        type == VaFsEntryType_BlockDevice ||
+        type == VaFsEntryType_Fifo;
+}
+
 static int __vafs_file_stat_internal(
     struct VaFsFile*     file,
     struct VaFsMetadata* metadata)
@@ -205,6 +224,25 @@ static int __vafs_symlink_stat_internal(
     return 0;
 }
 
+static int __vafs_special_stat_internal(
+    struct VaFsSpecial*  special,
+    struct VaFsMetadata* metadata)
+{
+    if (!special->StatCached) {
+        __materialize_descriptor_metadata(
+            &special->Descriptor.Metadata,
+            (enum VaFsEntryType)special->Descriptor.EntryType,
+            0,
+            &special->Stat
+        );
+        special->StatCached = 1;
+    }
+
+    __finalize_entry_metadata(&special->Stat, (enum VaFsEntryType)special->Descriptor.EntryType, 0);
+    *metadata = special->Stat;
+    return 0;
+}
+
 int vafs_directory_create_root(
     struct VaFs*           vafs,
     struct VaFsDirectory** directoryOut)
@@ -240,14 +278,18 @@ int vafs_directory_create_root(
 static void __directory_entry_destroy(struct VaFsDirectoryEntry* entry)
 {
     switch (entry->Type) {
-        case VaFsEntryType_Directory:
+        case VA_FS_DESCRIPTOR_TYPE_DIRECTORY:
             vafs_directory_destroy(entry->Directory);
             break;
-        case VaFsEntryType_File:
+        case VA_FS_DESCRIPTOR_TYPE_FILE:
             vafs_file_destroy(entry->File);
             break;
-        case VaFsEntryType_Symlink:
+        case VA_FS_DESCRIPTOR_TYPE_SYMLINK:
             vafs_symlink_destroy(entry->Symlink);
+            break;
+        case VA_FS_DESCRIPTOR_TYPE_SPECIAL:
+            free((void*)entry->Special->Name);
+            free(entry->Special);
             break;
     }
     free(entry);
@@ -325,6 +367,8 @@ int __vafs_directory_entry_stat(
             return __vafs_directory_stat_internal(entry->Directory, metadata);
         case VA_FS_DESCRIPTOR_TYPE_SYMLINK:
             return __vafs_symlink_stat_internal(entry->Symlink, metadata);
+        case VA_FS_DESCRIPTOR_TYPE_SPECIAL:
+            return __vafs_special_stat_internal(entry->Special, metadata);
         default:
             errno = EINVAL;
             return -1;
@@ -362,6 +406,8 @@ static int __get_descriptor_size(
             return sizeof(VaFsDirectoryDescriptor_t);
         case VA_FS_DESCRIPTOR_TYPE_SYMLINK:
             return sizeof(VaFsSymlinkDescriptor_t);
+        case VA_FS_DESCRIPTOR_TYPE_SPECIAL:
+            return sizeof(VaFsSpecialDescriptor_t);
         default:
             return 0;
     }
@@ -512,6 +558,46 @@ static int __validate_symlink_descriptor(
         return -1;
     }
 
+    return 0;
+}
+
+static int __validate_special_descriptor(
+    VaFsSpecialDescriptor_t* descriptor,
+    const char*              extendedData)
+{
+    size_t nameLength;
+    enum VaFsEntryType entryType;
+
+    (void)extendedData;
+
+    if (__validate_descriptor_length(&descriptor->Base, sizeof(VaFsSpecialDescriptor_t)) != 0) {
+        return -1;
+    }
+
+    nameLength = descriptor->Base.Length - sizeof(VaFsSpecialDescriptor_t);
+    if (nameLength == 0) {
+        VAFS_ERROR("__validate_special_descriptor: special entry has no name\n");
+        return -1;
+    }
+
+    if (nameLength > VAFS_NAME_MAX) {
+        VAFS_ERROR("__validate_special_descriptor: name length %zu exceeds maximum %d\n",
+            nameLength, VAFS_NAME_MAX);
+        return -1;
+    }
+
+    entryType = (enum VaFsEntryType)descriptor->EntryType;
+    if (!__is_special_entry_type(entryType)) {
+        VAFS_ERROR("__validate_special_descriptor: invalid special entry type %u\n",
+            descriptor->EntryType);
+        return -1;
+    }
+
+    if ((entryType == VaFsEntryType_CharacterDevice || entryType == VaFsEntryType_BlockDevice) &&
+        (descriptor->Metadata.Mask & VaFsMetadataMask_Device) == 0) {
+        VAFS_ERROR("__validate_special_descriptor: device nodes require persisted major/minor metadata\n");
+        return -1;
+    }
     return 0;
 }
 
@@ -706,6 +792,36 @@ static struct VaFsSymlink* __create_symlink_from_descriptor(
     return symlink;
 }
 
+static struct VaFsSpecial* __create_special_from_descriptor(
+    struct VaFs*             vafs,
+    VaFsSpecialDescriptor_t* descriptor,
+    const char*              extendedData)
+{
+    struct VaFsSpecial* special;
+
+    if (__validate_special_descriptor(descriptor, extendedData) != 0) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    special = (struct VaFsSpecial*)calloc(1, sizeof(struct VaFsSpecial));
+    if (!special) {
+        return NULL;
+    }
+
+    memcpy(&special->Descriptor, descriptor, sizeof(VaFsSpecialDescriptor_t));
+    special->Name = __read_extended_string(extendedData, descriptor->Base.Length - sizeof(VaFsSpecialDescriptor_t));
+    special->VaFs = vafs;
+    __materialize_descriptor_metadata(
+        &descriptor->Metadata,
+        (enum VaFsEntryType)descriptor->EntryType,
+        0,
+        &special->Stat
+    );
+    special->StatCached = 1;
+    return special;
+}
+
 static struct VaFsDirectoryEntry* __create_entry_from_descriptor(
     struct VaFs*      vafs,
     VaFsDescriptor_t* descriptor,
@@ -727,6 +843,8 @@ static struct VaFsDirectoryEntry* __create_entry_from_descriptor(
         entry->Directory = __create_directory_from_descriptor(vafs, (VaFsDirectoryDescriptor_t*)descriptor, extendedData);
     } else if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
         entry->Symlink = __create_symlink_from_descriptor(vafs, (VaFsSymlinkDescriptor_t*)descriptor, extendedData);
+    } else if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SPECIAL) {
+        entry->Special = __create_special_from_descriptor(vafs, (VaFsSpecialDescriptor_t*)descriptor, extendedData);
     } else {
         free(entry);
         errno = EINVAL;
@@ -900,6 +1018,8 @@ const char* __vafs_directory_entry_name(
         return entry->Directory->Name;
     } else if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
         return entry->Symlink->Name;
+    } else if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SPECIAL) {
+        return entry->Special->Name;
     }
     return NULL;
 }
@@ -1122,6 +1242,35 @@ static int __write_symlink_descriptor(
     return status;
 }
 
+static int __write_special_descriptor(
+    struct VaFsDirectoryWriter* writer,
+    struct VaFsDirectoryEntry*  entry)
+{
+    int status;
+
+    VAFS_DEBUG("__write_special_descriptor(name=%s)\n", entry->Special->Name);
+
+    __finalize_entry_metadata(&entry->Special->Stat, entry->Special->Stat.Type, 0);
+    __descriptor_metadata_initialize(&entry->Special->Descriptor.Metadata, &entry->Special->Stat);
+    entry->Special->Descriptor.EntryType = (uint16_t)entry->Special->Stat.Type;
+    entry->Special->Descriptor.Base.Length = (uint16_t)(sizeof(VaFsSpecialDescriptor_t) + strlen(entry->Special->Name));
+
+    status = vafs_stream_write(
+        writer->Base.VaFs->DescriptorStream,
+        &entry->Special->Descriptor,
+        sizeof(VaFsSpecialDescriptor_t)
+    );
+    if (status != 0) {
+        return status;
+    }
+
+    return vafs_stream_write(
+        writer->Base.VaFs->DescriptorStream,
+        entry->Special->Name,
+        strlen(entry->Special->Name)
+    );
+}
+
 int vafs_directory_flush(
     struct VaFsDirectory* directory)
 {
@@ -1180,6 +1329,8 @@ int vafs_directory_flush(
             status = __write_directory_descriptor(writer, entry);
         } else if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
             status = __write_symlink_descriptor(writer, entry);
+        } else if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SPECIAL) {
+            status = __write_special_descriptor(writer, entry);
         } else {
             VAFS_ERROR("vafs_directory_flush: unknown descriptor type\n");
             return -1;
@@ -1300,7 +1451,51 @@ static int __prepare_metadata_for_create(
     // known we preserve the caller's richer metadata instead of collapsing it
     // back to permission bits before serialization.
     *preparedOut = *metadata;
+    vafs_metadata_set_mode(preparedOut, expectedType, preparedOut->Mode & 07777u);
     __finalize_entry_metadata(preparedOut, expectedType, size);
+    return 0;
+}
+
+static int __prepare_special_metadata_for_create(
+    const struct VaFsMetadata* metadata,
+    struct VaFsMetadata*       preparedOut)
+{
+    enum VaFsEntryType entryType = VaFsEntryType_Unknown;
+
+    if (metadata == NULL || preparedOut == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if ((metadata->Mask & VaFsMetadataMask_Mode) == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if ((metadata->Mask & VaFsMetadataMask_Type) != 0 && metadata->Type != VaFsEntryType_Unknown) {
+        entryType = metadata->Type;
+    } else if (S_ISCHR(metadata->Mode)) {
+        entryType = VaFsEntryType_CharacterDevice;
+    } else if (S_ISBLK(metadata->Mode)) {
+        entryType = VaFsEntryType_BlockDevice;
+    } else if (S_ISFIFO(metadata->Mode)) {
+        entryType = VaFsEntryType_Fifo;
+    }
+
+    if (!__is_special_entry_type(entryType)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if ((entryType == VaFsEntryType_CharacterDevice || entryType == VaFsEntryType_BlockDevice) &&
+        (metadata->Mask & VaFsMetadataMask_Device) == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    *preparedOut = *metadata;
+    vafs_metadata_set_mode(preparedOut, entryType, preparedOut->Mode & 07777u);
+    __finalize_entry_metadata(preparedOut, entryType, 0);
     return 0;
 }
 
@@ -1432,6 +1627,58 @@ static int __create_symlink_entry(
     }
 
     writer->Base.VaFs->Overview.Counts.Symlinks++;
+    return 0;
+}
+
+static int __add_special_entry(
+    struct VaFsDirectoryWriter* writer,
+    struct VaFsSpecial*         entry)
+{
+    struct VaFsDirectoryEntry* newEntry;
+
+    newEntry = (struct VaFsDirectoryEntry*)calloc(1, sizeof(struct VaFsDirectoryEntry));
+    if (!newEntry) {
+        return -1;
+    }
+
+    newEntry->Type = VA_FS_DESCRIPTOR_TYPE_SPECIAL;
+    newEntry->Special = entry;
+    newEntry->Link = writer->Entries;
+    writer->Entries = newEntry;
+    writer->EntryCount++;
+    writer->IndexDirty = 1;
+    return 0;
+}
+
+static int __create_special_entry(
+    struct VaFsDirectoryWriter* writer,
+    const char*                 name,
+    const struct VaFsMetadata*  metadata)
+{
+    struct VaFsSpecial* entry;
+    int                 status;
+
+    entry = (struct VaFsSpecial*)calloc(1, sizeof(struct VaFsSpecial));
+    if (!entry) {
+        return -1;
+    }
+
+    entry->VaFs = writer->Base.VaFs;
+    entry->Name = strdup(name);
+    if (!entry->Name) {
+        free(entry);
+        return -1;
+    }
+
+    entry->Stat = *metadata;
+    entry->StatCached = 1;
+    __initialize_special_descriptor(&entry->Descriptor, metadata);
+    status = __add_special_entry(writer, entry);
+    if (status) {
+        free((void*)entry->Name);
+        free(entry);
+        return status;
+    }
     return 0;
 }
 
@@ -1727,12 +1974,40 @@ int vafs_directory_create_special(
     const char*                 name,
     const struct VaFsMetadata*  metadata)
 {
-    (void)handle;
-    (void)name;
-    (void)metadata;
+    struct VaFsDirectoryWriter* writer;
+    struct VaFsDirectoryEntry*  entry;
+    struct VaFsMetadata         preparedMetadata;
+    char                        token[VAFS_NAME_MAX + 1];
+    int                         status;
 
-    errno = ENOTSUP;
-    return -1;
+    if (handle == NULL || name == NULL || metadata == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    status = __prepare_special_metadata_for_create(metadata, &preparedMetadata);
+    if (status != 0) {
+        return status;
+    }
+
+    if (handle->Directory->VaFs->Mode != VaFsMode_Write) {
+        errno = EACCES;
+        return -1;
+    }
+
+    if (!__vafs_pathtoken(name, token, sizeof(token))) {
+        errno = ENOENT;
+        return -1;
+    }
+
+    entry = __vafs_directory_find_entry(handle->Directory, token);
+    if (entry != NULL) {
+        errno = EEXIST;
+        return -1;
+    }
+
+    writer = (struct VaFsDirectoryWriter*)handle->Directory;
+    return __create_special_entry(writer, token, &preparedMetadata);
 }
 
 int vafs_directory_create_hardlink(

@@ -290,7 +290,8 @@ int __vafs_path_stat_internal(
             return status;
         }
 
-        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_FILE) {
+        if (entry->Type != VA_FS_DESCRIPTOR_TYPE_DIRECTORY &&
+            entry->Type != VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
             if (remainingPath[0] != '\0') {
                 errno = ENOTDIR;
                 return -1;

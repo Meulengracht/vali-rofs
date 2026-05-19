@@ -101,6 +101,7 @@ VAFS_ONDISK_STRUCT(VaFsHeader, {
 #define VA_FS_DESCRIPTOR_TYPE_FILE      0x01
 #define VA_FS_DESCRIPTOR_TYPE_DIRECTORY 0x02
 #define VA_FS_DESCRIPTOR_TYPE_SYMLINK   0x03
+#define VA_FS_DESCRIPTOR_TYPE_SPECIAL   0x04
 
 VAFS_ONDISK_STRUCT(VaFsDescriptor, {
     uint16_t Type;
@@ -150,6 +151,13 @@ VAFS_ONDISK_STRUCT(VaFsSymlinkDescriptor, {
     VaFsDescriptor_t         Base;
     uint16_t                 NameLength;
     uint16_t                 TargetLength;
+    VaFsDescriptorMetadata_t Metadata;
+});
+
+VAFS_ONDISK_STRUCT(VaFsSpecialDescriptor, {
+    VaFsDescriptor_t         Base;
+    uint16_t                 EntryType;
+    uint16_t                 Reserved;
     VaFsDescriptorMetadata_t Metadata;
 });
 
@@ -203,6 +211,14 @@ struct VaFsSymlink {
     VaFsSymlinkDescriptor_t Descriptor;
     const char*             Name;
     const char*             Target;
+    struct VaFsMetadata     Stat;
+    int                     StatCached;
+};
+
+struct VaFsSpecial {
+    struct VaFs*            VaFs;
+    VaFsSpecialDescriptor_t Descriptor;
+    const char*             Name;
     struct VaFsMetadata     Stat;
     int                     StatCached;
 };
@@ -689,6 +705,7 @@ struct VaFsDirectoryEntry {
         struct VaFsFile*      File;
         struct VaFsDirectory* Directory;
         struct VaFsSymlink*   Symlink;
+        struct VaFsSpecial*   Special;
     };
     struct VaFsDirectoryEntry* Link;
 };
