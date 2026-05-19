@@ -33,5 +33,6 @@ if (VAFS_BUILD_BENCHMARKS)
 endif(VAFS_BUILD_BENCHMARKS)
 
 if (VAFS_BUILD_TESTS)
+    enable_testing()
     add_subdirectory(tests)
 endif(VAFS_BUILD_TESTS)
