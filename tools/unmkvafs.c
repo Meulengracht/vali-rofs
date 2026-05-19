@@ -32,6 +32,7 @@
 #include <vafs/vafs.h>
 #include <vafs/directory.h>
 #include <vafs/file.h>
+#include "utils/utils.h"
 
 struct __options {
     const char*       image_path;
@@ -72,6 +73,40 @@ static const char* __get_relative_path(
     if (strncmp(path, root, strlen(root)) == 0)
         relative = path + strlen(root);
     return relative;
+}
+
+static char* __combine_image_path(
+    const char* parent,
+    const char* name)
+{
+    char* buffer;
+
+    if (parent == NULL || name == NULL) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    buffer = malloc(strlen(parent) + strlen(name) + 2);
+    if (buffer == NULL) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    if (strcmp(parent, "/") == 0) {
+        sprintf(buffer, "/%s", name);
+    } else {
+        sprintf(buffer, "%s/%s", parent, name);
+    }
+    return buffer;
+}
+
+static int __is_nonfatal_special_create_error(
+    int error)
+{
+    return error == EACCES ||
+        error == EPERM ||
+        error == ENOTSUP ||
+        error == ENOSYS;
 }
 
 static int __extract_file(
@@ -140,10 +175,12 @@ static void __write_progress(const char* prefix, struct progress_context* contex
 }
 
 static int __extract_directory(
+    struct VaFs*                vafsHandle,
     struct progress_context*    progress,
     struct VaFsDirectoryHandle* directoryHandle,
     const char*                 root,
-    const char*                 path)
+    const char*                 path,
+    const char*                 imagePath)
 {
     struct VaFsMetadata metadata;
     struct VaFsEntry dp;
@@ -186,6 +223,12 @@ static int __extract_directory(
             return -1;
         }
 
+        char* imagePathBuffer = __combine_image_path(imagePath, dp.Name);
+        if (imagePathBuffer == NULL) {
+            free(filepathBuffer);
+            return -1;
+        }
+
         sprintf(filepathBuffer, "%s/%s", path, dp.Name);
 
         __write_progress(dp.Name, progress);
@@ -194,18 +237,24 @@ static int __extract_directory(
             status = vafs_directory_open_directory(directoryHandle, dp.Name, &subdirectoryHandle);
             if (status) {
                 fprintf(stderr, "unmkvafs: failed to open directory '%s'\n", __get_relative_path(root, filepathBuffer));
+                free(imagePathBuffer);
+                free(filepathBuffer);
                 return -1;
             }
 
-            status = __extract_directory(progress, subdirectoryHandle, root, filepathBuffer);
+            status = __extract_directory(vafsHandle, progress, subdirectoryHandle, root, filepathBuffer, imagePathBuffer);
             if (status) {
                 fprintf(stderr, "unmkvafs: unable to extract directory '%s'\n", __get_relative_path(root, path));
+                free(imagePathBuffer);
+                free(filepathBuffer);
                 return -1;
             }
 
             status = vafs_directory_close(subdirectoryHandle);
             if (status) {
                 fprintf(stderr, "unmkvafs: failed to close directory '%s'\n", __get_relative_path(root, filepathBuffer));
+                free(imagePathBuffer);
+                free(filepathBuffer);
                 return -1;
             }
             progress->directories++;
@@ -216,6 +265,8 @@ static int __extract_directory(
             if (status) {
                 fprintf(stderr, "unmkvafs: failed to read symlink '%s' - %i\n",
                     __get_relative_path(root, filepathBuffer), status);
+                free(imagePathBuffer);
+                free(filepathBuffer);
                 return -1;
             }
 
@@ -223,40 +274,71 @@ static int __extract_directory(
             if (status) {
                 fprintf(stderr, "unmkvafs: failed to create symlink '%s' - %i\n",
                     __get_relative_path(root, filepathBuffer), status);
+                free(imagePathBuffer);
+                free(filepathBuffer);
                 return -1;
             }
             progress->symlinks++;
         } else if (dp.Type == VaFsEntryType_CharacterDevice ||
             dp.Type == VaFsEntryType_BlockDevice ||
             dp.Type == VaFsEntryType_Fifo) {
-            errno = ENOTSUP;
-            fprintf(stderr,
-                "unmkvafs: extracting special entry '%s' is not implemented yet\n",
-                __get_relative_path(root, filepathBuffer));
-            return -1;
+            status = vafs_path_stat(vafsHandle, imagePathBuffer, 0, &metadata);
+            if (status) {
+                fprintf(stderr, "unmkvafs: failed to stat special entry '%s'\n",
+                    __get_relative_path(root, filepathBuffer));
+                free(imagePathBuffer);
+                free(filepathBuffer);
+                return -1;
+            }
+
+            status = platform_fs_create_special(filepathBuffer, &metadata);
+            if (status) {
+                int createError = errno;
+
+                if (__is_nonfatal_special_create_error(createError)) {
+                    fprintf(stderr,
+                        "unmkvafs: warning: skipping special entry '%s' (%s)\n",
+                        __get_relative_path(root, filepathBuffer),
+                        strerror(createError));
+                } else {
+                    fprintf(stderr,
+                        "unmkvafs: failed to create special entry '%s' - %i\n",
+                        __get_relative_path(root, filepathBuffer), status);
+                    free(imagePathBuffer);
+                    free(filepathBuffer);
+                    return -1;
+                }
+            }
         } else {
             struct VaFsFileHandle* fileHandle;
             status = vafs_directory_open_file(directoryHandle, dp.Name, &fileHandle);
             if (status) {
                 fprintf(stderr, "unmkvafs: failed to open file '%s' - %i\n",
                     __get_relative_path(root, filepathBuffer), status);
+                free(imagePathBuffer);
+                free(filepathBuffer);
                 return -1;
             }
 
             status = __extract_file(fileHandle, filepathBuffer);
             if (status) {
                 fprintf(stderr, "unmkvafs: unable to extract file '%s'\n", __get_relative_path(root, path));
+                free(imagePathBuffer);
+                free(filepathBuffer);
                 return -1;
             }
 
             status = vafs_file_close(fileHandle);
             if (status) {
                 fprintf(stderr, "unmkvafs: failed to close file '%s'\n", __get_relative_path(root, filepathBuffer));
+                free(imagePathBuffer);
+                free(filepathBuffer);
                 return -1;
             }
             progress->files++;
         }
         __write_progress(dp.Name, progress);
+        free(imagePathBuffer);
         free(filepathBuffer);
     } while(1);
 
@@ -355,7 +437,7 @@ int main(int argc, char *argv[])
         goto error;
     }
 
-    status = __extract_directory(&progressContext, directoryHandle, opts.out_path, opts.out_path);
+    status = __extract_directory(vafsHandle, &progressContext, directoryHandle, opts.out_path, opts.out_path, "/");
     if (status != 0) {
         fprintf(stderr, "unmkvafs: unable to extract to directory %s\n", opts.out_path);
         goto error;

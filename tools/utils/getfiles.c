@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <vafs/stat.h>
 #include "utils.h"
 
 // include dirent.h for directory operations
@@ -90,7 +91,68 @@ static char* __combine_paths(const char* path1, const char* path2)
     return combined;
 }
 
-static int __add_file(const struct dirent* dp, const char* path, const char* subPath, struct list* files)
+static enum platform_filetype __platform_filetype_from_vafs_type(
+    enum VaFsEntryType type)
+{
+    switch (type) {
+        case VaFsEntryType_File:
+            return PLATFORM_FILETYPE_FILE;
+        case VaFsEntryType_Directory:
+            return PLATFORM_FILETYPE_DIRECTORY;
+        case VaFsEntryType_Symlink:
+            return PLATFORM_FILETYPE_SYMLINK;
+        case VaFsEntryType_CharacterDevice:
+            return PLATFORM_FILETYPE_CHARACTER_DEVICE;
+        case VaFsEntryType_BlockDevice:
+            return PLATFORM_FILETYPE_BLOCK_DEVICE;
+        case VaFsEntryType_Fifo:
+            return PLATFORM_FILETYPE_FIFO;
+        default:
+            return PLATFORM_FILETYPE_UNKNOWN;
+    }
+}
+
+static enum platform_filetype __classify_path(
+    const struct dirent* dp,
+    const char*          path)
+{
+    struct VaFsMetadata metadata;
+
+    switch (dp->d_type) {
+        case DT_REG:
+            return PLATFORM_FILETYPE_FILE;
+        case DT_DIR:
+            return PLATFORM_FILETYPE_DIRECTORY;
+        case DT_LNK:
+            return PLATFORM_FILETYPE_SYMLINK;
+#if defined(DT_CHR)
+        case DT_CHR:
+            return PLATFORM_FILETYPE_CHARACTER_DEVICE;
+#endif
+#if defined(DT_BLK)
+        case DT_BLK:
+            return PLATFORM_FILETYPE_BLOCK_DEVICE;
+#endif
+#if defined(DT_FIFO)
+        case DT_FIFO:
+            return PLATFORM_FILETYPE_FIFO;
+#endif
+        default:
+            break;
+    }
+
+    if (platform_fs_read_metadata(path, &metadata) != 0) {
+        return PLATFORM_FILETYPE_UNKNOWN;
+    }
+    return __platform_filetype_from_vafs_type(metadata.Type);
+}
+
+static int __add_file(
+    const char*            name,
+    const char*            path,
+    const char*            subPath,
+    enum platform_filetype type,
+    struct list*           files)
 {
     struct platform_file_entry* entry;
 
@@ -99,7 +161,7 @@ static int __add_file(const struct dirent* dp, const char* path, const char* sub
         return -1;
     }
 
-    entry->name     = __safe_strdup(dp->d_name);
+    entry->name     = __safe_strdup(name);
     entry->path     = __safe_strdup(path);
     entry->sub_path = __safe_strdup(subPath);
     if (entry->name == NULL || entry->path == NULL) {
@@ -110,20 +172,7 @@ static int __add_file(const struct dirent* dp, const char* path, const char* sub
         return -1;
     }
 
-    switch (dp->d_type) {
-        case DT_REG:
-            entry->type = PLATFORM_FILETYPE_FILE;
-            break;
-        case DT_DIR: {
-            entry->type = PLATFORM_FILETYPE_DIRECTORY;
-        } break;
-        case DT_LNK:
-            entry->type = PLATFORM_FILETYPE_SYMLINK;
-            break;
-        default:
-            entry->type = PLATFORM_FILETYPE_UNKNOWN;
-            break;
-    }
+    entry->type = type;
 
     list_add(files, &entry->list_header);
     return 0;
@@ -150,6 +199,7 @@ static int __read_directory(const char* path, const char* subPath, int recursive
     while ((dp = readdir(d))) {
         char* combinedPath;
         char* combinedSubPath;
+        enum platform_filetype type;
 
         if (strcmp(dp->d_name,".") == 0 || strcmp(dp->d_name,"..") == 0) {
              continue;
@@ -162,11 +212,13 @@ static int __read_directory(const char* path, const char* subPath, int recursive
             break;
         }
 
-        if (recursive && dp->d_type == DT_DIR) {
+        type = __classify_path(dp, combinedPath);
+
+        if (recursive && type == PLATFORM_FILETYPE_DIRECTORY) {
             status = __read_directory(combinedPath, combinedSubPath, recursive, files);
         }
         else {
-            status = __add_file(dp, combinedPath, combinedSubPath, files);
+            status = __add_file(dp->d_name, combinedPath, combinedSubPath, type, files);
         }
 
         free((void*)combinedPath);

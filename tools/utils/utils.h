@@ -83,10 +83,15 @@ struct platform_string_item {
     const char*      value;
 };
 
+struct VaFsMetadata;
+
 enum platform_filetype {
     PLATFORM_FILETYPE_DIRECTORY,
     PLATFORM_FILETYPE_FILE,
     PLATFORM_FILETYPE_SYMLINK,
+    PLATFORM_FILETYPE_CHARACTER_DEVICE,
+    PLATFORM_FILETYPE_BLOCK_DEVICE,
+    PLATFORM_FILETYPE_FIFO,
     PLATFORM_FILETYPE_UNKNOWN
 };
 
@@ -118,10 +123,16 @@ extern int utils_getfiles_destroy(struct list* files);
 extern int platform_fs_mode_is_file(uint32_t mode);
 extern int platform_fs_mode_is_symlink(uint32_t mode);
 extern int platform_fs_mode_is_directory(uint32_t mode);
+extern int platform_fs_mode_is_character_device(uint32_t mode);
+extern int platform_fs_mode_is_block_device(uint32_t mode);
+extern int platform_fs_mode_is_fifo(uint32_t mode);
+extern int platform_fs_mode_is_special(uint32_t mode);
 extern uint32_t platform_fs_mode_permissions(uint32_t mode);
+extern int platform_fs_read_metadata(const char* path, struct VaFsMetadata* metadata);
 
 extern int platform_fs_directory_exists(const char* path);
 extern int platform_fs_create_directory(const char* path, uint32_t permissions);
+extern int platform_fs_create_special(const char* path, const struct VaFsMetadata* metadata);
 extern int platform_fs_chmod(const char* path, uint32_t permissions);
 
 extern int symlink_utils_init(void);

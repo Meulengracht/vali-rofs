@@ -40,9 +40,11 @@ struct progress_context {
 
     int files;
     int symlinks;
+    int specials;
 
     int files_total;
     int symlinks_total;
+    int specials_total;
 };
 
 extern int __install_filters(struct VaFs* vafs, const char* descriptorFilterName, const char* dataFilterName);
@@ -151,11 +153,14 @@ static void __write_progress(const char* prefix, struct progress_context* contex
         return;
     }
 
-    total   = context->files_total + context->symlinks_total;
-    current = context->files + context->symlinks;
+    total   = context->files_total + context->symlinks_total + context->specials_total;
+    current = context->files + context->symlinks + context->specials;
     progress = (current * 100) / total;
 
     printf("\33[2K\rcompressing [%d%%] %i/%i %-40.40s", progress, current, total, prefix);
+    if (context->specials_total) {
+        printf(" %i/%i specials", context->specials, context->specials_total);
+    }
     fflush(stdout);
 }
 
@@ -206,6 +211,30 @@ static int __write_file(
     status = vafs_file_close(fileHandle);
     if (status) {
         fprintf(stderr, "mkvafs: failed to close file '%s'\n", filename);
+        return -1;
+    }
+    return 0;
+}
+
+static int __write_special(
+    struct VaFsDirectoryHandle* directoryHandle,
+    const char*                 path,
+    const char*                 filename)
+{
+    struct VaFsMetadata metadata;
+    int                 status;
+
+    // Special nodes need non-following metadata so the image records the host
+    // node itself instead of whatever a path resolver would dereference.
+    status = platform_fs_read_metadata(path, &metadata);
+    if (status != 0) {
+        fprintf(stderr, "mkvafs: unable to stat special entry %s\n", path);
+        return -1;
+    }
+
+    status = vafs_directory_create_special(directoryHandle, filename, &metadata);
+    if (status != 0) {
+        fprintf(stderr, "mkvafs: failed to create special entry '%s'\n", filename);
         return -1;
     }
     return 0;
@@ -527,6 +556,11 @@ static int __discover_files_in_directory(struct progress_context* progress, cons
             case PLATFORM_FILETYPE_SYMLINK:
                 progress->symlinks_total++;
                 break;
+            case PLATFORM_FILETYPE_CHARACTER_DEVICE:
+            case PLATFORM_FILETYPE_BLOCK_DEVICE:
+            case PLATFORM_FILETYPE_FIFO:
+                progress->specials_total++;
+                break;
             default:
                 break;
         }
@@ -578,6 +612,39 @@ static int __discover_files(struct progress_context* progress, const char** path
                 return status;
             }
             progress->symlinks_total++;
+        } else if (platform_fs_mode_is_character_device(filemode)) {
+            status = __add_platform_file_entry(
+                &progress->file_list, __get_filename(abspath),
+                PLATFORM_FILETYPE_CHARACTER_DEVICE, NULL, abspath
+            );
+            if (status) {
+                fprintf(stderr, "mkvafs: failed to allocate memory for %s\n", abspath);
+                free(abspath);
+                return status;
+            }
+            progress->specials_total++;
+        } else if (platform_fs_mode_is_block_device(filemode)) {
+            status = __add_platform_file_entry(
+                &progress->file_list, __get_filename(abspath),
+                PLATFORM_FILETYPE_BLOCK_DEVICE, NULL, abspath
+            );
+            if (status) {
+                fprintf(stderr, "mkvafs: failed to allocate memory for %s\n", abspath);
+                free(abspath);
+                return status;
+            }
+            progress->specials_total++;
+        } else if (platform_fs_mode_is_fifo(filemode)) {
+            status = __add_platform_file_entry(
+                &progress->file_list, __get_filename(abspath),
+                PLATFORM_FILETYPE_FIFO, NULL, abspath
+            );
+            if (status) {
+                fprintf(stderr, "mkvafs: failed to allocate memory for %s\n", abspath);
+                free(abspath);
+                return status;
+            }
+            progress->specials_total++;
         } else if (platform_fs_mode_is_file(filemode)) {
             status = __add_platform_file_entry(
                 &progress->file_list, __get_filename(abspath),
@@ -665,6 +732,14 @@ static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, con
     return handle;
 }
 
+static int __platform_filetype_is_special(
+    enum platform_filetype type)
+{
+    return type == PLATFORM_FILETYPE_CHARACTER_DEVICE ||
+        type == PLATFORM_FILETYPE_BLOCK_DEVICE ||
+        type == PLATFORM_FILETYPE_FIFO;
+}
+
 static int __create_image(struct __options* opts)
 {
     struct VaFs*             vafsHandle;
@@ -693,7 +768,8 @@ static int __create_image(struct __options* opts)
     }
 
     // ensure there will be content to actually write
-    if (progressContext.files_total == 0 && progressContext.symlinks_total == 0) {
+    if (progressContext.files_total == 0 && progressContext.symlinks_total == 0 &&
+        progressContext.specials_total == 0) {
         // Treat an empty discovery result as a user error instead of silently
         // producing an empty image.
         fprintf(stderr, "mkvafs: skipping image creation due to no files being created\n");
@@ -749,7 +825,7 @@ static int __create_image(struct __options* opts)
                 break;
             }
 
-            status = vafs_directory_create_symlink(directoryHandle, entry->path, linkpath, &metadata);
+            status = vafs_directory_create_symlink(directoryHandle, entry->name, linkpath, &metadata);
             free(linkpath);
 
             if (status != 0) {
@@ -757,6 +833,13 @@ static int __create_image(struct __options* opts)
                 break;
             }
             progressContext.symlinks++;
+        } else if (__platform_filetype_is_special(entry->type)) {
+            status = __write_special(directoryHandle, entry->path, entry->name);
+            if (status != 0) {
+                fprintf(stderr, "mkvafs: unable to write special entry %s\n", entry->path);
+                break;
+            }
+            progressContext.specials++;
         } else if (entry->type == PLATFORM_FILETYPE_FILE) {
             uint32_t filemode;
             status = symlink_utils_ministat(entry->path, &filemode);
@@ -765,12 +848,14 @@ static int __create_image(struct __options* opts)
                 break;
             }
 
-            status = __write_file(directoryHandle, entry->path, __get_filename(entry->path), platform_fs_mode_permissions(filemode));
+            status = __write_file(directoryHandle, entry->path, entry->name, platform_fs_mode_permissions(filemode));
             if (status != 0) {
                 fprintf(stderr, "mkvafs: unable to write file %s\n", entry->path);
                 break;
             }
             progressContext.files++;
+        } else {
+            fprintf(stderr, "mkvafs: warning: skipping unsupported entry %s\n", entry->path);
         }
         __write_progress(entry->sub_path, &progressContext);
     }
