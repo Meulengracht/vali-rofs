@@ -151,24 +151,19 @@ int vafs_symlink_stat(
         return -1;
     }
 
-    if (handle->Symlink->VaFs->Mode == VaFsMode_Read && handle->Symlink->StatCached) {
-        *metadata = handle->Symlink->Stat;
-        return 0;
+    if (!handle->Symlink->StatCached) {
+        vafs_metadata_initialize(&handle->Symlink->Stat);
     }
 
-    vafs_metadata_initialize(metadata);
-    metadata->Type = VaFsEntryType_Symlink;
-    metadata->Mode = S_IFLNK | 0777;
-    metadata->Size = strlen(handle->Symlink->Target);
-    metadata->LinkCount = 1;
-    metadata->Mask = VaFsMetadataMask_Type |
-        VaFsMetadataMask_Mode |
-        VaFsMetadataMask_Size |
-        VaFsMetadataMask_LinkCount;
-
-    if (handle->Symlink->VaFs->Mode == VaFsMode_Read) {
-        handle->Symlink->Stat = *metadata;
-        handle->Symlink->StatCached = 1;
+    handle->Symlink->Stat.Type = VaFsEntryType_Symlink;
+    handle->Symlink->Stat.Size = strlen(handle->Symlink->Target);
+    handle->Symlink->Stat.Mask |= VaFsMetadataMask_Type | VaFsMetadataMask_Size;
+    if ((handle->Symlink->Stat.Mask & VaFsMetadataMask_LinkCount) == 0) {
+        handle->Symlink->Stat.LinkCount = 1;
+        handle->Symlink->Stat.Mask |= VaFsMetadataMask_LinkCount;
     }
+
+    handle->Symlink->StatCached = 1;
+    *metadata = handle->Symlink->Stat;
     return 0;
 }

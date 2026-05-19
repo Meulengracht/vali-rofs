@@ -139,6 +139,159 @@ static int assert_repeated_path_stat(
     return 0;
 }
 
+static int timestamps_equal(
+    const struct VaFsTimestamp* left,
+    const struct VaFsTimestamp* right)
+{
+    return left->Seconds == right->Seconds && left->Nanoseconds == right->Nanoseconds;
+}
+
+static int test_metadata_roundtrip(void)
+{
+    struct VaFs* vafs = NULL;
+    struct VaFsConfiguration config;
+    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsDirectoryHandle* meta = NULL;
+    struct VaFsDirectoryHandle* reopened = NULL;
+    struct VaFsFileHandle* file_handle = NULL;
+    struct VaFsMetadata dirMetadata = metadata_for_mode(VaFsEntryType_Directory, 0711);
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0640);
+    struct VaFsMetadata symlinkMetadata = metadata_for_mode(VaFsEntryType_Symlink, 0700);
+    struct VaFsMetadata statbuf;
+    struct VaFsEntry entry;
+    const char* payload = "metadata-roundtrip";
+    int saw_payload = 0;
+    int saw_alias = 0;
+    int status;
+
+    dirMetadata.Uid = 11;
+    dirMetadata.Gid = 12;
+    dirMetadata.ObjectId = 0x1001;
+    dirMetadata.MTime.Seconds = 1715980800;
+    dirMetadata.MTime.Nanoseconds = 1234;
+    dirMetadata.Mask |= VaFsMetadataMask_Uid |
+        VaFsMetadataMask_Gid |
+        VaFsMetadataMask_ObjectId |
+        VaFsMetadataMask_MTime;
+
+    fileMetadata.Uid = 21;
+    fileMetadata.Gid = 22;
+    fileMetadata.ObjectId = 0x1020304050607080ULL;
+    fileMetadata.MTime.Seconds = 1715980900;
+    fileMetadata.MTime.Nanoseconds = 5678;
+    fileMetadata.ATime.Seconds = 1715980910;
+    fileMetadata.ATime.Nanoseconds = 111;
+    fileMetadata.CTime.Seconds = 1715980920;
+    fileMetadata.CTime.Nanoseconds = 222;
+    fileMetadata.BirthTime.Seconds = 1715980930;
+    fileMetadata.BirthTime.Nanoseconds = 333;
+    fileMetadata.WindowsAttributes = 0x20;
+    fileMetadata.Mask |= VaFsMetadataMask_Uid |
+        VaFsMetadataMask_Gid |
+        VaFsMetadataMask_ObjectId |
+        VaFsMetadataMask_MTime |
+        VaFsMetadataMask_ATime |
+        VaFsMetadataMask_CTime |
+        VaFsMetadataMask_BirthTime |
+        VaFsMetadataMask_WindowsAttributes;
+
+    symlinkMetadata.Uid = 31;
+    symlinkMetadata.Gid = 32;
+    symlinkMetadata.ObjectId = 0x2002;
+    symlinkMetadata.MTime.Seconds = 1715980940;
+    symlinkMetadata.MTime.Nanoseconds = 444;
+    symlinkMetadata.Mask |= VaFsMetadataMask_Uid |
+        VaFsMetadataMask_Gid |
+        VaFsMetadataMask_ObjectId |
+        VaFsMetadataMask_MTime;
+
+    vafs_config_initialize(&config);
+    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    TEST_ASSERT(status == 0, "Failed to create metadata roundtrip image");
+
+    status = vafs_directory_open(vafs, "/", &root);
+    TEST_ASSERT(status == 0, "Failed to open root directory for metadata roundtrip");
+
+    status = vafs_directory_create_directory(root, "meta", &dirMetadata, &meta);
+    TEST_ASSERT(status == 0, "Failed to create metadata test directory");
+
+    status = vafs_directory_create_file(meta, "payload", &fileMetadata, &file_handle);
+    TEST_ASSERT(status == 0, "Failed to create metadata test file");
+
+    status = vafs_file_write(file_handle, (void*)payload, strlen(payload));
+    TEST_ASSERT(status == 0, "Failed to write metadata test file payload");
+    vafs_file_close(file_handle);
+    file_handle = NULL;
+
+    status = vafs_directory_create_symlink(meta, "alias", "/meta/payload", &symlinkMetadata);
+    TEST_ASSERT(status == 0, "Failed to create metadata test symlink");
+
+    vafs_directory_close(meta);
+    meta = NULL;
+    vafs_directory_close(root);
+    root = NULL;
+    vafs_close(vafs);
+    vafs = NULL;
+
+    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    TEST_ASSERT(status == 0, "Failed to reopen metadata test image");
+
+    status = vafs_path_stat(vafs, "/meta", 1, &statbuf);
+    TEST_ASSERT(status == 0, "Failed to stat metadata test directory");
+    TEST_ASSERT(statbuf.Mode == dirMetadata.Mode, "Directory mode did not round-trip");
+    TEST_ASSERT(statbuf.Uid == dirMetadata.Uid, "Directory uid did not round-trip");
+    TEST_ASSERT(statbuf.Gid == dirMetadata.Gid, "Directory gid did not round-trip");
+    TEST_ASSERT(statbuf.ObjectId == dirMetadata.ObjectId, "Directory object id did not round-trip");
+    TEST_ASSERT(timestamps_equal(&statbuf.MTime, &dirMetadata.MTime), "Directory mtime did not round-trip");
+
+    status = vafs_path_stat(vafs, "/meta/payload", 1, &statbuf);
+    TEST_ASSERT(status == 0, "Failed to stat metadata test file");
+    TEST_ASSERT(statbuf.Mode == fileMetadata.Mode, "File mode did not round-trip");
+    TEST_ASSERT(statbuf.Uid == fileMetadata.Uid, "File uid did not round-trip");
+    TEST_ASSERT(statbuf.Gid == fileMetadata.Gid, "File gid did not round-trip");
+    TEST_ASSERT(statbuf.ObjectId == fileMetadata.ObjectId, "File object id did not round-trip");
+    TEST_ASSERT(statbuf.Size == strlen(payload), "File size did not round-trip");
+    TEST_ASSERT(statbuf.WindowsAttributes == fileMetadata.WindowsAttributes, "File Windows attributes did not round-trip");
+    TEST_ASSERT(timestamps_equal(&statbuf.MTime, &fileMetadata.MTime), "File mtime did not round-trip");
+    TEST_ASSERT(timestamps_equal(&statbuf.ATime, &fileMetadata.ATime), "File atime did not round-trip");
+    TEST_ASSERT(timestamps_equal(&statbuf.CTime, &fileMetadata.CTime), "File ctime did not round-trip");
+    TEST_ASSERT(timestamps_equal(&statbuf.BirthTime, &fileMetadata.BirthTime), "File birthtime did not round-trip");
+
+    status = vafs_path_stat(vafs, "/meta/alias", 0, &statbuf);
+    TEST_ASSERT(status == 0, "Failed to stat metadata test symlink");
+    TEST_ASSERT(statbuf.Mode == symlinkMetadata.Mode, "Symlink mode did not round-trip");
+    TEST_ASSERT(statbuf.Uid == symlinkMetadata.Uid, "Symlink uid did not round-trip");
+    TEST_ASSERT(statbuf.Gid == symlinkMetadata.Gid, "Symlink gid did not round-trip");
+    TEST_ASSERT(statbuf.ObjectId == symlinkMetadata.ObjectId, "Symlink object id did not round-trip");
+    TEST_ASSERT(statbuf.Size == strlen("/meta/payload"), "Symlink size did not round-trip");
+    TEST_ASSERT(timestamps_equal(&statbuf.MTime, &symlinkMetadata.MTime), "Symlink mtime did not round-trip");
+
+    status = vafs_directory_open(vafs, "/meta", &reopened);
+    TEST_ASSERT(status == 0, "Failed to reopen metadata directory for enumeration");
+
+    while (vafs_directory_read(reopened, &entry) == 0) {
+        if (strcmp(entry.Name, "payload") == 0) {
+            TEST_ASSERT(entry.ObjectId == fileMetadata.ObjectId, "Enumerated file object id did not round-trip");
+            TEST_ASSERT((entry.MetadataMask & VaFsMetadataMask_MTime) != 0, "Enumerated file metadata mask lost mtime");
+            saw_payload = 1;
+        } else if (strcmp(entry.Name, "alias") == 0) {
+            TEST_ASSERT(entry.ObjectId == symlinkMetadata.ObjectId, "Enumerated symlink object id did not round-trip");
+            TEST_ASSERT((entry.MetadataMask & VaFsMetadataMask_Uid) != 0, "Enumerated symlink metadata mask lost uid");
+            saw_alias = 1;
+        }
+    }
+
+    TEST_ASSERT(saw_payload, "Enumerated directory did not include payload entry");
+    TEST_ASSERT(saw_alias, "Enumerated directory did not include alias entry");
+
+    vafs_directory_close(reopened);
+    reopened = NULL;
+    vafs_close(vafs);
+    remove(TEST_IMAGE_PATH);
+
+    TEST_PASS("Metadata survives descriptor-stream round-trip");
+}
+
 static int test_wide_directory_lookup(void)
 {
     struct VaFs* vafs = NULL;
@@ -391,6 +544,7 @@ int main(int argc, char** argv)
 {
     printf("Running VaFS wide directory lookup tests...\n\n");
 
+    test_metadata_roundtrip();
     test_wide_directory_lookup();
 
     printf("\n========================================\n");

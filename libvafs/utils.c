@@ -221,16 +221,13 @@ int __vafs_path_stat_internal(
     // special case - root directory, we specfiy
     // default access for it for now
     if (__vafs_is_root_path(path)) {
-        vafs_metadata_initialize(metadata);
-        metadata->Type = VaFsEntryType_Directory;
-        metadata->Mode = S_IFDIR | 0755;
-        metadata->Size = 0;
-        metadata->LinkCount = 1;
-        metadata->Mask = VaFsMetadataMask_Type |
-            VaFsMetadataMask_Mode |
-            VaFsMetadataMask_Size |
-            VaFsMetadataMask_LinkCount;
-        return 0;
+        return __vafs_directory_entry_stat(
+            &(struct VaFsDirectoryEntry) {
+                .Type = VA_FS_DESCRIPTOR_TYPE_DIRECTORY,
+                .Directory = vafs->RootDirectory
+            },
+            metadata
+        );
     }
 
     currentDirectory = vafs->RootDirectory;

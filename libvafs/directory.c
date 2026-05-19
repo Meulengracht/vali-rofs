@@ -30,64 +30,150 @@ struct VaFsDirectoryHandle {
     int                   Index;
 };
 
+static void __copy_timestamp_to_descriptor(
+    VaFsDescriptorTimestamp_t* destination,
+    const struct VaFsTimestamp* source)
+{
+    destination->Seconds = source->Seconds;
+    destination->Nanoseconds = source->Nanoseconds;
+}
+
+static void __copy_timestamp_from_descriptor(
+    struct VaFsTimestamp*          destination,
+    const VaFsDescriptorTimestamp_t* source)
+{
+    destination->Seconds = source->Seconds;
+    destination->Nanoseconds = source->Nanoseconds;
+}
+
+static void __finalize_entry_metadata(
+    struct VaFsMetadata* metadata,
+    enum VaFsEntryType   type,
+    uint64_t             size)
+{
+    metadata->Type = type;
+    metadata->Size = size;
+    metadata->Mask |= VaFsMetadataMask_Type | VaFsMetadataMask_Size;
+
+    if ((metadata->Mask & VaFsMetadataMask_LinkCount) == 0) {
+        metadata->LinkCount = 1;
+        metadata->Mask |= VaFsMetadataMask_LinkCount;
+    }
+}
+
+static void __descriptor_metadata_initialize(
+    VaFsDescriptorMetadata_t*  descriptorMetadata,
+    const struct VaFsMetadata* metadata)
+{
+    memset(descriptorMetadata, 0, sizeof(VaFsDescriptorMetadata_t));
+    if (metadata == NULL) {
+        return;
+    }
+
+    descriptorMetadata->Mask = metadata->Mask;
+    descriptorMetadata->Mode = metadata->Mode;
+    descriptorMetadata->Uid = metadata->Uid;
+    descriptorMetadata->Gid = metadata->Gid;
+    descriptorMetadata->LinkCount = metadata->LinkCount;
+    descriptorMetadata->XattrCount = metadata->XattrCount;
+    descriptorMetadata->ObjectId = metadata->ObjectId;
+    __copy_timestamp_to_descriptor(&descriptorMetadata->MTime, &metadata->MTime);
+    __copy_timestamp_to_descriptor(&descriptorMetadata->ATime, &metadata->ATime);
+    __copy_timestamp_to_descriptor(&descriptorMetadata->CTime, &metadata->CTime);
+    __copy_timestamp_to_descriptor(&descriptorMetadata->BirthTime, &metadata->BirthTime);
+    descriptorMetadata->DeviceMajor = metadata->Device.Major;
+    descriptorMetadata->DeviceMinor = metadata->Device.Minor;
+    descriptorMetadata->WindowsAttributes = metadata->WindowsAttributes;
+}
+
+static void __materialize_descriptor_metadata(
+    const VaFsDescriptorMetadata_t* descriptorMetadata,
+    enum VaFsEntryType              type,
+    uint64_t                        size,
+    struct VaFsMetadata*            metadata)
+{
+    vafs_metadata_initialize(metadata);
+    if (descriptorMetadata != NULL) {
+        metadata->Mask = descriptorMetadata->Mask;
+        metadata->Mode = descriptorMetadata->Mode;
+        metadata->Uid = descriptorMetadata->Uid;
+        metadata->Gid = descriptorMetadata->Gid;
+        metadata->LinkCount = descriptorMetadata->LinkCount;
+        metadata->XattrCount = descriptorMetadata->XattrCount;
+        metadata->ObjectId = descriptorMetadata->ObjectId;
+        __copy_timestamp_from_descriptor(&metadata->MTime, &descriptorMetadata->MTime);
+        __copy_timestamp_from_descriptor(&metadata->ATime, &descriptorMetadata->ATime);
+        __copy_timestamp_from_descriptor(&metadata->CTime, &descriptorMetadata->CTime);
+        __copy_timestamp_from_descriptor(&metadata->BirthTime, &descriptorMetadata->BirthTime);
+        metadata->Device.Major = descriptorMetadata->DeviceMajor;
+        metadata->Device.Minor = descriptorMetadata->DeviceMinor;
+        metadata->WindowsAttributes = descriptorMetadata->WindowsAttributes;
+    }
+
+    __finalize_entry_metadata(metadata, type, size);
+}
+
+static void __initialize_root_metadata(
+    struct VaFsMetadata* metadata)
+{
+    // The root directory is still synthesized from the image header rather
+    // than emitted as a named child descriptor, so keep one canonical default
+    // here until the full directory-section rewrite lands.
+    vafs_metadata_initialize(metadata);
+    vafs_metadata_set_mode(metadata, VaFsEntryType_Directory, 0775);
+    metadata->LinkCount = 1;
+    metadata->Size = 0;
+    metadata->Mask |= VaFsMetadataMask_LinkCount | VaFsMetadataMask_Size;
+}
+
 static void __initialize_file_descriptor(
     VaFsFileDescriptor_t* descriptor,
-    uint32_t              permissions)
+    const struct VaFsMetadata* metadata)
 {
     descriptor->Base.Type = VA_FS_DESCRIPTOR_TYPE_FILE;
     descriptor->Base.Length = sizeof(VaFsFileDescriptor_t);
 
     descriptor->Data.Index = VA_FS_INVALID_BLOCK;
     descriptor->Data.Offset = VA_FS_INVALID_OFFSET;
-    descriptor->FileLength = 0;
-    descriptor->Permissions = permissions;
+    descriptor->FileLength = (uint32_t)metadata->Size;
+    __descriptor_metadata_initialize(&descriptor->Metadata, metadata);
 }
 
 static void __initialize_directory_descriptor(
     VaFsDirectoryDescriptor_t* descriptor,
-    uint32_t                   permissions)
+    const struct VaFsMetadata* metadata)
 {
     descriptor->Base.Type = VA_FS_DESCRIPTOR_TYPE_DIRECTORY;
     descriptor->Base.Length = sizeof(VaFsDirectoryDescriptor_t);
 
     descriptor->Descriptor.Index = VA_FS_INVALID_BLOCK;
     descriptor->Descriptor.Offset = VA_FS_INVALID_OFFSET;
-    descriptor->Permissions = permissions;
+    __descriptor_metadata_initialize(&descriptor->Metadata, metadata);
 }
 
 static void __initialize_symlink_descriptor(
-    VaFsSymlinkDescriptor_t* descriptor)
+    VaFsSymlinkDescriptor_t* descriptor,
+    const struct VaFsMetadata* metadata)
 {
     descriptor->Base.Type = VA_FS_DESCRIPTOR_TYPE_SYMLINK;
     descriptor->Base.Length = sizeof(VaFsSymlinkDescriptor_t);
 
     descriptor->NameLength = 0;
     descriptor->TargetLength = 0;
+    __descriptor_metadata_initialize(&descriptor->Metadata, metadata);
 }
 
 static int __vafs_file_stat_internal(
     struct VaFsFile*     file,
     struct VaFsMetadata* metadata)
 {
-    if (file->VaFs->Mode == VaFsMode_Read && file->StatCached) {
-        *metadata = file->Stat;
-        return 0;
-    }
-
-    vafs_metadata_initialize(metadata);
-    metadata->Type = VaFsEntryType_File;
-    metadata->Mode = S_IFREG | file->Descriptor.Permissions;
-    metadata->Size = file->Descriptor.FileLength;
-    metadata->LinkCount = 1;
-    metadata->Mask = VaFsMetadataMask_Type |
-        VaFsMetadataMask_Mode |
-        VaFsMetadataMask_Size |
-        VaFsMetadataMask_LinkCount;
-
-    if (file->VaFs->Mode == VaFsMode_Read) {
-        file->Stat = *metadata;
+    if (!file->StatCached) {
+        __materialize_descriptor_metadata(&file->Descriptor.Metadata, VaFsEntryType_File, file->Descriptor.FileLength, &file->Stat);
         file->StatCached = 1;
     }
+
+    __finalize_entry_metadata(&file->Stat, VaFsEntryType_File, file->Descriptor.FileLength);
+    *metadata = file->Stat;
     return 0;
 }
 
@@ -95,15 +181,13 @@ static int __vafs_directory_stat_internal(
     struct VaFsDirectory*  directory,
     struct VaFsMetadata*   metadata)
 {
-    vafs_metadata_initialize(metadata);
-    metadata->Type = VaFsEntryType_Directory;
-    metadata->Mode = S_IFDIR | directory->Descriptor.Permissions;
-    metadata->Size = 0;
-    metadata->LinkCount = 1;
-    metadata->Mask = VaFsMetadataMask_Type |
-        VaFsMetadataMask_Mode |
-        VaFsMetadataMask_Size |
-        VaFsMetadataMask_LinkCount;
+    if (!directory->StatCached) {
+        __materialize_descriptor_metadata(&directory->Descriptor.Metadata, VaFsEntryType_Directory, 0, &directory->Stat);
+        directory->StatCached = 1;
+    }
+
+    __finalize_entry_metadata(&directory->Stat, VaFsEntryType_Directory, 0);
+    *metadata = directory->Stat;
     return 0;
 }
 
@@ -111,25 +195,13 @@ static int __vafs_symlink_stat_internal(
     struct VaFsSymlink*  symlink,
     struct VaFsMetadata* metadata)
 {
-    if (symlink->VaFs->Mode == VaFsMode_Read && symlink->StatCached) {
-        *metadata = symlink->Stat;
-        return 0;
-    }
-
-    vafs_metadata_initialize(metadata);
-    metadata->Type = VaFsEntryType_Symlink;
-    metadata->Mode = S_IFLNK | 0777;
-    metadata->Size = strlen(symlink->Target);
-    metadata->LinkCount = 1;
-    metadata->Mask = VaFsMetadataMask_Type |
-        VaFsMetadataMask_Mode |
-        VaFsMetadataMask_Size |
-        VaFsMetadataMask_LinkCount;
-
-    if (symlink->VaFs->Mode == VaFsMode_Read) {
-        symlink->Stat = *metadata;
+    if (!symlink->StatCached) {
+        __materialize_descriptor_metadata(&symlink->Descriptor.Metadata, VaFsEntryType_Symlink, strlen(symlink->Target), &symlink->Stat);
         symlink->StatCached = 1;
     }
+
+    __finalize_entry_metadata(&symlink->Stat, VaFsEntryType_Symlink, strlen(symlink->Target));
+    *metadata = symlink->Stat;
     return 0;
 }
 
@@ -157,8 +229,9 @@ int vafs_directory_create_root(
     directory->EntryCount = 0;
     directory->IndexDirty = 1;
 
-    // rwxrwxr-x
-    __initialize_directory_descriptor(&directory->Base.Descriptor, 0775);
+    __initialize_root_metadata(&directory->Base.Stat);
+    directory->Base.StatCached = 1;
+    __initialize_directory_descriptor(&directory->Base.Descriptor, &directory->Base.Stat);
 
     *directoryOut = (struct VaFsDirectory*)directory;
     return 0;
@@ -568,6 +641,8 @@ static struct VaFsFile* __create_file_from_descriptor(
     memcpy(&file->Descriptor, descriptor, sizeof(VaFsFileDescriptor_t));
     file->Name = __read_extended_string(extendedData, descriptor->Base.Length - sizeof(VaFsFileDescriptor_t));
     file->VaFs = vafs;
+    __materialize_descriptor_metadata(&descriptor->Metadata, VaFsEntryType_File, descriptor->FileLength, &file->Stat);
+    file->StatCached = 1;
     return file;
 }
 
@@ -599,6 +674,8 @@ static struct VaFsDirectory* __create_directory_from_descriptor(
     directory->IndexDirty = 1;
     directory->Base.Name = __read_extended_string(extendedData, descriptor->Base.Length - sizeof(VaFsDirectoryDescriptor_t));
     directory->Base.VaFs = vafs;
+    __materialize_descriptor_metadata(&descriptor->Metadata, VaFsEntryType_Directory, 0, &directory->Base.Stat);
+    directory->Base.StatCached = 1;
     return &directory->Base;
 }
 
@@ -624,6 +701,8 @@ static struct VaFsSymlink* __create_symlink_from_descriptor(
     symlink->Name   = __read_extended_string(extendedData, descriptor->NameLength);
     symlink->Target = __read_extended_string(extendedData + descriptor->NameLength, descriptor->TargetLength);
     symlink->VaFs   = vafs;
+    __materialize_descriptor_metadata(&descriptor->Metadata, VaFsEntryType_Symlink, descriptor->TargetLength, &symlink->Stat);
+    symlink->StatCached = 1;
     return symlink;
 }
 
@@ -719,7 +798,7 @@ static int __load_directory(
     VAFS_INFO("__load_directory: reading %u entries\n", header.Count);
     for (uint32_t i = 0; i < header.Count; i++) {
         struct VaFsDirectoryEntry* entry;
-        char                       buffer[64];
+        char                       buffer[VA_FS_MAX_DESCRIPTOR_SIZE];
         char*                      extendedData = NULL;
         VAFS_INFO("__load_directory: reading entry %i/%u\n", i, header.Count);
         // Each loop iteration consumes one on-disk descriptor and immediately
@@ -779,13 +858,15 @@ int vafs_directory_open_root(
     reader->State     = VaFsDirectoryState_Open;
     reader->IndexDirty = 1;
     memset(&reader->NameIndex, 0, sizeof(hashtable_t));
+    __initialize_root_metadata(&reader->Base.Stat);
+    reader->Base.StatCached = 1;
     
     // initialize the root descriptor for the directory
     reader->Base.Descriptor.Base.Length = sizeof(VaFsDirectoryDescriptor_t);
     reader->Base.Descriptor.Base.Type   = VA_FS_DESCRIPTOR_TYPE_DIRECTORY;
     reader->Base.Descriptor.Descriptor.Index = position->Index;
     reader->Base.Descriptor.Descriptor.Offset = position->Offset;
-    reader->Base.Descriptor.Permissions = 0775;
+    __descriptor_metadata_initialize(&reader->Base.Descriptor.Metadata, &reader->Base.Stat);
 
     *directoryOut = (struct VaFsDirectory*)reader;
     return 0;
@@ -951,9 +1032,9 @@ static int __write_file_descriptor(
     VAFS_DEBUG("vafs_directory_write_file_descriptor(name=%s)\n",
         entry->File->Name);
 
-    // increase descriptor length by name, do not account
-    // for the null terminator
-    entry->File->Descriptor.Base.Length += (uint16_t)strlen(entry->File->Name);
+    __finalize_entry_metadata(&entry->File->Stat, VaFsEntryType_File, entry->File->Descriptor.FileLength);
+    __descriptor_metadata_initialize(&entry->File->Descriptor.Metadata, &entry->File->Stat);
+    entry->File->Descriptor.Base.Length = (uint16_t)(sizeof(VaFsFileDescriptor_t) + strlen(entry->File->Name));
 
     status = vafs_stream_write(
         writer->Base.VaFs->DescriptorStream,
@@ -980,9 +1061,9 @@ static int __write_directory_descriptor(
     VAFS_DEBUG("vafs_directory_write_directory_descriptor(name=%s)\n",
         entry->Directory->Name);
     
-    // increase descriptor length by name, do not account
-    // for the null terminator
-    entry->Directory->Descriptor.Base.Length += (uint16_t)strlen(entry->Directory->Name);
+    __finalize_entry_metadata(&entry->Directory->Stat, VaFsEntryType_Directory, 0);
+    __descriptor_metadata_initialize(&entry->Directory->Descriptor.Metadata, &entry->Directory->Stat);
+    entry->Directory->Descriptor.Base.Length = (uint16_t)(sizeof(VaFsDirectoryDescriptor_t) + strlen(entry->Directory->Name));
 
     status = vafs_stream_write(
         writer->Base.VaFs->DescriptorStream,
@@ -1011,11 +1092,9 @@ static int __write_symlink_descriptor(
 
     entry->Symlink->Descriptor.NameLength   = (uint16_t)strlen(entry->Symlink->Name);
     entry->Symlink->Descriptor.TargetLength = (uint16_t)strlen(entry->Symlink->Target);
-
-    // increase descriptor length by names, do not account
-    // for the null terminator
-    entry->Symlink->Descriptor.Base.Length += entry->Symlink->Descriptor.NameLength;
-    entry->Symlink->Descriptor.Base.Length += entry->Symlink->Descriptor.TargetLength;
+    __finalize_entry_metadata(&entry->Symlink->Stat, VaFsEntryType_Symlink, entry->Symlink->Descriptor.TargetLength);
+    __descriptor_metadata_initialize(&entry->Symlink->Descriptor.Metadata, &entry->Symlink->Stat);
+    entry->Symlink->Descriptor.Base.Length = (uint16_t)(sizeof(VaFsSymlinkDescriptor_t) + entry->Symlink->Descriptor.NameLength + entry->Symlink->Descriptor.TargetLength);
 
     status = vafs_stream_write(
         writer->Base.VaFs->DescriptorStream,
@@ -1141,6 +1220,7 @@ int vafs_directory_read(
     struct VaFsEntry*           entryOut)
 {
     struct VaFsDirectoryEntry* entry;
+    struct VaFsMetadata        metadata;
     size_t                     count;
     size_t                     i;
     VAFS_INFO("vafs_directory_read(handle=%p)\n", handle);
@@ -1181,23 +1261,25 @@ int vafs_directory_read(
     // we found an entry, move to next
     handle->Index++;
 
+    if (__vafs_directory_entry_stat(entry, &metadata) != 0) {
+        return -1;
+    }
+
     // initialize the entry structure
     entryOut->Name = __vafs_directory_entry_name(entry);
-    entryOut->Type = (enum VaFsEntryType)entry->Type;
-    entryOut->ObjectId = 0;
-    entryOut->MetadataMask = VaFsMetadataMask_Type |
-        VaFsMetadataMask_Mode |
-        VaFsMetadataMask_Size |
-        VaFsMetadataMask_LinkCount;
+    entryOut->Type = metadata.Type;
+    entryOut->ObjectId = metadata.ObjectId;
+    entryOut->MetadataMask = metadata.Mask;
     return 0;
 }
 
-static int __metadata_permissions_for_create(
+static int __prepare_metadata_for_create(
     const struct VaFsMetadata* metadata,
     enum VaFsEntryType         expectedType,
-    uint32_t*                  permissionsOut)
+    uint64_t                   size,
+    struct VaFsMetadata*       preparedOut)
 {
-    if (metadata == NULL || permissionsOut == NULL) {
+    if (metadata == NULL || preparedOut == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -1214,10 +1296,11 @@ static int __metadata_permissions_for_create(
         return -1;
     }
 
-    // The create verb still decides the persisted descriptor type today.
-    // Keeping only the permission subset here avoids pretending the legacy
-    // descriptor format can store the whole metadata struct already.
-    *permissionsOut = metadata->Mode & 07777u;
+    // The create verb still decides the concrete entry kind, but once that is
+    // known we preserve the caller's richer metadata instead of collapsing it
+    // back to permission bits before serialization.
+    *preparedOut = *metadata;
+    __finalize_entry_metadata(preparedOut, expectedType, size);
     return 0;
 }
 
@@ -1257,7 +1340,7 @@ static int __add_file_entry(
 static int __create_file_entry(
     struct VaFsDirectoryWriter* writer,
     const char*                 name,
-    uint32_t                    permissions)
+    const struct VaFsMetadata*  metadata)
 {
     struct VaFsFile* entry;
     int              status;
@@ -1274,7 +1357,9 @@ static int __create_file_entry(
         return -1;
     }
 
-    __initialize_file_descriptor(&entry->Descriptor, permissions);
+    entry->Stat = *metadata;
+    entry->StatCached = 1;
+    __initialize_file_descriptor(&entry->Descriptor, metadata);
     status = __add_file_entry(writer, entry);
     if (status) {
         free((void*)entry->Name);
@@ -1310,7 +1395,8 @@ static int __add_symlink_entry(
 static int __create_symlink_entry(
     struct VaFsDirectoryWriter* writer,
     const char*                 name,
-    const char*                 target)
+    const char*                 target,
+    const struct VaFsMetadata*  metadata)
 {
     struct VaFsSymlink* entry;
     int                 status;
@@ -1334,7 +1420,9 @@ static int __create_symlink_entry(
         return -1;
     }
 
-    __initialize_symlink_descriptor(&entry->Descriptor);
+    entry->Stat = *metadata;
+    entry->StatCached = 1;
+    __initialize_symlink_descriptor(&entry->Descriptor, metadata);
     status = __add_symlink_entry(writer, entry);
     if (status) {
         free((void*)entry->Target);
@@ -1370,7 +1458,7 @@ static int __add_directory_entry(
 static int __create_directory_entry(
     struct VaFsDirectoryWriter* writer,
     const char*                 name,
-    uint32_t                    permissions)
+    const struct VaFsMetadata*  metadata)
 {
     struct VaFsDirectoryWriter* entry;
     int                         status;
@@ -1390,7 +1478,9 @@ static int __create_directory_entry(
         return -1;
     }
 
-    __initialize_directory_descriptor(&entry->Base.Descriptor, permissions);
+    entry->Base.Stat = *metadata;
+    entry->Base.StatCached = 1;
+    __initialize_directory_descriptor(&entry->Base.Descriptor, metadata);
     status = __add_directory_entry(writer, &entry->Base);
     if (status) {
         free((void*)entry->Base.Name);
@@ -1452,7 +1542,7 @@ int vafs_directory_create_directory(
     struct VaFsDirectoryWriter* writer;
     int                         status;
     struct VaFsDirectoryEntry*  entry;
-    uint32_t                    permissions;
+    struct VaFsMetadata         preparedMetadata;
     char                        token[VAFS_NAME_MAX + 1];
     VAFS_DEBUG("vafs_directory_create_directory(handle=%p, name=%s, handleOut=%p)\n", handle, name, handleOut);
 
@@ -1461,7 +1551,7 @@ int vafs_directory_create_directory(
         return -1;
     }
 
-    status = __metadata_permissions_for_create(metadata, VaFsEntryType_Directory, &permissions);
+    status = __prepare_metadata_for_create(metadata, VaFsEntryType_Directory, 0, &preparedMetadata);
     if (status != 0) {
         return status;
     }
@@ -1485,7 +1575,7 @@ int vafs_directory_create_directory(
     }
 
     writer = (struct VaFsDirectoryWriter*)handle->Directory;
-    status = __create_directory_entry(writer, token, permissions);
+    status = __create_directory_entry(writer, token, &preparedMetadata);
     if (status != 0) {
         return status;
     }
@@ -1545,7 +1635,7 @@ int vafs_directory_create_file(
     struct VaFsDirectoryWriter* writer;
     int                         status;
     struct VaFsDirectoryEntry*  entry;
-    uint32_t                    permissions;
+    struct VaFsMetadata         preparedMetadata;
     char                        token[VAFS_NAME_MAX + 1];
     VAFS_DEBUG("vafs_directory_create_file(name=%s)\n", name);
 
@@ -1554,7 +1644,7 @@ int vafs_directory_create_file(
         return -1;
     }
 
-    status = __metadata_permissions_for_create(metadata, VaFsEntryType_File, &permissions);
+    status = __prepare_metadata_for_create(metadata, VaFsEntryType_File, 0, &preparedMetadata);
     if (status != 0) {
         return status;
     }
@@ -1579,7 +1669,7 @@ int vafs_directory_create_file(
     }
 
     writer = (struct VaFsDirectoryWriter*)handle->Directory;
-    status = __create_file_entry(writer, token, permissions);
+    status = __create_file_entry(writer, token, &preparedMetadata);
     if (status != 0) {
         return status;
     }
@@ -1597,7 +1687,7 @@ int vafs_directory_create_symlink(
 {
     struct VaFsDirectoryEntry* entry;
     char                       token[VAFS_NAME_MAX + 1];
-    uint32_t                    ignoredPermissions;
+    struct VaFsMetadata        preparedMetadata;
     VAFS_DEBUG("vafs_directory_create_symlink(name=%s, target=%s)\n", name, target);
 
     if (handle == NULL || name == NULL || target == NULL || metadata == NULL) {
@@ -1605,7 +1695,7 @@ int vafs_directory_create_symlink(
         return -1;
     }
 
-    if (__metadata_permissions_for_create(metadata, VaFsEntryType_Symlink, &ignoredPermissions) != 0) {
+    if (__prepare_metadata_for_create(metadata, VaFsEntryType_Symlink, strlen(target), &preparedMetadata) != 0) {
         return -1;
     }
 
@@ -1625,7 +1715,7 @@ int vafs_directory_create_symlink(
     entry = __vafs_directory_find_entry(handle->Directory, token);
     if (entry == NULL) {
         struct VaFsDirectoryWriter* writer = (struct VaFsDirectoryWriter*)handle->Directory;
-        return __create_symlink_entry(writer, token, target);
+        return __create_symlink_entry(writer, token, target, &preparedMetadata);
     }
 
     errno = EEXIST;

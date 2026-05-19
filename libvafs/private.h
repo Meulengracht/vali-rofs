@@ -36,7 +36,10 @@ struct VaFsStreamDevice;
 typedef uint32_t vafsblock_t;
 
 #define VA_FS_MAGIC       0x3144524D
-#define VA_FS_VERSION     0x00010000
+// Descriptor bodies now persist full entry metadata, so older readers must
+// reject these images instead of interpreting the expanded fixed records as
+// variable-length name payloads.
+#define VA_FS_VERSION     0x00020000
 
 #define VA_FS_INVALID_BLOCK  0xFFFF
 #define VA_FS_INVALID_OFFSET 0xFFFFFFFF
@@ -104,17 +107,39 @@ VAFS_ONDISK_STRUCT(VaFsDescriptor, {
     uint16_t Length; // Length of the descriptor
 });
 
+VAFS_ONDISK_STRUCT(VaFsDescriptorTimestamp, {
+    int64_t  Seconds;
+    uint32_t Nanoseconds;
+});
+
+VAFS_ONDISK_STRUCT(VaFsDescriptorMetadata, {
+    uint32_t                  Mask;
+    uint32_t                  Mode;
+    uint32_t                  Uid;
+    uint32_t                  Gid;
+    uint32_t                  LinkCount;
+    uint32_t                  XattrCount;
+    uint64_t                  ObjectId;
+    VaFsDescriptorTimestamp_t MTime;
+    VaFsDescriptorTimestamp_t ATime;
+    VaFsDescriptorTimestamp_t CTime;
+    VaFsDescriptorTimestamp_t BirthTime;
+    uint32_t                  DeviceMajor;
+    uint32_t                  DeviceMinor;
+    uint32_t                  WindowsAttributes;
+});
+
 VAFS_ONDISK_STRUCT(VaFsFileDescriptor, {
     VaFsDescriptor_t    Base;
     VaFsBlockPosition_t Data;
     uint32_t            FileLength;
-    uint32_t            Permissions;
+    VaFsDescriptorMetadata_t Metadata;
 });
 
 VAFS_ONDISK_STRUCT(VaFsDirectoryDescriptor, {
     VaFsDescriptor_t    Base;
     VaFsBlockPosition_t Descriptor;
-    uint32_t            Permissions;
+    VaFsDescriptorMetadata_t Metadata;
 });
 
 VAFS_ONDISK_STRUCT(VaFsDirectoryHeader, {
@@ -122,10 +147,16 @@ VAFS_ONDISK_STRUCT(VaFsDirectoryHeader, {
 });
 
 VAFS_ONDISK_STRUCT(VaFsSymlinkDescriptor, {
-    VaFsDescriptor_t    Base;
-    uint16_t            NameLength;
-    uint16_t            TargetLength;
+    VaFsDescriptor_t         Base;
+    uint16_t                 NameLength;
+    uint16_t                 TargetLength;
+    VaFsDescriptorMetadata_t Metadata;
 });
+
+#define VA_FS_MAX_DESCRIPTOR_SIZE \
+    (sizeof(VaFsFileDescriptor_t) > sizeof(VaFsDirectoryDescriptor_t) ? \
+        (sizeof(VaFsFileDescriptor_t) > sizeof(VaFsSymlinkDescriptor_t) ? sizeof(VaFsFileDescriptor_t) : sizeof(VaFsSymlinkDescriptor_t)) : \
+        (sizeof(VaFsDirectoryDescriptor_t) > sizeof(VaFsSymlinkDescriptor_t) ? sizeof(VaFsDirectoryDescriptor_t) : sizeof(VaFsSymlinkDescriptor_t)))
 
 enum VaFsMode {
     VaFsMode_Read,
@@ -163,6 +194,8 @@ struct VaFsDirectory {
     struct VaFs*              VaFs;
     VaFsDirectoryDescriptor_t Descriptor;
     const char*               Name;
+    struct VaFsMetadata       Stat;
+    int                       StatCached;
 };
 
 struct VaFsSymlink {

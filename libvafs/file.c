@@ -249,25 +249,20 @@ int vafs_file_stat(
         return -1;
     }
 
-    if (handle->File->VaFs->Mode == VaFsMode_Read && handle->File->StatCached) {
-        *metadata = handle->File->Stat;
-        return 0;
+    if (!handle->File->StatCached) {
+        vafs_metadata_initialize(&handle->File->Stat);
     }
 
-    vafs_metadata_initialize(metadata);
-    metadata->Type = VaFsEntryType_File;
-    metadata->Mode = S_IFREG | handle->File->Descriptor.Permissions;
-    metadata->Size = handle->File->Descriptor.FileLength;
-    metadata->LinkCount = 1;
-    metadata->Mask = VaFsMetadataMask_Type |
-        VaFsMetadataMask_Mode |
-        VaFsMetadataMask_Size |
-        VaFsMetadataMask_LinkCount;
-
-    if (handle->File->VaFs->Mode == VaFsMode_Read) {
-        handle->File->Stat = *metadata;
-        handle->File->StatCached = 1;
+    handle->File->Stat.Type = VaFsEntryType_File;
+    handle->File->Stat.Size = handle->File->Descriptor.FileLength;
+    handle->File->Stat.Mask |= VaFsMetadataMask_Type | VaFsMetadataMask_Size;
+    if ((handle->File->Stat.Mask & VaFsMetadataMask_LinkCount) == 0) {
+        handle->File->Stat.LinkCount = 1;
+        handle->File->Stat.Mask |= VaFsMetadataMask_LinkCount;
     }
+
+    handle->File->StatCached = 1;
+    *metadata = handle->File->Stat;
     return 0;
 }
 
@@ -439,6 +434,8 @@ size_t vafs_file_write(
 
     // add to filelength
     handle->File->Descriptor.FileLength += size;
+    handle->File->Stat.Size = handle->File->Descriptor.FileLength;
+    handle->File->Stat.Mask |= VaFsMetadataMask_Size;
 
     // add to overview
     handle->File->VaFs->Overview.TotalSizeUncompressed += size;
