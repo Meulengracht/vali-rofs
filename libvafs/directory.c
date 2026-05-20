@@ -121,9 +121,9 @@ static void __materialize_descriptor_metadata(
 static void __initialize_root_metadata(
     struct VaFsMetadata* metadata)
 {
-    // The root directory is still synthesized from the image header rather
-    // than emitted as a named child descriptor, so keep one canonical default
-    // here until the full directory-section rewrite lands.
+    // New images persist root metadata in a real directory descriptor, but we
+    // still keep one canonical default here for freshly created in-memory roots
+    // and for older images whose header still points straight at the child list.
     vafs_metadata_initialize(metadata);
     vafs_metadata_set_mode(metadata, VaFsEntryType_Directory, 0775);
     metadata->LinkCount = 1;
@@ -268,6 +268,8 @@ int vafs_directory_create_root(
 
     directory->Base.VaFs = vafs;
     directory->Base.Name = strdup("root");
+    directory->Base.DescriptorPosition.Index = VA_FS_INVALID_BLOCK;
+    directory->Base.DescriptorPosition.Offset = VA_FS_INVALID_OFFSET;
     directory->Index = NULL;
     directory->EntryCount = 0;
     directory->IndexDirty = 1;
@@ -887,6 +889,8 @@ static struct VaFsDirectory* __create_directory_from_descriptor(
     }
 
     memcpy(&directory->Base.Descriptor, descriptor, sizeof(VaFsDirectoryDescriptor_t));
+    directory->Base.DescriptorPosition.Index = VA_FS_INVALID_BLOCK;
+    directory->Base.DescriptorPosition.Offset = VA_FS_INVALID_OFFSET;
 
     directory->State     = VaFsDirectoryState_Open;
     directory->IndexDirty = 1;
@@ -1115,10 +1119,19 @@ int vafs_directory_open_root(
     VaFsBlockPosition_t*   position,
     struct VaFsDirectory** directoryOut)
 {
+    struct VaFsDirectoryReader  probe;
     struct VaFsDirectoryReader* reader;
+    struct VaFsStreamReader*    streamReader;
+    VaFsDescriptor_t            descriptorBase;
+    char                        buffer[VA_FS_MAX_DESCRIPTOR_SIZE];
+    char*                       extendedData = NULL;
+    int                         status;
+    size_t                      read;
 
     // Root opens as a lazy read-mode wrapper around the persisted root
-    // descriptor position stored in the filesystem header.
+    // descriptor position stored in the filesystem header. New images point at
+    // a real directory descriptor so root metadata can round-trip like every
+    // other directory, but older images still point directly at the child list.
     
     if (vafs == NULL || position == NULL || directoryOut == NULL) {
         errno = EINVAL;
@@ -1126,6 +1139,59 @@ int vafs_directory_open_root(
     }
 
     VAFS_DEBUG("vafs_directory_open_root(pos=%u/%u)\n", position->Index, position->Offset);
+
+    status = vafs_stream_reader_open(vafs->DescriptorStream, &streamReader);
+    if (status != 0) {
+        return status;
+    }
+
+    status = vafs_stream_reader_seek(streamReader, position->Index, position->Offset);
+    if (status != 0) {
+        vafs_stream_reader_close(streamReader);
+        return status;
+    }
+
+    status = vafs_stream_reader_read(streamReader, &descriptorBase, sizeof(VaFsDescriptor_t), &read);
+    if (status != 0 || read != sizeof(VaFsDescriptor_t)) {
+        vafs_stream_reader_close(streamReader);
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (descriptorBase.Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY &&
+        descriptorBase.Length >= sizeof(VaFsDirectoryDescriptor_t)) {
+        memset(&probe, 0, sizeof(struct VaFsDirectoryReader));
+        probe.Base.VaFs = vafs;
+        probe.Reader = streamReader;
+
+        status = vafs_stream_reader_seek(streamReader, position->Index, position->Offset);
+        if (status != 0) {
+            vafs_stream_reader_close(streamReader);
+            return status;
+        }
+
+        status = __read_descriptor(&probe, &buffer[0], &extendedData);
+        vafs_stream_reader_close(streamReader);
+        if (status != 0) {
+            free(extendedData);
+            return status;
+        }
+
+        *directoryOut = __create_directory_from_descriptor(
+            vafs,
+            (VaFsDirectoryDescriptor_t*)&buffer[0],
+            extendedData
+        );
+        free(extendedData);
+        if (*directoryOut == NULL) {
+            return -1;
+        }
+
+        (*directoryOut)->DescriptorPosition = *position;
+        return 0;
+    }
+
+    vafs_stream_reader_close(streamReader);
     
     reader = (struct VaFsDirectoryReader*)calloc(1, sizeof(struct VaFsDirectoryReader));
     if (!reader) {
@@ -1138,6 +1204,8 @@ int vafs_directory_open_root(
     reader->State     = VaFsDirectoryState_Open;
     reader->IndexDirty = 1;
     memset(&reader->NameIndex, 0, sizeof(hashtable_t));
+    reader->Base.DescriptorPosition.Index = VA_FS_INVALID_BLOCK;
+    reader->Base.DescriptorPosition.Offset = VA_FS_INVALID_OFFSET;
     __initialize_root_metadata(&reader->Base.Stat);
     reader->Base.StatCached = 1;
     
@@ -1488,6 +1556,37 @@ static int __write_hardlink_descriptor(
         entry->Hardlink->Name,
         strlen(entry->Hardlink->Name)
     );
+}
+
+int vafs_directory_write_root_descriptor(
+    struct VaFsDirectory* directory)
+{
+    struct VaFsDirectoryWriter* writer;
+    struct VaFsDirectoryEntry   entry;
+    int                         status;
+    vafsblock_t                 block;
+    uint32_t                    offset;
+
+    if (directory == NULL || directory->VaFs->Mode != VaFsMode_Write) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    writer = (struct VaFsDirectoryWriter*)directory;
+    status = vafs_stream_position(writer->Base.VaFs->DescriptorStream, &block, &offset);
+    if (status != 0) {
+        return status;
+    }
+
+    // The root has no parent entry to carry its metadata, so it gets one final
+    // standalone hot descriptor that the image header can point at directly.
+    directory->DescriptorPosition.Index = block;
+    directory->DescriptorPosition.Offset = offset;
+
+    memset(&entry, 0, sizeof(struct VaFsDirectoryEntry));
+    entry.Type = VA_FS_DESCRIPTOR_TYPE_DIRECTORY;
+    entry.Directory = directory;
+    return __write_directory_descriptor(writer, &entry);
 }
 
 int vafs_directory_flush(

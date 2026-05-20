@@ -710,8 +710,8 @@ static int __write_vafs_header(
     VAFS_DEBUG("__write_vafs_header: descriptor block offset: %i\n", vafs->Header.DescriptorBlockOffset);
     VAFS_DEBUG("__write_vafs_header: data block offset: %i\n", vafs->Header.DataBlockOffset);
 
-    vafs->Header.RootDescriptor.Index = vafs->RootDirectory->Descriptor.Descriptor.Index;
-    vafs->Header.RootDescriptor.Offset = vafs->RootDirectory->Descriptor.Descriptor.Offset;
+    vafs->Header.RootDescriptor.Index = vafs->RootDirectory->DescriptorPosition.Index;
+    vafs->Header.RootDescriptor.Offset = vafs->RootDirectory->DescriptorPosition.Offset;
     VAFS_DEBUG("__write_vafs_header: root descriptor index: %i\n", vafs->Header.RootDescriptor.Index);
     VAFS_DEBUG("__write_vafs_header: root descriptor offset: %i\n", vafs->Header.RootDescriptor.Offset);
 
@@ -736,6 +736,12 @@ static int __create_image(
     status = vafs_directory_flush(vafs->RootDirectory);
     if (status) {
         VAFS_ERROR("Failed to flush files: %i\n", status);
+        return -1;
+    }
+
+    status = vafs_directory_write_root_descriptor(vafs->RootDirectory);
+    if (status) {
+        VAFS_ERROR("Failed to write root descriptor: %i\n", status);
         return -1;
     }
 

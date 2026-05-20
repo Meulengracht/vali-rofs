@@ -27,6 +27,12 @@
 
 static struct VaFsGuid g_xattrGuid = VA_FS_FEATURE_XATTRS;
 
+static int __resolve_xattr_entry_internal(
+    struct VaFs*                vafs,
+    const char*                 path,
+    struct VaFsDirectoryEntry** entryOut,
+    int                         symlinkDepth);
+
 static void __advance_block_position(
     VaFsBlockPosition_t* position,
     uint32_t             blockSize,
@@ -166,6 +172,27 @@ static int* __entry_xattr_loaded_slot(
     }
 }
 
+static int __resolve_xattr_entry(
+    struct VaFs*                vafs,
+    const char*                 path,
+    struct VaFsDirectoryEntry*  rootEntry,
+    struct VaFsDirectoryEntry** entryOut)
+{
+    if (vafs == NULL || path == NULL || rootEntry == NULL || entryOut == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (__vafs_is_root_path(path)) {
+        memset(rootEntry, 0, sizeof(struct VaFsDirectoryEntry));
+        rootEntry->Type = VA_FS_DESCRIPTOR_TYPE_DIRECTORY;
+        rootEntry->Directory = vafs->RootDirectory;
+        *entryOut = rootEntry;
+        return 0;
+    }
+    return __resolve_xattr_entry_internal(vafs, path, entryOut, 0);
+}
+
 static int __resolve_xattr_entry_internal(
     struct VaFs*            vafs,
     const char*             path,
@@ -187,11 +214,10 @@ static int __resolve_xattr_entry_internal(
         return -1;
     }
 
-    // The root directory is still synthesized from the image header instead of
-    // owning a normal persisted descriptor, so there is no stable xattr record
-    // to attach to it yet.
+    // Callers handle the root path directly because the token walker below is
+    // only responsible for traversing named descendants beneath that root.
     if (__vafs_is_root_path(path)) {
-        errno = ENOTSUP;
+        errno = EINVAL;
         return -1;
     }
 
@@ -434,8 +460,6 @@ static int __collect_directory_xattrs(
     struct VaFs*               vafs;
 
     vafs = directory->VaFs;
-    // The synthetic root is excluded because it does not yet have its own hot
-    // on-disk descriptor to carry an xattr index back to this cold section.
     if (includeDirectory && directory->Xattrs != NULL && directory->Xattrs->Count != 0) {
         if (__xattr_registry_add(vafs, directory->Xattrs) != 0) {
             return -1;
@@ -491,7 +515,7 @@ int __vafs_xattr_prepare_write(
 
     // Xattr sets are assigned stable section-local indices up front so the hot
     // descriptors can point at them before the colder section is serialized.
-    return __collect_directory_xattrs(vafs->RootDirectory, 0);
+    return __collect_directory_xattrs(vafs->RootDirectory, 1);
 }
 
 static int __write_xattr_set(
@@ -956,6 +980,7 @@ int vafs_path_listxattr(
     size_t       bufferSize,
     size_t*      bytesWritten)
 {
+    struct VaFsDirectoryEntry  rootEntry;
     struct VaFsDirectoryEntry* entry;
     struct VaFsXattrSet*       set;
     size_t                     required;
@@ -967,7 +992,7 @@ int vafs_path_listxattr(
         return -1;
     }
 
-    status = __resolve_xattr_entry_internal(vafs, path, &entry, 0);
+    status = __resolve_xattr_entry(vafs, path, &rootEntry, &entry);
     if (status != 0) {
         return status;
     }
@@ -1012,6 +1037,7 @@ int vafs_path_getxattr(
     size_t       valueSize,
     size_t*      bytesWritten)
 {
+    struct VaFsDirectoryEntry  rootEntry;
     struct VaFsDirectoryEntry* entry;
     struct VaFsXattrSet*       set;
     struct VaFsXattr*          xattr;
@@ -1022,7 +1048,7 @@ int vafs_path_getxattr(
         return -1;
     }
 
-    status = __resolve_xattr_entry_internal(vafs, path, &entry, 0);
+    status = __resolve_xattr_entry(vafs, path, &rootEntry, &entry);
     if (status != 0) {
         return status;
     }
@@ -1064,6 +1090,7 @@ int vafs_path_setxattr(
     const void*  value,
     size_t       valueSize)
 {
+    struct VaFsDirectoryEntry  rootEntry;
     struct VaFsDirectoryEntry* entry;
     struct VaFsXattrSet**      xattrSlot;
     struct VaFsMetadata*       metadata;
@@ -1094,7 +1121,7 @@ int vafs_path_setxattr(
         return -1;
     }
 
-    status = __resolve_xattr_entry_internal(vafs, path, &entry, 0);
+    status = __resolve_xattr_entry(vafs, path, &rootEntry, &entry);
     if (status != 0) {
         return status;
     }

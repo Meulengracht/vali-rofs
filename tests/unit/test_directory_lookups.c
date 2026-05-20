@@ -671,6 +671,87 @@ static int test_xattr_roundtrip(void)
     TEST_PASS("Xattrs survive descriptor-stream sidecar round-trip");
 }
 
+static int test_root_xattr_roundtrip(void)
+{
+    struct VaFs* vafs = NULL;
+    struct VaFsConfiguration config;
+    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsFileHandle* file_handle = NULL;
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
+    struct VaFsMetadata statbuf;
+    struct VaFsFeatureHeader* feature;
+    struct VaFsGuid xattrGuid = VA_FS_FEATURE_XATTRS;
+    char xattrList[64];
+    char valueBuffer[32];
+    size_t bytesWritten = 0;
+    int status;
+
+    vafs_config_initialize(&config);
+    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    TEST_ASSERT(status == 0, "Failed to create root xattr test image");
+
+    status = vafs_directory_open(vafs, "/", &root);
+    TEST_ASSERT(status == 0, "Failed to open root directory for root xattr test");
+
+    status = vafs_directory_create_file(root, "child", &fileMetadata, &file_handle);
+    TEST_ASSERT(status == 0, "Failed to create root child file");
+    status = vafs_file_write(file_handle, (void*)"root-child", strlen("root-child"));
+    TEST_ASSERT(status == 0, "Failed to write root child payload");
+    vafs_file_close(file_handle);
+    file_handle = NULL;
+
+    status = vafs_path_setxattr(vafs, "/", "user.root", "init", strlen("init"));
+    TEST_ASSERT(status == 0, "Failed to set root xattr");
+
+    status = vafs_path_stat(vafs, "/", 1, &statbuf);
+    TEST_ASSERT(status == 0, "Failed to stat root while writing");
+    TEST_ASSERT(statbuf.XattrCount == 1, "Root xattr count should update immediately in write mode");
+
+    vafs_directory_close(root);
+    root = NULL;
+    vafs_close(vafs);
+    vafs = NULL;
+
+    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    TEST_ASSERT(status == 0, "Failed to reopen root xattr test image");
+
+    status = vafs_feature_query(vafs, &xattrGuid, &feature);
+    TEST_ASSERT(status == 0, "Failed to query root xattr feature");
+    TEST_ASSERT(((VaFsFeatureXattrs_t*)feature)->Count == 1, "Expected one root xattr set in feature table");
+
+    status = vafs_path_stat(vafs, "/", 1, &statbuf);
+    TEST_ASSERT(status == 0, "Failed to stat root after reopen");
+    TEST_ASSERT(statbuf.XattrCount == 1, "Root xattr count did not round-trip");
+
+    status = vafs_directory_open(vafs, "/", &root);
+    TEST_ASSERT(status == 0, "Failed to reopen root directory handle");
+    status = vafs_directory_stat(root, &statbuf);
+    TEST_ASSERT(status == 0, "Failed to stat root through directory handle");
+    TEST_ASSERT(statbuf.XattrCount == 1, "Root handle stat should expose persisted xattr count");
+
+    status = vafs_path_listxattr(vafs, "/", NULL, 0, &bytesWritten);
+    TEST_ASSERT(status == 0, "Failed to query root xattr list size");
+    TEST_ASSERT(bytesWritten != 0, "Expected non-empty root xattr list");
+
+    memset(xattrList, 0, sizeof(xattrList));
+    status = vafs_path_listxattr(vafs, "/", xattrList, sizeof(xattrList), &bytesWritten);
+    TEST_ASSERT(status == 0, "Failed to list root xattrs");
+    TEST_ASSERT(xattr_list_contains(xattrList, bytesWritten, "user.root"), "Root xattr list missing user.root");
+
+    memset(valueBuffer, 0, sizeof(valueBuffer));
+    status = vafs_path_getxattr(vafs, "/", "user.root", valueBuffer, sizeof(valueBuffer), &bytesWritten);
+    TEST_ASSERT(status == 0, "Failed to get root xattr");
+    TEST_ASSERT(bytesWritten == strlen("init"), "Root xattr size did not round-trip");
+    TEST_ASSERT(memcmp(valueBuffer, "init", bytesWritten) == 0, "Root xattr value did not round-trip");
+
+    vafs_directory_close(root);
+    root = NULL;
+    vafs_close(vafs);
+    remove(TEST_IMAGE_PATH);
+
+    TEST_PASS("Root xattrs survive a real persisted root descriptor");
+}
+
 static int test_wide_directory_lookup(void)
 {
     struct VaFs* vafs = NULL;
@@ -927,6 +1008,7 @@ int main(int argc, char** argv)
     test_special_roundtrip();
     test_hardlink_roundtrip();
     test_xattr_roundtrip();
+    test_root_xattr_roundtrip();
     test_wide_directory_lookup();
 
     printf("\n========================================\n");

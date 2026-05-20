@@ -248,6 +248,10 @@ struct VaFsFile {
 struct VaFsDirectory {
     struct VaFs*              VaFs;
     VaFsDirectoryDescriptor_t Descriptor;
+    // Only the root directory needs its own descriptor position persisted back
+    // to the image header because every other directory descriptor is anchored
+    // by its parent entry.
+    VaFsBlockPosition_t       DescriptorPosition;
     const char*               Name;
     struct VaFsMetadata       Stat;
     struct VaFsXattrSet*      Xattrs;
@@ -702,6 +706,15 @@ extern void vafs_directory_destroy(
  * @return 0 on success, otherwise -1 with `errno` set.
  */
 extern int vafs_directory_flush(
+    struct VaFsDirectory* directory);
+
+/**
+ * @brief Writes the standalone root directory descriptor for a writable image.
+ *
+ * @param[In] directory Writable root directory whose child payload is already flushed.
+ * @return 0 on success, otherwise -1 with `errno` set.
+ */
+extern int vafs_directory_write_root_descriptor(
     struct VaFsDirectory* directory);
 
 /**
