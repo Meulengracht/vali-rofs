@@ -723,11 +723,27 @@ static int __create_image(
 {
     int status;
 
+    // Hot descriptors only store xattr indices, so the writer has to assign the
+    // final deduplicated section order before any directory payload is flushed.
+    status = __vafs_xattr_prepare_write(vafs);
+    if (status) {
+        VAFS_ERROR("Failed to prepare xattr section: %i\n", status);
+        return -1;
+    }
+
     // flush files
     VAFS_DEBUG("__create_image: flushing files\n");
     status = vafs_directory_flush(vafs->RootDirectory);
     if (status) {
         VAFS_ERROR("Failed to flush files: %i\n", status);
+        return -1;
+    }
+
+    // Xattr sets live outside the hot directory payloads so directory readers
+    // never pay to walk them during ordinary lookup or stat traversal.
+    status = __vafs_xattr_write_section(vafs);
+    if (status) {
+        VAFS_ERROR("Failed to write xattr section: %i\n", status);
         return -1;
     }
 
@@ -823,6 +839,7 @@ static void vafs_destroy(
 
     // cleanup directory instances
     vafs_directory_destroy(vafs->RootDirectory);
+    __vafs_xattr_store_destroy(vafs);
     
     // cleanup the base instance
     free(vafs);

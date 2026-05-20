@@ -55,6 +55,8 @@ static void __finalize_entry_metadata(
     metadata->Size = size;
     metadata->Mask |= VaFsMetadataMask_Type | VaFsMetadataMask_Size;
 
+    // Readers and writers both rely on a usable link count even when older or
+    // minimal callers never filled one in explicitly.
     if ((metadata->Mask & VaFsMetadataMask_LinkCount) == 0) {
         metadata->LinkCount = 1;
         metadata->Mask |= VaFsMetadataMask_LinkCount;
@@ -76,6 +78,9 @@ static void __descriptor_metadata_initialize(
     descriptorMetadata->Gid = metadata->Gid;
     descriptorMetadata->LinkCount = metadata->LinkCount;
     descriptorMetadata->XattrCount = metadata->XattrCount;
+    // Xattr indices are assigned only after the writer has deduplicated every
+    // set that will live in the colder descriptor-stream xattr section.
+    descriptorMetadata->XattrIndex = VA_FS_INVALID_XATTR_INDEX;
     descriptorMetadata->ObjectId = metadata->ObjectId;
     __copy_timestamp_to_descriptor(&descriptorMetadata->MTime, &metadata->MTime);
     __copy_timestamp_to_descriptor(&descriptorMetadata->ATime, &metadata->ATime);
@@ -288,6 +293,7 @@ static void __directory_entry_destroy(struct VaFsDirectoryEntry* entry)
             vafs_symlink_destroy(entry->Symlink);
             break;
         case VA_FS_DESCRIPTOR_TYPE_SPECIAL:
+            __vafs_xattr_set_destroy(entry->Special->Xattrs);
             free((void*)entry->Special->Name);
             free(entry->Special);
             break;
@@ -447,21 +453,33 @@ struct VaFsDirectoryEntry* __vafs_resolve_hardlink(
     return entry;
 }
 
+static void __descriptor_metadata_set_xattrs(
+    VaFsDescriptorMetadata_t* descriptorMetadata,
+    const struct VaFsXattrSet* xattrs)
+{
+    // Xattrs stay in a colder descriptor-stream section; hot entry metadata
+    // only carries the stable set index needed to reach them lazily.
+    descriptorMetadata->XattrIndex = (xattrs != NULL && xattrs->Count != 0) ?
+        xattrs->Index :
+        VA_FS_INVALID_XATTR_INDEX;
+}
+
 void vafs_directory_destroy(struct VaFsDirectory* directory)
 {
     if (directory == NULL) {
         return;
     }
 
-    // A directory instance can either be a reader or a writer. They
-    // need different kinds of cleanup, but only one can be instanced
-    // at the time. When reading images, we only use directory readers, and
-    // when we write, we only use directory writers
+    // Reader and writer directories own different supporting state, so teardown
+    // follows the active mode instead of forcing both sides to carry the same
+    // lifetime rules.
     if (directory->VaFs->Mode == VaFsMode_Read) {
         __directory_reader_destroy((struct VaFsDirectoryReader*)directory);
     } else if (directory->VaFs->Mode == VaFsMode_Write) {
         __directory_writer_destroy((struct VaFsDirectoryWriter*)directory);
     }
+
+    __vafs_xattr_set_destroy(directory->Xattrs);
 
     // free common resources
     free((void*)directory->Name);
@@ -1305,8 +1323,12 @@ static int __write_file_descriptor(
     VAFS_DEBUG("vafs_directory_write_file_descriptor(name=%s)\n",
         entry->File->Name);
 
+    // Rebuild the hot descriptor as late as possible so deferred metadata such
+    // as xattr counts and deduplicated xattr indices cannot drift from the file
+    // state that is about to be serialized.
     __finalize_entry_metadata(&entry->File->Stat, VaFsEntryType_File, entry->File->Descriptor.FileLength);
     __descriptor_metadata_initialize(&entry->File->Descriptor.Metadata, &entry->File->Stat);
+    __descriptor_metadata_set_xattrs(&entry->File->Descriptor.Metadata, entry->File->Xattrs);
     entry->File->Descriptor.Base.Length = (uint16_t)(sizeof(VaFsFileDescriptor_t) + strlen(entry->File->Name));
 
     status = vafs_stream_write(
@@ -1334,8 +1356,11 @@ static int __write_directory_descriptor(
     VAFS_DEBUG("vafs_directory_write_directory_descriptor(name=%s)\n",
         entry->Directory->Name);
     
+    // Directory metadata is refreshed at flush time for the same reason as
+    // files: the hot descriptor must reflect the final cold xattr indexing.
     __finalize_entry_metadata(&entry->Directory->Stat, VaFsEntryType_Directory, 0);
     __descriptor_metadata_initialize(&entry->Directory->Descriptor.Metadata, &entry->Directory->Stat);
+    __descriptor_metadata_set_xattrs(&entry->Directory->Descriptor.Metadata, entry->Directory->Xattrs);
     entry->Directory->Descriptor.Base.Length = (uint16_t)(sizeof(VaFsDirectoryDescriptor_t) + strlen(entry->Directory->Name));
 
     status = vafs_stream_write(
@@ -1363,10 +1388,13 @@ static int __write_symlink_descriptor(
     VAFS_DEBUG("__write_symlink_descriptor(name=%s)\n",
         entry->Symlink->Name);
 
+    // Symlink payload lengths and xattr indices are both finalized here so the
+    // descriptor stays a faithful snapshot of the exact target text being emitted.
     entry->Symlink->Descriptor.NameLength   = (uint16_t)strlen(entry->Symlink->Name);
     entry->Symlink->Descriptor.TargetLength = (uint16_t)strlen(entry->Symlink->Target);
     __finalize_entry_metadata(&entry->Symlink->Stat, VaFsEntryType_Symlink, entry->Symlink->Descriptor.TargetLength);
     __descriptor_metadata_initialize(&entry->Symlink->Descriptor.Metadata, &entry->Symlink->Stat);
+    __descriptor_metadata_set_xattrs(&entry->Symlink->Descriptor.Metadata, entry->Symlink->Xattrs);
     entry->Symlink->Descriptor.Base.Length = (uint16_t)(sizeof(VaFsSymlinkDescriptor_t) + entry->Symlink->Descriptor.NameLength + entry->Symlink->Descriptor.TargetLength);
 
     status = vafs_stream_write(
@@ -1409,8 +1437,11 @@ static int __write_special_descriptor(
 
     // Persist the explicit entry subtype because host recreation cares about
     // more than permission bits when deciding which special node to create.
+    // Like the other descriptor writers, rebuild the hot metadata here so the
+    // special node sees the same final xattr indexing as regular files do.
     __finalize_entry_metadata(&entry->Special->Stat, entry->Special->Stat.Type, 0);
     __descriptor_metadata_initialize(&entry->Special->Descriptor.Metadata, &entry->Special->Stat);
+    __descriptor_metadata_set_xattrs(&entry->Special->Descriptor.Metadata, entry->Special->Xattrs);
     entry->Special->Descriptor.EntryType = (uint16_t)entry->Special->Stat.Type;
     entry->Special->Descriptor.Base.Length = (uint16_t)(sizeof(VaFsSpecialDescriptor_t) + strlen(entry->Special->Name));
 

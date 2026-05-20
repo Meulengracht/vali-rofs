@@ -43,6 +43,7 @@ typedef uint32_t vafsblock_t;
 
 #define VA_FS_INVALID_BLOCK  0xFFFF
 #define VA_FS_INVALID_OFFSET 0xFFFFFFFF
+#define VA_FS_INVALID_XATTR_INDEX 0xFFFFFFFFu
 
 // I mean, do we really need more? But it's just a lazy implementation
 // decision this.
@@ -66,6 +67,8 @@ typedef uint32_t vafsblock_t;
 #define VAFS_LOOKUP_CACHE_SET_COUNT          128
 #define VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY  4
 #define VAFS_LOOKUP_CACHE_CAPACITY           (VAFS_LOOKUP_CACHE_SET_COUNT * VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY)
+
+#define VA_FS_FEATURE_XATTRS { 0x6D0DB4A6, 0x2F7C, 0x4A8E, { 0x8D, 0x55, 0x62, 0x93, 0xB0, 0x35, 0x74, 0xE1 } }
 
 // Logging macros
 #define VAFS_ERROR(...)  vafs_log_message(VaFsLogLevel_Error, "libvafs: " __VA_ARGS__)
@@ -121,6 +124,9 @@ VAFS_ONDISK_STRUCT(VaFsDescriptorMetadata, {
     uint32_t                  Gid;
     uint32_t                  LinkCount;
     uint32_t                  XattrCount;
+    // Hot descriptors carry only the xattr-set index so common metadata reads
+    // do not drag the colder variable-length xattr payload into every entry.
+    uint32_t                  XattrIndex;
     uint64_t                  ObjectId;
     VaFsDescriptorTimestamp_t MTime;
     VaFsDescriptorTimestamp_t ATime;
@@ -169,6 +175,25 @@ VAFS_ONDISK_STRUCT(VaFsHardlinkDescriptor, {
     uint64_t         ObjectId;
 });
 
+VAFS_ONDISK_STRUCT(VaFsXattrSetDescriptor, {
+    uint32_t Count;
+});
+
+VAFS_ONDISK_STRUCT(VaFsXattrRecordDescriptor, {
+    uint16_t NameLength;
+    uint16_t Reserved;
+    uint32_t ValueLength;
+});
+
+VAFS_ONDISK_STRUCT(VaFsFeatureXattrs, {
+    struct VaFsFeatureHeader Header;
+    // The feature anchors the cold xattr section because entry descriptors only
+    // know which set they want, not where the section itself begins.
+    uint32_t                 DescriptorIndex;
+    uint32_t                 DescriptorOffset;
+    uint32_t                 Count;
+});
+
 #define VA_FS_MAX_DESCRIPTOR_SIZE \
     (sizeof(VaFsFileDescriptor_t) > sizeof(VaFsDirectoryDescriptor_t) ? \
         (sizeof(VaFsFileDescriptor_t) > sizeof(VaFsSymlinkDescriptor_t) ? \
@@ -215,7 +240,9 @@ struct VaFsFile {
     VaFsFileDescriptor_t Descriptor;
     const char*          Name;
     struct VaFsMetadata  Stat;
+    struct VaFsXattrSet* Xattrs;
     int                  StatCached;
+    int                  XattrsLoaded;
 };
 
 struct VaFsDirectory {
@@ -223,7 +250,9 @@ struct VaFsDirectory {
     VaFsDirectoryDescriptor_t Descriptor;
     const char*               Name;
     struct VaFsMetadata       Stat;
+    struct VaFsXattrSet*      Xattrs;
     int                       StatCached;
+    int                       XattrsLoaded;
 };
 
 struct VaFsSymlink {
@@ -232,7 +261,9 @@ struct VaFsSymlink {
     const char*             Name;
     const char*             Target;
     struct VaFsMetadata     Stat;
+    struct VaFsXattrSet*    Xattrs;
     int                     StatCached;
+    int                     XattrsLoaded;
 };
 
 struct VaFsSpecial {
@@ -240,13 +271,41 @@ struct VaFsSpecial {
     VaFsSpecialDescriptor_t Descriptor;
     const char*             Name;
     struct VaFsMetadata     Stat;
+    struct VaFsXattrSet*    Xattrs;
     int                     StatCached;
+    int                     XattrsLoaded;
 };
 
 struct VaFsHardlink {
     struct VaFs*             VaFs;
     VaFsHardlinkDescriptor_t Descriptor;
     const char*              Name;
+};
+
+struct VaFsXattr {
+    char*               Name;
+    void*               Value;
+    uint32_t            ValueLength;
+    struct VaFsXattr*   Link;
+};
+
+struct VaFsXattrSet {
+    uint32_t            Count;
+    // Writer-side dedup assigns one stable section-local index that multiple
+    // entries can share when their xattr payloads are identical.
+    uint32_t            Index;
+    struct VaFsXattr*   Entries;
+};
+
+struct VaFsXattrStore {
+    int                    Present;
+    int                    PositionsLoaded;
+    // Readers discover the section once through the feature table, then cache
+    // per-set positions only if some caller actually touches xattrs.
+    VaFsBlockPosition_t    Start;
+    uint32_t               Count;
+    VaFsBlockPosition_t*   Positions;
+    struct VaFsXattrSet**  Sets;
 };
 
 struct VaFs {
@@ -270,6 +329,7 @@ struct VaFs {
 
     struct VaFsDirectory*  RootDirectory;
     struct VaFsLookupCache LookupCache;
+    struct VaFsXattrStore  XattrStore;
 };
 
 /**
@@ -813,6 +873,10 @@ extern int __vafs_directory_open_internal(struct VaFs* vafs, const char* path, s
  */
 extern int __vafs_file_open_internal(struct VaFs* vafs, const char* path, struct VaFsFileHandle** handleOut, int symlinkDepth);
 extern struct VaFsDirectoryEntry* __vafs_resolve_hardlink(struct VaFs* vafs, struct VaFsDirectoryEntry* entry);
+extern int __vafs_xattr_prepare_write(struct VaFs* vafs);
+extern int __vafs_xattr_write_section(struct VaFs* vafs);
+extern void __vafs_xattr_store_destroy(struct VaFs* vafs);
+extern void __vafs_xattr_set_destroy(struct VaFsXattrSet* set);
 
 /**
  * @brief Returns the linked-list entries for a directory, loading them on demand in read mode.

@@ -213,6 +213,7 @@ void vafs_file_destroy(
         return;
     }
 
+    __vafs_xattr_set_destroy(file->Xattrs);
     free((void*)file->Name);
     free(file);
 }

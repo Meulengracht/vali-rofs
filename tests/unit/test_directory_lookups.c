@@ -13,6 +13,7 @@
 #include <vafs/directory.h>
 #include <vafs/file.h>
 #include <vafs/stat.h>
+#include <vafs/xattr.h>
 #include "../../libvafs/private.h"
 
 #define TEST_IMAGE_PATH "test_directory_lookups.vafs"
@@ -144,6 +145,23 @@ static int timestamps_equal(
     const struct VaFsTimestamp* right)
 {
     return left->Seconds == right->Seconds && left->Nanoseconds == right->Nanoseconds;
+}
+
+static int xattr_list_contains(
+    const char* buffer,
+    size_t      size,
+    const char* name)
+{
+    size_t offset = 0;
+
+    while (offset < size) {
+        size_t entryLength = strlen(buffer + offset);
+        if (strcmp(buffer + offset, name) == 0) {
+            return 1;
+        }
+        offset += entryLength + 1;
+    }
+    return 0;
 }
 
 static int test_metadata_roundtrip(void)
@@ -531,6 +549,128 @@ static int test_hardlink_roundtrip(void)
     TEST_PASS("Hardlinks resolve shared metadata while preserving alias entry type");
 }
 
+static int test_xattr_roundtrip(void)
+{
+    struct VaFs* vafs = NULL;
+    struct VaFsConfiguration config;
+    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsDirectoryHandle* meta = NULL;
+    struct VaFsFileHandle* file_handle = NULL;
+    struct VaFsMetadata dirMetadata = metadata_for_mode(VaFsEntryType_Directory, 0755);
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
+    struct VaFsMetadata peerMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
+    struct VaFsMetadata statbuf;
+    struct VaFsFeatureHeader* feature;
+    struct VaFsGuid xattrGuid = VA_FS_FEATURE_XATTRS;
+    char xattrList[128];
+    char valueBuffer[32];
+    size_t bytesWritten = 0;
+    int status;
+
+    fileMetadata.ObjectId = 0x73000011ULL;
+    fileMetadata.Mask |= VaFsMetadataMask_ObjectId;
+    peerMetadata.ObjectId = 0x73000012ULL;
+    peerMetadata.Mask |= VaFsMetadataMask_ObjectId;
+
+    vafs_config_initialize(&config);
+    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    TEST_ASSERT(status == 0, "Failed to create xattr test image");
+
+    status = vafs_directory_open(vafs, "/", &root);
+    TEST_ASSERT(status == 0, "Failed to open root directory for xattr test");
+
+    status = vafs_directory_create_directory(root, "meta", &dirMetadata, &meta);
+    TEST_ASSERT(status == 0, "Failed to create xattr test directory");
+
+    status = vafs_directory_create_file(meta, "xattr_target", &fileMetadata, &file_handle);
+    TEST_ASSERT(status == 0, "Failed to create xattr target file");
+    status = vafs_file_write(file_handle, (void*)"payload", strlen("payload"));
+    TEST_ASSERT(status == 0, "Failed to write xattr target payload");
+    vafs_file_close(file_handle);
+    file_handle = NULL;
+
+    status = vafs_directory_create_file(meta, "xattr_peer", &peerMetadata, &file_handle);
+    TEST_ASSERT(status == 0, "Failed to create xattr peer file");
+    vafs_file_close(file_handle);
+    file_handle = NULL;
+
+    status = vafs_directory_create_hardlink(meta, "xattr_alias", fileMetadata.ObjectId);
+    TEST_ASSERT(status == 0, "Failed to create xattr hardlink alias");
+
+    status = vafs_path_setxattr(vafs, "/meta", "user.kind", "meta", strlen("meta"));
+    TEST_ASSERT(status == 0, "Failed to set directory xattr");
+
+    status = vafs_path_setxattr(vafs, "/meta/xattr_target", "user.mime", "text/plain", strlen("text/plain"));
+    TEST_ASSERT(status == 0, "Failed to set file mime xattr");
+    status = vafs_path_setxattr(vafs, "/meta/xattr_target", "user.empty", NULL, 0);
+    TEST_ASSERT(status == 0, "Failed to set empty file xattr");
+
+    status = vafs_path_setxattr(vafs, "/meta/xattr_peer", "user.mime", "text/plain", strlen("text/plain"));
+    TEST_ASSERT(status == 0, "Failed to set peer mime xattr");
+    status = vafs_path_setxattr(vafs, "/meta/xattr_peer", "user.empty", NULL, 0);
+    TEST_ASSERT(status == 0, "Failed to set peer empty xattr");
+
+    vafs_directory_close(meta);
+    meta = NULL;
+    vafs_directory_close(root);
+    root = NULL;
+    vafs_close(vafs);
+    vafs = NULL;
+
+    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    TEST_ASSERT(status == 0, "Failed to reopen xattr test image");
+
+    status = vafs_feature_query(vafs, &xattrGuid, &feature);
+    TEST_ASSERT(status == 0, "Failed to query xattr feature");
+    TEST_ASSERT(((VaFsFeatureXattrs_t*)feature)->Count == 2, "Expected deduplicated xattr set count");
+
+    status = vafs_path_stat(vafs, "/meta", 1, &statbuf);
+    TEST_ASSERT(status == 0, "Failed to stat xattr directory");
+    TEST_ASSERT(statbuf.XattrCount == 1, "Directory xattr count did not round-trip");
+
+    status = vafs_path_stat(vafs, "/meta/xattr_target", 1, &statbuf);
+    TEST_ASSERT(status == 0, "Failed to stat xattr target");
+    TEST_ASSERT(statbuf.XattrCount == 2, "Target xattr count did not round-trip");
+
+    status = vafs_path_stat(vafs, "/meta/xattr_alias", 1, &statbuf);
+    TEST_ASSERT(status == 0, "Failed to stat xattr alias");
+    TEST_ASSERT(statbuf.XattrCount == 2, "Hardlink alias should expose target xattr count");
+
+    status = vafs_path_listxattr(vafs, "/meta/xattr_target", NULL, 0, &bytesWritten);
+    TEST_ASSERT(status == 0, "Failed to query xattr list size");
+    TEST_ASSERT(bytesWritten != 0, "Expected non-empty xattr list");
+
+    memset(xattrList, 0, sizeof(xattrList));
+    status = vafs_path_listxattr(vafs, "/meta/xattr_target", xattrList, sizeof(xattrList), &bytesWritten);
+    TEST_ASSERT(status == 0, "Failed to list xattrs for target");
+    TEST_ASSERT(xattr_list_contains(xattrList, bytesWritten, "user.mime"), "Target xattr list missing user.mime");
+    TEST_ASSERT(xattr_list_contains(xattrList, bytesWritten, "user.empty"), "Target xattr list missing user.empty");
+
+    status = vafs_path_getxattr(vafs, "/meta/xattr_target", "user.mime", NULL, 0, &bytesWritten);
+    TEST_ASSERT(status == 0, "Failed to query mime xattr size");
+    TEST_ASSERT(bytesWritten == strlen("text/plain"), "Mime xattr size did not round-trip");
+
+    memset(valueBuffer, 0, sizeof(valueBuffer));
+    status = vafs_path_getxattr(vafs, "/meta/xattr_alias", "user.mime", valueBuffer, sizeof(valueBuffer), &bytesWritten);
+    TEST_ASSERT(status == 0, "Failed to get mime xattr through hardlink alias");
+    TEST_ASSERT(bytesWritten == strlen("text/plain"), "Alias mime xattr size did not round-trip");
+    TEST_ASSERT(strcmp(valueBuffer, "text/plain") == 0, "Alias mime xattr value did not round-trip");
+
+    status = vafs_path_getxattr(vafs, "/meta/xattr_target", "user.empty", NULL, 0, &bytesWritten);
+    TEST_ASSERT(status == 0, "Failed to query empty xattr size");
+    TEST_ASSERT(bytesWritten == 0, "Empty xattr size should round-trip as zero");
+
+    status = vafs_path_getxattr(vafs, "/meta", "user.kind", valueBuffer, sizeof(valueBuffer), &bytesWritten);
+    TEST_ASSERT(status == 0, "Failed to get directory xattr");
+    TEST_ASSERT(bytesWritten == strlen("meta"), "Directory xattr size did not round-trip");
+    TEST_ASSERT(memcmp(valueBuffer, "meta", bytesWritten) == 0, "Directory xattr value did not round-trip");
+
+    vafs_close(vafs);
+    remove(TEST_IMAGE_PATH);
+
+    TEST_PASS("Xattrs survive descriptor-stream sidecar round-trip");
+}
+
 static int test_wide_directory_lookup(void)
 {
     struct VaFs* vafs = NULL;
@@ -786,6 +926,7 @@ int main(int argc, char** argv)
     test_metadata_roundtrip();
     test_special_roundtrip();
     test_hardlink_roundtrip();
+    test_xattr_roundtrip();
     test_wide_directory_lookup();
 
     printf("\n========================================\n");

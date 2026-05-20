@@ -111,6 +111,7 @@ void vafs_symlink_destroy(
         return;
     }
 
+    __vafs_xattr_set_destroy(symlink->Xattrs);
     free((void*)symlink->Name);
     free((void*)symlink->Target);
     free(symlink);
