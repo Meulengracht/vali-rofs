@@ -113,10 +113,10 @@ void benchmark_print_result(const BenchmarkResult* result)
         printf("Warmup:        %" PRIu64 "\n", result->warmup_iterations);
     }
     printf("Iterations:    %" PRIu64 "\n", result->iterations);
-    printf("Total time:    %.3f ms\n", result->total_time_ms);
-    printf("Average time:  %.3f ms\n", result->avg_time_ms);
-    printf("Min time:      %.3f ms\n", result->min_time_ms);
-    printf("Max time:      %.3f ms\n", result->max_time_ms);
+    printf("Total time:    %.6f ms\n", result->total_time_ms);
+    printf("Average time:  %.6f ms\n", result->avg_time_ms);
+    printf("Min time:      %.6f ms\n", result->min_time_ms);
+    printf("Max time:      %.6f ms\n", result->max_time_ms);
 
     if (result->bytes_processed > 0) {
         printf("Bytes:         %" PRIu64 "\n", result->bytes_processed);
@@ -132,10 +132,10 @@ void benchmark_print_result_json(const BenchmarkResult* result, int is_last)
     printf(",\n");
     printf("    \"warmup_iterations\": %" PRIu64 ",\n", result->warmup_iterations);
     printf("    \"iterations\": %" PRIu64 ",\n", result->iterations);
-    printf("    \"total_time_ms\": %.3f,\n", result->total_time_ms);
-    printf("    \"avg_time_ms\": %.3f,\n", result->avg_time_ms);
-    printf("    \"min_time_ms\": %.3f,\n", result->min_time_ms);
-    printf("    \"max_time_ms\": %.3f", result->max_time_ms);
+    printf("    \"total_time_ms\": %.6f,\n", result->total_time_ms);
+    printf("    \"avg_time_ms\": %.6f,\n", result->avg_time_ms);
+    printf("    \"min_time_ms\": %.6f,\n", result->min_time_ms);
+    printf("    \"max_time_ms\": %.6f", result->max_time_ms);
 
     if (result->bytes_processed > 0) {
         printf(",\n");
@@ -153,7 +153,7 @@ void benchmark_print_result_csv(const BenchmarkResult* result, int print_header)
     if (print_header) {
         printf("name,warmup_iterations,iterations,total_time_ms,avg_time_ms,min_time_ms,max_time_ms,bytes_processed,throughput_mbps\n");
     }
-    printf("%s,%" PRIu64 ",%" PRIu64 ",%.3f,%.3f,%.3f,%.3f,%" PRIu64 ",%.2f\n",
+    printf("%s,%" PRIu64 ",%" PRIu64 ",%.6f,%.6f,%.6f,%.6f,%" PRIu64 ",%.2f\n",
            result->name,
            result->warmup_iterations,
            result->iterations,
