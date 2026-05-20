@@ -18,8 +18,10 @@
 
 #include "utils.h"
 
+#include <stddef.h>
 #include <errno.h>
 #include <vafs/stat.h>
+#include <vafs/xattr.h>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <Windows.h>
@@ -30,10 +32,27 @@
 #else
 #include <sys/types.h>
 #include <sys/stat.h>
+#if defined(__linux__) || defined(__APPLE__)
+#include <sys/xattr.h>
+#endif
 #if defined(__linux__)
 #include <sys/sysmacros.h>
 #endif
 #endif
+
+#if defined(ENOATTR) && !defined(ENODATA)
+#define VAFS_XATTR_ENOATTR ENOATTR
+#else
+#define VAFS_XATTR_ENOATTR ENODATA
+#endif
+
+typedef ptrdiff_t platform_xattr_ssize_t;
+
+// The tool layer needs the library's internal non-following xattr path hooks
+// for symlink packaging/extraction, but not the rest of libvafs/private.h.
+extern int __vafs_path_listxattr(struct VaFs* vafs, const char* path, int followLinks, char* buffer, size_t bufferSize, size_t* bytesWritten);
+extern int __vafs_path_getxattr(struct VaFs* vafs, const char* path, int followLinks, const char* name, void* value, size_t valueSize, size_t* bytesWritten);
+extern int __vafs_path_setxattr(struct VaFs* vafs, const char* path, int followLinks, const char* name, const void* value, size_t valueSize);
 
 static uint64_t __platform_fs_make_object_id(
     const struct stat* st)
@@ -123,6 +142,330 @@ int platform_fs_mode_is_special(uint32_t mode)
 uint32_t platform_fs_mode_permissions(uint32_t mode)
 {
     return mode & 07777u;
+}
+
+static void __platform_fs_normalize_xattr_errno(void)
+{
+    if (errno == VAFS_XATTR_ENOATTR) {
+        errno = ENODATA;
+    }
+}
+
+static platform_xattr_ssize_t __platform_fs_listxattr(
+    const char* path,
+    int         followLinks,
+    char*       buffer,
+    size_t      bufferSize)
+{
+#if defined(_WIN32) || defined(_WIN64)
+    (void)path;
+    (void)followLinks;
+    (void)buffer;
+    (void)bufferSize;
+    errno = ENOTSUP;
+    return -1;
+#elif defined(__linux__)
+    return followLinks ?
+        listxattr(path, buffer, bufferSize) :
+        llistxattr(path, buffer, bufferSize);
+#elif defined(__APPLE__)
+    return listxattr(path, buffer, bufferSize, followLinks ? 0 : XATTR_NOFOLLOW);
+#else
+    (void)path;
+    (void)followLinks;
+    (void)buffer;
+    (void)bufferSize;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
+static platform_xattr_ssize_t __platform_fs_getxattr(
+    const char* path,
+    const char* name,
+    int         followLinks,
+    void*       value,
+    size_t      valueSize)
+{
+#if defined(_WIN32) || defined(_WIN64)
+    (void)path;
+    (void)name;
+    (void)followLinks;
+    (void)value;
+    (void)valueSize;
+    errno = ENOTSUP;
+    return -1;
+#elif defined(__linux__)
+    return followLinks ?
+        getxattr(path, name, value, valueSize) :
+        lgetxattr(path, name, value, valueSize);
+#elif defined(__APPLE__)
+    return getxattr(path, name, value, valueSize, 0, followLinks ? 0 : XATTR_NOFOLLOW);
+#else
+    (void)path;
+    (void)name;
+    (void)followLinks;
+    (void)value;
+    (void)valueSize;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
+static int __platform_fs_setxattr(
+    const char* path,
+    const char* name,
+    int         followLinks,
+    const void* value,
+    size_t      valueSize)
+{
+    static const char g_emptyValue = '\0';
+    const void*       payload = valueSize != 0 ? value : &g_emptyValue;
+
+#if defined(_WIN32) || defined(_WIN64)
+    (void)path;
+    (void)name;
+    (void)followLinks;
+    (void)payload;
+    (void)valueSize;
+    errno = ENOTSUP;
+    return -1;
+#elif defined(__linux__)
+    return followLinks ?
+        setxattr(path, name, payload, valueSize, 0) :
+        lsetxattr(path, name, payload, valueSize, 0);
+#elif defined(__APPLE__)
+    return setxattr(path, name, payload, valueSize, 0, followLinks ? 0 : XATTR_NOFOLLOW);
+#else
+    (void)path;
+    (void)name;
+    (void)followLinks;
+    (void)payload;
+    (void)valueSize;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
+static int __vafs_listxattr(
+    struct VaFs* vafs,
+    const char*  path,
+    int          followLinks,
+    char*        buffer,
+    size_t       bufferSize,
+    size_t*      bytesWritten)
+{
+    return followLinks ?
+        vafs_path_listxattr(vafs, path, buffer, bufferSize, bytesWritten) :
+        __vafs_path_listxattr(vafs, path, 0, buffer, bufferSize, bytesWritten);
+}
+
+static int __vafs_getxattr(
+    struct VaFs* vafs,
+    const char*  path,
+    int          followLinks,
+    const char*  name,
+    void*        value,
+    size_t       valueSize,
+    size_t*      bytesWritten)
+{
+    return followLinks ?
+        vafs_path_getxattr(vafs, path, name, value, valueSize, bytesWritten) :
+        __vafs_path_getxattr(vafs, path, 0, name, value, valueSize, bytesWritten);
+}
+
+static int __vafs_setxattr(
+    struct VaFs* vafs,
+    const char*  path,
+    int          followLinks,
+    const char*  name,
+    const void*  value,
+    size_t       valueSize)
+{
+    return followLinks ?
+        vafs_path_setxattr(vafs, path, name, value, valueSize) :
+        __vafs_path_setxattr(vafs, path, 0, name, value, valueSize);
+}
+
+int platform_fs_xattr_error_is_nonfatal(int error)
+{
+    return error == EACCES ||
+        error == EPERM ||
+        error == ENOTSUP ||
+        error == ENOSYS;
+}
+
+int platform_fs_import_xattrs(
+    struct VaFs* vafs,
+    const char*  imagePath,
+    const char*  hostPath,
+    int          followLinks)
+{
+    char*                names = NULL;
+    platform_xattr_ssize_t namesLength;
+    size_t               offset = 0;
+
+    if (vafs == NULL || imagePath == NULL || hostPath == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    // Probe first because host xattr name lists are variable-length and the
+    // builder should size one buffer to the exact host answer.
+    namesLength = __platform_fs_listxattr(hostPath, followLinks, NULL, 0);
+    if (namesLength < 0) {
+        __platform_fs_normalize_xattr_errno();
+        if (errno == ENODATA) {
+            return 0;
+        }
+        return -1;
+    }
+    if (namesLength == 0) {
+        return 0;
+    }
+
+    names = malloc((size_t)namesLength);
+    if (names == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    namesLength = __platform_fs_listxattr(hostPath, followLinks, names, (size_t)namesLength);
+    if (namesLength < 0) {
+        __platform_fs_normalize_xattr_errno();
+        free(names);
+        return -1;
+    }
+
+    while (offset < (size_t)namesLength) {
+        const char* name = names + offset;
+        size_t      nameLength = strlen(name);
+        void*       value = NULL;
+        platform_xattr_ssize_t valueLength;
+        int         status;
+
+        // Fetch each value in two steps so empty xattrs round-trip cleanly and
+        // this helper never bakes in an arbitrary host-side size ceiling.
+        valueLength = __platform_fs_getxattr(hostPath, name, followLinks, NULL, 0);
+        if (valueLength < 0) {
+            __platform_fs_normalize_xattr_errno();
+            free(names);
+            return -1;
+        }
+
+        if (valueLength != 0) {
+            value = malloc((size_t)valueLength);
+            if (value == NULL) {
+                free(names);
+                errno = ENOMEM;
+                return -1;
+            }
+
+            valueLength = __platform_fs_getxattr(hostPath, name, followLinks, value, (size_t)valueLength);
+            if (valueLength < 0) {
+                __platform_fs_normalize_xattr_errno();
+                free(value);
+                free(names);
+                return -1;
+            }
+        }
+
+        // Preserve the caller's follow policy so packaging can intentionally
+        // target the symlink object itself instead of its resolved destination.
+        status = __vafs_setxattr(vafs, imagePath, followLinks, name, value, (size_t)valueLength);
+        free(value);
+        if (status != 0) {
+            free(names);
+            return -1;
+        }
+
+        offset += nameLength + 1;
+    }
+
+    free(names);
+    return 0;
+}
+
+int platform_fs_export_xattrs(
+    struct VaFs* vafs,
+    const char*  imagePath,
+    const char*  hostPath,
+    int          followLinks)
+{
+    char*  names = NULL;
+    size_t namesLength;
+    size_t offset = 0;
+    int    status;
+
+    if (vafs == NULL || imagePath == NULL || hostPath == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    // Mirror the POSIX size-probe pattern on the image side so extraction does
+    // not guess at how much metadata a particular entry carries.
+    status = __vafs_listxattr(vafs, imagePath, followLinks, NULL, 0, &namesLength);
+    if (status != 0 || namesLength == 0) {
+        return status;
+    }
+
+    names = malloc(namesLength);
+    if (names == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    status = __vafs_listxattr(vafs, imagePath, followLinks, names, namesLength, &namesLength);
+    if (status != 0) {
+        free(names);
+        return -1;
+    }
+
+    while (offset < namesLength) {
+        const char* name = names + offset;
+        size_t      nameLength = strlen(name);
+        size_t      valueLength;
+        void*       value = NULL;
+
+        // Image xattr values are also variable-length, so extraction probes
+        // first and only allocates when there is real payload to restore.
+        status = __vafs_getxattr(vafs, imagePath, followLinks, name, NULL, 0, &valueLength);
+        if (status != 0) {
+            free(names);
+            return -1;
+        }
+
+        if (valueLength != 0) {
+            value = malloc(valueLength);
+            if (value == NULL) {
+                free(names);
+                errno = ENOMEM;
+                return -1;
+            }
+
+            status = __vafs_getxattr(vafs, imagePath, followLinks, name, value, valueLength, &valueLength);
+            if (status != 0) {
+                free(value);
+                free(names);
+                return -1;
+            }
+        }
+
+        // Reuse the same follow policy that resolved the image entry so
+        // symlink-object xattrs do not collapse onto the target during export.
+        if (__platform_fs_setxattr(hostPath, name, followLinks, value, valueLength) != 0) {
+            __platform_fs_normalize_xattr_errno();
+            free(value);
+            free(names);
+            return -1;
+        }
+
+        free(value);
+        offset += nameLength + 1;
+    }
+
+    free(names);
+    return 0;
 }
 
 int platform_fs_read_metadata(const char* path, struct VaFsMetadata* metadata)

@@ -268,6 +268,8 @@ int vafs_directory_create_root(
 
     directory->Base.VaFs = vafs;
     directory->Base.Name = strdup("root");
+    // The root descriptor position is only known after the whole root payload
+    // has been flushed, because that standalone descriptor is emitted last.
     directory->Base.DescriptorPosition.Index = VA_FS_INVALID_BLOCK;
     directory->Base.DescriptorPosition.Offset = VA_FS_INVALID_OFFSET;
     directory->Index = NULL;
@@ -889,6 +891,8 @@ static struct VaFsDirectory* __create_directory_from_descriptor(
     }
 
     memcpy(&directory->Base.Descriptor, descriptor, sizeof(VaFsDirectoryDescriptor_t));
+    // Non-root directories are discovered through a parent entry, so they do
+    // not need a second header-facing descriptor anchor once reopened.
     directory->Base.DescriptorPosition.Index = VA_FS_INVALID_BLOCK;
     directory->Base.DescriptorPosition.Offset = VA_FS_INVALID_OFFSET;
 
@@ -956,6 +960,9 @@ static struct VaFsSpecial* __create_special_from_descriptor(
         (enum VaFsEntryType)descriptor->EntryType,
         0,
         &special->Stat
+        // Peek only at the first descriptor header so the reader can distinguish
+        // the new "header -> root descriptor" layout from the older
+        // "header -> root child list" layout without forking the whole loader.
     );
     special->StatCached = 1;
     return special;
@@ -1160,6 +1167,8 @@ int vafs_directory_open_root(
 
     if (descriptorBase.Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY &&
         descriptorBase.Length >= sizeof(VaFsDirectoryDescriptor_t)) {
+        // New images persist root exactly like any other directory, so reuse
+        // the normal directory-descriptor materialization path when possible.
         memset(&probe, 0, sizeof(struct VaFsDirectoryReader));
         probe.Base.VaFs = vafs;
         probe.Reader = streamReader;
@@ -1192,6 +1201,9 @@ int vafs_directory_open_root(
     }
 
     vafs_stream_reader_close(streamReader);
+    // Fall back to the synthetic root wrapper only for legacy images whose
+    // header points straight at the child list. That preserves older layouts
+    // without forcing the rest of the codebase to carry two root models.
     
     reader = (struct VaFsDirectoryReader*)calloc(1, sizeof(struct VaFsDirectoryReader));
     if (!reader) {
@@ -1209,7 +1221,8 @@ int vafs_directory_open_root(
     __initialize_root_metadata(&reader->Base.Stat);
     reader->Base.StatCached = 1;
     
-    // initialize the root descriptor for the directory
+    // Legacy fallback keeps the descriptor payload position aimed at the child
+    // list because there is no standalone root descriptor to reopen.
     reader->Base.Descriptor.Base.Length = sizeof(VaFsDirectoryDescriptor_t);
     reader->Base.Descriptor.Base.Type   = VA_FS_DESCRIPTOR_TYPE_DIRECTORY;
     reader->Base.Descriptor.Descriptor.Index = position->Index;
@@ -1580,9 +1593,13 @@ int vafs_directory_write_root_descriptor(
 
     // The root has no parent entry to carry its metadata, so it gets one final
     // standalone hot descriptor that the image header can point at directly.
+    // That descriptor is written after the child list so its directory pointer
+    // can name the already-flushed root payload with final coordinates.
     directory->DescriptorPosition.Index = block;
     directory->DescriptorPosition.Offset = offset;
 
+    // Reuse the ordinary directory descriptor writer so root stays subject to
+    // the same metadata finalization rules as every non-root directory entry.
     memset(&entry, 0, sizeof(struct VaFsDirectoryEntry));
     entry.Type = VA_FS_DESCRIPTOR_TYPE_DIRECTORY;
     entry.Directory = directory;
@@ -1600,9 +1617,9 @@ int vafs_directory_flush(
     uint32_t                    offset;
     VAFS_DEBUG("vafs_directory_flush(name=%s)\n", directory->Name);
 
-    // We must flush all subdirectories first to initialize their
-    // index and offset. Otherwise, we will be writing empty descriptors
-    // for subdirectories.
+    // Parent descriptors must point at already-stable child coordinates, so
+    // nested directories flush first and only then can this directory name
+    // their final descriptor positions.
     entry = writer->Entries;
     while (entry != NULL) {
         if (entry->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
@@ -1626,6 +1643,9 @@ int vafs_directory_flush(
         return status;
     }
 
+    // Record where this directory's child list begins before emitting it so
+    // parent descriptors, and the later root-descriptor pass, can reference
+    // the finalized payload instead of a placeholder location.
     directory->Descriptor.Descriptor.Index  = block;
     directory->Descriptor.Descriptor.Offset = offset;
     VAFS_DEBUG("vafs_directory_flush  name=%s index=%d offset=%d\n", directory->Name, block, offset);
@@ -1636,7 +1656,8 @@ int vafs_directory_flush(
         return status;
     }
 
-    // now we actually write all the descriptors
+    // Emit the contiguous child descriptor list only after the header is in
+    // place so readers can trust the recorded entry count while walking it.
     entry = writer->Entries;
     while (entry != NULL) {
         VAFS_DEBUG("vafs_directory_flush: writing entry=%s, type=%i\n",

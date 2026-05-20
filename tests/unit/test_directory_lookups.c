@@ -752,6 +752,87 @@ static int test_root_xattr_roundtrip(void)
     TEST_PASS("Root xattrs survive a real persisted root descriptor");
 }
 
+static int test_symlink_xattr_nofollow_roundtrip(void)
+{
+    struct VaFs* vafs = NULL;
+    struct VaFsConfiguration config;
+    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsDirectoryHandle* meta = NULL;
+    struct VaFsFileHandle* file_handle = NULL;
+    struct VaFsMetadata dirMetadata = metadata_for_mode(VaFsEntryType_Directory, 0755);
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
+    struct VaFsMetadata symlinkMetadata = metadata_for_mode(VaFsEntryType_Symlink, 0777);
+    struct VaFsMetadata statbuf;
+    char xattrList[64];
+    char valueBuffer[32];
+    size_t bytesWritten = 0;
+    int status;
+
+    vafs_config_initialize(&config);
+    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    TEST_ASSERT(status == 0, "Failed to create symlink xattr test image");
+
+    status = vafs_directory_open(vafs, "/", &root);
+    TEST_ASSERT(status == 0, "Failed to open root directory for symlink xattr test");
+
+    status = vafs_directory_create_directory(root, "meta", &dirMetadata, &meta);
+    TEST_ASSERT(status == 0, "Failed to create symlink xattr test directory");
+
+    status = vafs_directory_create_file(meta, "target", &fileMetadata, &file_handle);
+    TEST_ASSERT(status == 0, "Failed to create symlink xattr target file");
+    status = vafs_file_write(file_handle, (void*)"payload", strlen("payload"));
+    TEST_ASSERT(status == 0, "Failed to write symlink xattr target payload");
+    vafs_file_close(file_handle);
+    file_handle = NULL;
+
+    status = vafs_directory_create_symlink(meta, "link", "/meta/target", &symlinkMetadata);
+    TEST_ASSERT(status == 0, "Failed to create symlink xattr test link");
+
+    status = vafs_path_setxattr(vafs, "/meta/target", "user.target", "file", strlen("file"));
+    TEST_ASSERT(status == 0, "Failed to set target xattr");
+
+    status = __vafs_path_setxattr(vafs, "/meta/link", 0, "user.link", "symlink", strlen("symlink"));
+    TEST_ASSERT(status == 0, "Failed to set symlink-object xattr");
+
+    vafs_directory_close(meta);
+    meta = NULL;
+    vafs_directory_close(root);
+    root = NULL;
+    vafs_close(vafs);
+    vafs = NULL;
+
+    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    TEST_ASSERT(status == 0, "Failed to reopen symlink xattr test image");
+
+    status = vafs_path_stat(vafs, "/meta/link", 0, &statbuf);
+    TEST_ASSERT(status == 0, "Failed to stat symlink path in nofollow mode");
+    TEST_ASSERT(statbuf.Type == VaFsEntryType_Symlink, "Nofollow stat should preserve the symlink entry type");
+    TEST_ASSERT(statbuf.XattrCount == 1, "Nofollow stat should expose symlink-object xattrs");
+
+    memset(valueBuffer, 0, sizeof(valueBuffer));
+    status = vafs_path_getxattr(vafs, "/meta/link", "user.target", valueBuffer, sizeof(valueBuffer), &bytesWritten);
+    TEST_ASSERT(status == 0, "Failed to resolve target xattr through public symlink path");
+    TEST_ASSERT(bytesWritten == strlen("file"), "Follow-mode symlink xattr size did not round-trip");
+    TEST_ASSERT(memcmp(valueBuffer, "file", bytesWritten) == 0, "Follow-mode symlink xattr value did not round-trip");
+
+    memset(xattrList, 0, sizeof(xattrList));
+    status = __vafs_path_listxattr(vafs, "/meta/link", 0, xattrList, sizeof(xattrList), &bytesWritten);
+    TEST_ASSERT(status == 0, "Failed to list symlink-object xattrs in nofollow mode");
+    TEST_ASSERT(xattr_list_contains(xattrList, bytesWritten, "user.link"), "Nofollow xattr list missing symlink-object entry");
+    TEST_ASSERT(!xattr_list_contains(xattrList, bytesWritten, "user.target"), "Nofollow xattr list should not include target xattrs");
+
+    memset(valueBuffer, 0, sizeof(valueBuffer));
+    status = __vafs_path_getxattr(vafs, "/meta/link", 0, "user.link", valueBuffer, sizeof(valueBuffer), &bytesWritten);
+    TEST_ASSERT(status == 0, "Failed to read symlink-object xattr in nofollow mode");
+    TEST_ASSERT(bytesWritten == strlen("symlink"), "Nofollow symlink xattr size did not round-trip");
+    TEST_ASSERT(memcmp(valueBuffer, "symlink", bytesWritten) == 0, "Nofollow symlink xattr value did not round-trip");
+
+    vafs_close(vafs);
+    remove(TEST_IMAGE_PATH);
+
+    TEST_PASS("Symlink-object xattrs stay distinct from target xattrs in nofollow mode");
+}
+
 static int test_wide_directory_lookup(void)
 {
     struct VaFs* vafs = NULL;
@@ -1009,6 +1090,7 @@ int main(int argc, char** argv)
     test_hardlink_roundtrip();
     test_xattr_roundtrip();
     test_root_xattr_roundtrip();
+    test_symlink_xattr_nofollow_roundtrip();
     test_wide_directory_lookup();
 
     printf("\n========================================\n");

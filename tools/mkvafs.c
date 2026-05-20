@@ -142,6 +142,65 @@ static const char* __get_filename(
     return filename;
 }
 
+static char* __image_path_for_subpath(
+    const char* subPath)
+{
+    char* imagePath;
+
+    if (subPath == NULL) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    // Discovery tracks host-relative paths, but the library metadata APIs use
+    // absolute archive paths, so normalize once here before xattr import.
+    if (subPath[0] == '\0') {
+        return strdup("/");
+    }
+
+    imagePath = malloc(strlen(subPath) + 2);
+    if (imagePath == NULL) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    sprintf(imagePath, "/%s", subPath);
+    return imagePath;
+}
+
+static int __try_import_xattrs(
+    struct VaFs* vafs,
+    const char*  imagePath,
+    const char*  hostPath,
+    int          followLinks)
+{
+    int status;
+
+    status = platform_fs_import_xattrs(vafs, imagePath, hostPath, followLinks);
+    if (status == 0) {
+        return 0;
+    }
+
+    // Xattrs are optional host metadata during image creation, so missing host
+    // support stays silent while permission failures downgrade to warnings.
+    if (errno == ENOTSUP || errno == ENOSYS) {
+        return 0;
+    }
+    if (errno == EACCES || errno == EPERM) {
+        fprintf(stderr,
+            "mkvafs: warning: skipping xattrs for '%s' (%s)\n",
+            hostPath,
+            strerror(errno));
+        return 0;
+    }
+
+    fprintf(stderr,
+        "mkvafs: failed to import xattrs for '%s' (%s)\n",
+        hostPath,
+        strerror(errno));
+    return -1;
+}
+
 static void __write_progress(const char* prefix, struct progress_context* context)
 {
     static int last = 0;
@@ -732,6 +791,7 @@ static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, con
     
     char        temp[4096] = { 0 };
     char        full[4096] = { 0 };
+    char        image[4096] = { 0 };
     char*       last;
     char*       st;
     const char* token = relative;
@@ -755,6 +815,8 @@ static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, con
     memcpy(&temp[0], token, (size_t)(st - token));
     temp[(size_t)(st - token)] = 0;
     strcat(&full[0], &temp[0]);
+    strcat(&image[0], "/");
+    strcat(&image[0], &temp[0]);
 
     for (;;) {
         struct VaFsDirectoryHandle* next;
@@ -776,6 +838,13 @@ static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, con
                 fprintf(stderr, "mkvafs: failed to create directory %s\n", &temp[0]);
                 return NULL;
             }
+
+            // Implicit parent directories may never surface as standalone
+            // discovery entries, so their xattrs must be imported at creation.
+            status = __try_import_xattrs(vafs, &image[0], &full[0], 1);
+            if (status != 0) {
+                return NULL;
+            }
         }
 
         // yay, next token
@@ -792,6 +861,8 @@ static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, con
         temp[(size_t)(st - token)] = 0;
         strcat(&full[0], "/");
         strcat(&full[0], &temp[0]);
+        strcat(&image[0], "/");
+        strcat(&image[0], &temp[0]);
     }
     return handle;
 }
@@ -858,6 +929,31 @@ static int __create_image(struct __options* opts)
         return status;
     }
 
+    if (opts->paths_count == 1) {
+        char*    rootPath = symlink_utils_abspath(opts->paths[0]);
+        uint32_t filemode;
+
+        // Only a single input directory maps unambiguously to image root.
+        // Multi-root archives intentionally skip root xattr import because no
+        // host path has a principled claim to win for '/'.
+        if (rootPath == NULL) {
+            vafs_close(vafsHandle);
+            return -1;
+        }
+
+        if (symlink_utils_ministat(rootPath, &filemode) == 0 &&
+            platform_fs_mode_is_directory(filemode)) {
+            status = __try_import_xattrs(vafsHandle, "/", rootPath, 1);
+            free(rootPath);
+            if (status != 0) {
+                vafs_close(vafsHandle);
+                return status;
+            }
+        } else {
+            free(rootPath);
+        }
+    }
+
     // Install per-stream filter policy before writing entries so every emitted
     // descriptor and data block uses the requested callbacks.
     if (opts->descriptor_compression != NULL || opts->data_compression != NULL) {
@@ -872,11 +968,19 @@ static int __create_image(struct __options* opts)
     list_foreach(&progressContext.file_list, it) {
         struct platform_file_entry* entry = (struct platform_file_entry*)it;
         struct VaFsDirectoryHandle* directoryHandle;
+        char*                       imagePath;
         __write_progress(entry->sub_path, &progressContext);
+
+        imagePath = __image_path_for_subpath(entry->sub_path);
+        if (imagePath == NULL) {
+            status = -1;
+            break;
+        }
 
         directoryHandle = __get_directory_handle(vafsHandle, entry->path, entry->sub_path);
         if (directoryHandle == NULL) {
             fprintf(stderr, "mkvafs: failed to get internal directory handle for %s\n", entry->sub_path);
+            free(imagePath);
             break;
         }
 
@@ -895,6 +999,15 @@ static int __create_image(struct __options* opts)
 
             if (status != 0) {
                 fprintf(stderr, "mkvafs: failed to create symlink %s\n", entry->path);
+                free(imagePath);
+                break;
+            }
+
+            // Host symlink xattrs belong to the link object itself, so import
+            // them in nofollow mode after the archive link has been created.
+            status = __try_import_xattrs(vafsHandle, imagePath, entry->path, 0);
+            if (status != 0) {
+                free(imagePath);
                 break;
             }
             progressContext.symlinks++;
@@ -902,6 +1015,15 @@ static int __create_image(struct __options* opts)
             status = __write_special(directoryHandle, entry->path, entry->name);
             if (status != 0) {
                 fprintf(stderr, "mkvafs: unable to write special entry %s\n", entry->path);
+                free(imagePath);
+                break;
+            }
+
+            // Special entries have no separate target object, so the normal
+            // follow behavior is the correct archive-side match once created.
+            status = __try_import_xattrs(vafsHandle, imagePath, entry->path, 1);
+            if (status != 0) {
+                free(imagePath);
                 break;
             }
             progressContext.specials++;
@@ -911,6 +1033,7 @@ static int __create_image(struct __options* opts)
             status = platform_fs_read_metadata(entry->path, &metadata);
             if (status) {
                 fprintf(stderr, "mkvafs: cannot stat file/directory: %s\n", entry->path);
+                free(imagePath);
                 break;
             }
 
@@ -922,6 +1045,11 @@ static int __create_image(struct __options* opts)
                 status = vafs_directory_create_hardlink(directoryHandle, entry->name, metadata.ObjectId);
             } else {
                 status = __write_file(directoryHandle, entry->path, entry->name, &metadata);
+                if (status == 0) {
+                    // Shared host objects carry one xattr set, so only the
+                    // canonical payload-bearing path imports them into the image.
+                    status = __try_import_xattrs(vafsHandle, imagePath, entry->path, 1);
+                }
                 if (status == 0 && __metadata_needs_hardlink(&metadata)) {
                     status = __remember_hardlink_object(&hardlinkObjects, metadata.ObjectId);
                 }
@@ -929,12 +1057,14 @@ static int __create_image(struct __options* opts)
 
             if (status != 0) {
                 fprintf(stderr, "mkvafs: unable to write file %s\n", entry->path);
+                free(imagePath);
                 break;
             }
             progressContext.files++;
         } else {
             fprintf(stderr, "mkvafs: warning: skipping unsupported entry %s\n", entry->path);
         }
+        free(imagePath);
         __write_progress(entry->sub_path, &progressContext);
     }
     

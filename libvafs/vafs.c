@@ -739,6 +739,9 @@ static int __create_image(
         return -1;
     }
 
+    // Root metadata is written after the child list because only then does the
+    // root descriptor know the final location of that list, and before the cold
+    // xattr section so every hot descriptor stays in one contiguous descriptor region.
     status = vafs_directory_write_root_descriptor(vafs->RootDirectory);
     if (status) {
         VAFS_ERROR("Failed to write root descriptor: %i\n", status);

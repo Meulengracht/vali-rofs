@@ -117,6 +117,37 @@ static char* __combine_image_path(
     return buffer;
 }
 
+static int __try_export_xattrs(
+    struct VaFs* vafsHandle,
+    const char*  imagePath,
+    const char*  outputRoot,
+    const char*  hostPath,
+    int          followLinks)
+{
+    int status;
+
+    status = platform_fs_export_xattrs(vafsHandle, imagePath, hostPath, followLinks);
+    if (status == 0) {
+        return 0;
+    }
+
+    // Extraction should preserve image xattrs when possible, but host support
+    // and privilege gaps must not prevent the rest of the tree from unpacking.
+    if (platform_fs_xattr_error_is_nonfatal(errno)) {
+        fprintf(stderr,
+            "unmkvafs: warning: unable to restore xattrs for '%s' (%s)\n",
+            __get_relative_path(outputRoot, hostPath),
+            strerror(errno));
+        return 0;
+    }
+
+    fprintf(stderr,
+        "unmkvafs: failed to restore xattrs for '%s' (%s)\n",
+        __get_relative_path(outputRoot, hostPath),
+        strerror(errno));
+    return -1;
+}
+
 static int __is_nonfatal_special_create_error(
     int error)
 {
@@ -385,6 +416,13 @@ static int __extract_directory(
             fprintf(stderr, "unmkvafs: unable to create directory %s\n", path);
             return -1;
         }
+
+        // Restore directory xattrs as soon as the host node exists so the
+        // extracted tree exposes parent metadata before children are visited.
+        status = __try_export_xattrs(vafsHandle, imagePath, root, path, 1);
+        if (status != 0) {
+            return status;
+        }
     }
 
     do {
@@ -476,6 +514,15 @@ static int __extract_directory(
                 free(filepathBuffer);
                 return -1;
             }
+
+            // Symlink xattrs belong on the link object, so extraction must not
+            // follow the newly created host link to its target.
+            status = __try_export_xattrs(vafsHandle, imagePathBuffer, root, filepathBuffer, 0);
+            if (status != 0) {
+                free(imagePathBuffer);
+                free(filepathBuffer);
+                return status;
+            }
             progress->symlinks++;
         } else if (dp.Type == VaFsEntryType_CharacterDevice ||
             dp.Type == VaFsEntryType_BlockDevice ||
@@ -506,6 +553,16 @@ static int __extract_directory(
                     free(filepathBuffer);
                     return -1;
                 }
+            } else {
+                // Only restore xattrs after the host node exists; the warning
+                // path above intentionally skips this because there is no host
+                // object left to attach metadata to.
+                status = __try_export_xattrs(vafsHandle, imagePathBuffer, root, filepathBuffer, 1);
+                if (status != 0) {
+                    free(imagePathBuffer);
+                    free(filepathBuffer);
+                    return status;
+                }
             }
         } else {
             struct VaFsFileHandle* fileHandle;
@@ -532,6 +589,16 @@ static int __extract_directory(
                 free(imagePathBuffer);
                 free(filepathBuffer);
                 return -1;
+            }
+
+            // Restore xattrs before registering the path as the concrete source
+            // for later hardlink aliases so the first extracted inode carries
+            // the full shared metadata set.
+            status = __try_export_xattrs(vafsHandle, imagePathBuffer, root, filepathBuffer, 1);
+            if (status != 0) {
+                free(imagePathBuffer);
+                free(filepathBuffer);
+                return status;
             }
 
             status = __register_extracted_file(vafsHandle, progress, imagePathBuffer, filepathBuffer);

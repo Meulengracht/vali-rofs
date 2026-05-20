@@ -83,6 +83,7 @@ struct platform_string_item {
     const char*      value;
 };
 
+struct VaFs;
 struct VaFsMetadata;
 
 enum platform_filetype {
@@ -135,6 +136,9 @@ extern int platform_fs_create_directory(const char* path, uint32_t permissions);
 extern int platform_fs_create_hardlink(const char* targetPath, const char* path);
 extern int platform_fs_create_special(const char* path, const struct VaFsMetadata* metadata);
 extern int platform_fs_chmod(const char* path, uint32_t permissions);
+extern int platform_fs_xattr_error_is_nonfatal(int error);
+extern int platform_fs_import_xattrs(struct VaFs* vafs, const char* imagePath, const char* hostPath, int followLinks);
+extern int platform_fs_export_xattrs(struct VaFs* vafs, const char* imagePath, const char* hostPath, int followLinks);
 
 extern int symlink_utils_init(void);
 extern void symlink_utils_cleanup(void);

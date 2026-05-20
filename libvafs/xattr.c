@@ -31,6 +31,7 @@ static int __resolve_xattr_entry_internal(
     struct VaFs*                vafs,
     const char*                 path,
     struct VaFsDirectoryEntry** entryOut,
+    int                         followLinks,
     int                         symlinkDepth);
 
 static void __advance_block_position(
@@ -175,6 +176,7 @@ static int* __entry_xattr_loaded_slot(
 static int __resolve_xattr_entry(
     struct VaFs*                vafs,
     const char*                 path,
+    int                         followLinks,
     struct VaFsDirectoryEntry*  rootEntry,
     struct VaFsDirectoryEntry** entryOut)
 {
@@ -184,19 +186,22 @@ static int __resolve_xattr_entry(
     }
 
     if (__vafs_is_root_path(path)) {
+        // Xattr helpers are entry-centric, so root gets a transient directory
+        // entry wrapper instead of a separate root-only access path.
         memset(rootEntry, 0, sizeof(struct VaFsDirectoryEntry));
         rootEntry->Type = VA_FS_DESCRIPTOR_TYPE_DIRECTORY;
         rootEntry->Directory = vafs->RootDirectory;
         *entryOut = rootEntry;
         return 0;
     }
-    return __resolve_xattr_entry_internal(vafs, path, entryOut, 0);
+    return __resolve_xattr_entry_internal(vafs, path, entryOut, followLinks, 0);
 }
 
 static int __resolve_xattr_entry_internal(
     struct VaFs*            vafs,
     const char*             path,
     struct VaFsDirectoryEntry** entryOut,
+    int                     followLinks,
     int                     symlinkDepth)
 {
     struct VaFsDirectory*      currentDirectory;
@@ -246,6 +251,18 @@ static int __resolve_xattr_entry_internal(
         }
 
         if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
+            if (!followLinks) {
+                if (remainingPath[0] != '\0') {
+                    errno = ENOTDIR;
+                    return -1;
+                }
+
+                // Tooling needs a non-following mode so host symlink xattrs can
+                // bind to the link object itself instead of collapsing onto the target.
+                *entryOut = entry;
+                return 0;
+            }
+
             char* pathBuffer = malloc(VAFS_PATH_MAX);
             int   written;
             int   status;
@@ -269,7 +286,7 @@ static int __resolve_xattr_entry_internal(
                 return -1;
             }
 
-            status = __resolve_xattr_entry_internal(vafs, pathBuffer, entryOut, symlinkDepth + 1);
+            status = __resolve_xattr_entry_internal(vafs, pathBuffer, entryOut, followLinks, symlinkDepth + 1);
             free(pathBuffer);
             return status;
         }
@@ -460,6 +477,8 @@ static int __collect_directory_xattrs(
     struct VaFs*               vafs;
 
     vafs = directory->VaFs;
+    // Root now participates like any other directory so its xattr set can be
+    // assigned a stable hot index before the standalone root descriptor is emitted.
     if (includeDirectory && directory->Xattrs != NULL && directory->Xattrs->Count != 0) {
         if (__xattr_registry_add(vafs, directory->Xattrs) != 0) {
             return -1;
@@ -515,6 +534,7 @@ int __vafs_xattr_prepare_write(
 
     // Xattr sets are assigned stable section-local indices up front so the hot
     // descriptors can point at them before the colder section is serialized.
+    // That now includes the standalone root descriptor as well as named entries.
     return __collect_directory_xattrs(vafs->RootDirectory, 1);
 }
 
@@ -973,9 +993,10 @@ static size_t __listxattr_size(
     return size;
 }
 
-int vafs_path_listxattr(
+int __vafs_path_listxattr(
     struct VaFs* vafs,
     const char*  path,
+    int          followLinks,
     char*        buffer,
     size_t       bufferSize,
     size_t*      bytesWritten)
@@ -992,7 +1013,7 @@ int vafs_path_listxattr(
         return -1;
     }
 
-    status = __resolve_xattr_entry(vafs, path, &rootEntry, &entry);
+    status = __resolve_xattr_entry(vafs, path, followLinks, &rootEntry, &entry);
     if (status != 0) {
         return status;
     }
@@ -1029,9 +1050,20 @@ int vafs_path_listxattr(
     return 0;
 }
 
-int vafs_path_getxattr(
+int vafs_path_listxattr(
     struct VaFs* vafs,
     const char*  path,
+    char*        buffer,
+    size_t       bufferSize,
+    size_t*      bytesWritten)
+{
+    return __vafs_path_listxattr(vafs, path, 1, buffer, bufferSize, bytesWritten);
+}
+
+int __vafs_path_getxattr(
+    struct VaFs* vafs,
+    const char*  path,
+    int          followLinks,
     const char*  name,
     void*        value,
     size_t       valueSize,
@@ -1048,7 +1080,7 @@ int vafs_path_getxattr(
         return -1;
     }
 
-    status = __resolve_xattr_entry(vafs, path, &rootEntry, &entry);
+    status = __resolve_xattr_entry(vafs, path, followLinks, &rootEntry, &entry);
     if (status != 0) {
         return status;
     }
@@ -1083,9 +1115,21 @@ int vafs_path_getxattr(
     return 0;
 }
 
-int vafs_path_setxattr(
+int vafs_path_getxattr(
     struct VaFs* vafs,
     const char*  path,
+    const char*  name,
+    void*        value,
+    size_t       valueSize,
+    size_t*      bytesWritten)
+{
+    return __vafs_path_getxattr(vafs, path, 1, name, value, valueSize, bytesWritten);
+}
+
+int __vafs_path_setxattr(
+    struct VaFs* vafs,
+    const char*  path,
+    int          followLinks,
     const char*  name,
     const void*  value,
     size_t       valueSize)
@@ -1121,7 +1165,7 @@ int vafs_path_setxattr(
         return -1;
     }
 
-    status = __resolve_xattr_entry(vafs, path, &rootEntry, &entry);
+    status = __resolve_xattr_entry(vafs, path, followLinks, &rootEntry, &entry);
     if (status != 0) {
         return status;
     }
@@ -1153,4 +1197,14 @@ int vafs_path_setxattr(
     metadata->XattrCount = (*xattrSlot)->Count;
     metadata->Mask |= VaFsMetadataMask_XattrCount;
     return 0;
+}
+
+int vafs_path_setxattr(
+    struct VaFs* vafs,
+    const char*  path,
+    const char*  name,
+    const void*  value,
+    size_t       valueSize)
+{
+    return __vafs_path_setxattr(vafs, path, 1, name, value, valueSize);
 }

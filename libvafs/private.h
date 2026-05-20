@@ -886,6 +886,9 @@ extern int __vafs_directory_open_internal(struct VaFs* vafs, const char* path, s
  */
 extern int __vafs_file_open_internal(struct VaFs* vafs, const char* path, struct VaFsFileHandle** handleOut, int symlinkDepth);
 extern struct VaFsDirectoryEntry* __vafs_resolve_hardlink(struct VaFs* vafs, struct VaFsDirectoryEntry* entry);
+extern int __vafs_path_listxattr(struct VaFs* vafs, const char* path, int followLinks, char* buffer, size_t bufferSize, size_t* bytesWritten);
+extern int __vafs_path_getxattr(struct VaFs* vafs, const char* path, int followLinks, const char* name, void* value, size_t valueSize, size_t* bytesWritten);
+extern int __vafs_path_setxattr(struct VaFs* vafs, const char* path, int followLinks, const char* name, const void* value, size_t valueSize);
 extern int __vafs_xattr_prepare_write(struct VaFs* vafs);
 extern int __vafs_xattr_write_section(struct VaFs* vafs);
 extern void __vafs_xattr_store_destroy(struct VaFs* vafs);

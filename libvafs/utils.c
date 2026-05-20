@@ -137,6 +137,13 @@ int __vafs_resolve_symlink(
         return -1;
     }
 
+    // Absolute symlink targets define a fresh path from root, so preserving
+    // the traversed parent prefix would duplicate directories during follow-up
+    // resolution such as "/meta/link" -> "/meta/target".
+    if (symlinkTarget[0] == '/') {
+        j = 0;
+    }
+
     // now we resolve the final path by appending the symlink target,
     // while canonicalization of the final path
     for (i = 0; i < strlen(symlinkTarget) && j < bufferLength; i++) {
