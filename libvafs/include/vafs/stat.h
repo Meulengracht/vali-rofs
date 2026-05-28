@@ -26,6 +26,11 @@
 #include <vafs/platform.h>
 #include <string.h>
 
+/**
+ * @brief Metadata fields are opt-in so callers can distinguish "stored as zero" from
+ * "not available on this image or host" without needing per-platform sentinel
+ * values in the public struct.
+ */
 enum VaFsMetadataMask {
     VaFsMetadataMask_Type              = 1u << 0,
     VaFsMetadataMask_Mode              = 1u << 1,
@@ -43,16 +48,29 @@ enum VaFsMetadataMask {
     VaFsMetadataMask_WindowsAttributes = 1u << 13,
 };
 
+/**
+ * @brief Timestamps stay split into seconds and nanoseconds so the public API can
+ * round-trip persisted sub-second precision without depending on a host ABI.
+ */
 struct VaFsTimestamp {
     int64_t  Seconds;
     uint32_t Nanoseconds;
 };
 
+/**
+ * @brief Device identifiers remain decomposed so special-file metadata can keep the
+ * same major/minor model across POSIX and non-POSIX hosts.
+ */
 struct VaFsDeviceNumber {
     uint32_t Major;
     uint32_t Minor;
 };
 
+/**
+ * @brief VaFsMetadata is the single public metadata carrier used by stat-style APIs.
+ * The Mask field tells callers which members are meaningful for the current
+ * entry instead of forcing every image to synthesize unsupported attributes.
+ */
 struct VaFsMetadata {
     uint32_t                Mask;
     enum VaFsEntryType      Type;
@@ -68,6 +86,7 @@ struct VaFsMetadata {
     struct VaFsTimestamp    CTime;
     struct VaFsTimestamp    BirthTime;
     struct VaFsDeviceNumber Device;
+    // Raw Win32 FILE_ATTRIBUTE_* bits when that metadata is known.
     uint32_t                WindowsAttributes;
 };
 

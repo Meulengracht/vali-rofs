@@ -1089,20 +1089,20 @@ static int __load_directory(
     VAFS_INFO("__load_directory: reading %u entries\n", header.Count);
     for (uint32_t i = 0; i < header.Count; i++) {
         struct VaFsDirectoryEntry* entry;
-        char                       buffer[VA_FS_MAX_DESCRIPTOR_SIZE];
+        VaFsEntryDescriptorScratch_t descriptorScratch;
         char*                      extendedData = NULL;
         VAFS_INFO("__load_directory: reading entry %i/%u\n", i, header.Count);
         // Each loop iteration consumes one on-disk descriptor and immediately
         // converts it into the normalized in-memory entry type.
         
-        status = __read_descriptor(reader, &buffer[0], &extendedData);
+        status = __read_descriptor(reader, (char*)&descriptorScratch, &extendedData);
         if (status) {
             VAFS_ERROR("__load_directory: failed to read descriptor\n");
             return status;
         }
 
         // create a new entry
-        entry = __create_entry_from_descriptor(reader->Base.VaFs, (VaFsDescriptor_t*)&buffer[0], extendedData);
+        entry = __create_entry_from_descriptor(reader->Base.VaFs, &descriptorScratch.Base, extendedData);
         free(extendedData);
 
         if (!entry) {
@@ -1130,7 +1130,7 @@ int vafs_directory_open_root(
     struct VaFsDirectoryReader* reader;
     struct VaFsStreamReader*    streamReader;
     VaFsDescriptor_t            descriptorBase;
-    char                        buffer[VA_FS_MAX_DESCRIPTOR_SIZE];
+    VaFsEntryDescriptorScratch_t descriptorScratch;
     char*                       extendedData = NULL;
     int                         status;
     size_t                      read;
@@ -1179,7 +1179,7 @@ int vafs_directory_open_root(
             return status;
         }
 
-        status = __read_descriptor(&probe, &buffer[0], &extendedData);
+        status = __read_descriptor(&probe, (char*)&descriptorScratch, &extendedData);
         vafs_stream_reader_close(streamReader);
         if (status != 0) {
             free(extendedData);
@@ -1188,7 +1188,7 @@ int vafs_directory_open_root(
 
         *directoryOut = __create_directory_from_descriptor(
             vafs,
-            (VaFsDirectoryDescriptor_t*)&buffer[0],
+            &descriptorScratch.Directory,
             extendedData
         );
         free(extendedData);
