@@ -185,6 +185,10 @@ static int __resolve_xattr_entry(
         return -1;
     }
 
+    if (__vafs_ensure_root_open(vafs) != 0) {
+        return -1;
+    }
+
     if (__vafs_is_root_path(path)) {
         // Xattr helpers are entry-centric, so root gets a transient directory
         // entry wrapper instead of a separate root-only access path.

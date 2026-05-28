@@ -59,6 +59,10 @@ int vafs_symlink_open(
         return -1;
     }
 
+    if (__vafs_ensure_root_open(vafs) != 0) {
+        return -1;
+    }
+
     if (__vafs_is_root_path(path)) {
         errno = EISDIR;
         return -1;

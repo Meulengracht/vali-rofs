@@ -902,6 +902,18 @@ struct VaFsDirectoryEntry {
 extern int __vafs_is_root_path(const char* path);
 
 /**
+ * @brief Materializes the read-mode root directory on first use.
+ *
+ * Read-mode opens leave the root unopened until a path operation actually
+ * needs descriptor bytes so callers can install custom runtime filter
+ * callbacks immediately after `vafs_open_*` and before the first decode.
+ *
+ * @param[In] vafs Filesystem instance whose root should be available.
+ * @return 0 when the root is ready, otherwise -1 with `errno` set.
+ */
+extern int __vafs_ensure_root_open(struct VaFs* vafs);
+
+/**
  * @brief Extracts the next path component from a path string.
  *
  * Leading separators are skipped. The extracted component is copied into

@@ -159,8 +159,10 @@ VAFS_ONDISK_STRUCT(VaFsFeatureFilter, {
 /**
  * @brief Runtime filter callbacks used when a filesystem image is read or written through filtered streams.
  *
- * Install this feature after opening or creating an image and again when reopening that same image later.
- * The callback table is consumed at runtime and is not serialized into the on-disk image.
+ * Install this feature after opening or creating an image. When reopening a filtered image, install the
+ * callbacks after `vafs_open_*` returns and before the first directory, path, or file operation that would
+ * force descriptor-stream decode. The callback table is consumed at runtime and is not serialized into the
+ * on-disk image.
  */
 struct VaFsFeatureFilterOps {
     struct VaFsFeatureHeader Header;

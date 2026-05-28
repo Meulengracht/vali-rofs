@@ -225,7 +225,8 @@ static int __parse_known_features(
     struct VaFs* vafs)
 {
     // Persisted filter ids tell the reader which streams require runtime decode
-    // support, even before the actual callback table is installed.
+    // support. Read-mode open leaves the root lazy so callers can replace
+    // these placeholders with custom filter ops before the first root access.
     for (int i = 0; i < vafs->Header.FeatureCount; i++) {
         if (!__compare_guids(&vafs->Features[i]->Guid, &g_filterGuid)) {
             struct VaFsFeatureFilter* filter = (struct VaFsFeatureFilter*)vafs->Features[i];
@@ -240,19 +241,35 @@ static int __parse_known_features(
             }
 
             if (filter->DescriptorType != VaFsFilterType_None) {
-                // Fail fast if descriptor blocks require decode but no runtime
-                // filter ops have been supplied yet.
                 vafs_stream_set_filter(vafs->DescriptorStream, __default_fail_encode, __default_fail_decode);
             }
             if (filter->DataType != VaFsFilterType_None) {
-                // Apply the same guard independently to file-data blocks because
-                // the two streams may now use different filter policies.
+                // Apply the same placeholder independently to file-data blocks
+                // because descriptor and data streams can use different filters.
                 vafs_stream_set_filter(vafs->DataStream, __default_fail_encode, __default_fail_decode);
             }
         }
     }
 
     return 0;
+}
+
+int __vafs_ensure_root_open(
+    struct VaFs* vafs)
+{
+    if (vafs == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (vafs->RootDirectory != NULL) {
+        return 0;
+    }
+
+    // Read-mode images postpone root materialization so callers can install
+    // custom runtime filter callbacks immediately after open and before the
+    // first descriptor block is decoded.
+    return __initialize_root(vafs);
 }
 
 static int __load_features(
@@ -558,24 +575,21 @@ static int __new_vafs(
             vafs_destroy(vafs);
             return -1;
         }
-    }
 
-    status = __initialize_root(vafs);
-    if (status) {
-        VAFS_ERROR("__new_vafs: failed to initialize root directory: %i\n", status);
-        vafs_destroy(vafs);
-        return -1;
-    }
-
-    // Handle any known features that have been loaded
-    if (vafs->Mode == VaFsMode_Read) {
-        // Apply persisted policies after both streams exist so runtime filter
-        // placeholders land on the correct stream.
+        // Apply persisted stream policy before touching the root descriptor so
+        // filtered descriptor blocks can be materialized during root open.
         status = __parse_known_features(vafs);
         if (status) {
             VAFS_ERROR("__new_vafs: failed to parse known features: %i\n", status);
             vafs_destroy(vafs);
             return status;
+        }
+    } else {
+        status = __initialize_root(vafs);
+        if (status) {
+            VAFS_ERROR("__new_vafs: failed to initialize root directory: %i\n", status);
+            vafs_destroy(vafs);
+            return -1;
         }
     }
 

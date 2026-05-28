@@ -353,12 +353,15 @@ Application (unmkvafs / FUSE)
     │       │               ├─► Reads stream header from offset
     │       │               └─► Loads block headers table
     │       │
-    │       └─► Open root directory
-    │               └─► vafs_directory_open_root(vafs, &rootPosition, &rootDirectory)
-    │                       └─► Reads root directory descriptor from descriptor stream
+    │       └─► Parse persisted feature policy
+    │               └─► Marks filtered streams as requiring runtime decode before first root access
     │
     ├─► [Optional] vafs_feature_add(vafs, &filterOps)
-    │       └─► Sets decode function on streams for decompression/decryption
+    │       └─► Installs caller-supplied encode/decode functions on the descriptor/data streams
+    │
+    ├─► First directory/path/file operation
+    │       └─► Lazily opens root directory
+    │               └─► Reads root directory descriptor from descriptor stream using the installed runtime decode
     │
     └─► Ready for operations (file/directory access)
 ```

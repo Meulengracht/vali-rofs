@@ -23,6 +23,9 @@ static struct VaFsGuid g_filterGuid = VA_FS_FEATURE_FILTER;
 static struct VaFsGuid g_filterOpsGuid = VA_FS_FEATURE_FILTER_OPS;
 static int g_descriptor_encode_calls = 0;
 static int g_data_encode_calls = 0;
+static int g_custom_descriptor_decode_calls = 0;
+
+#define TEST_CUSTOM_DESCRIPTOR_FILTER_TYPE 0x56414653u
 
 struct ReadAtOnlyBuffer {
     const uint8_t* Data;
@@ -165,6 +168,149 @@ static int install_split_runtime_filters(struct VaFs* vafs)
     filterOps.DescriptorDecode = fail_decode;
     filterOps.DataEncode = data_expanding_encode;
     filterOps.DataDecode = fail_decode;
+    return vafs_feature_add(vafs, &filterOps.Header);
+}
+
+static int custom_descriptor_encode(void* input, uint32_t inputLength, void** output, uint32_t* outputLength)
+{
+    uint8_t* encoded;
+    uint32_t readOffset = 0;
+    uint32_t writeOffset = 0;
+
+    // This simple zero-run codec is intentionally custom to the test: it is
+    // good enough to shrink descriptor blocks that contain many zero-filled
+    // metadata fields, but libvafs must not know anything about how it works.
+    encoded = malloc((inputLength * 2u) + 2u);
+    if (encoded == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    while (readOffset < inputLength) {
+        uint32_t zeroRun = 0;
+
+        while ((readOffset + zeroRun) < inputLength &&
+               ((const uint8_t*)input)[readOffset + zeroRun] == 0 &&
+               zeroRun < 255u) {
+            zeroRun++;
+        }
+
+        if (zeroRun >= 4u) {
+            encoded[writeOffset++] = 0;
+            encoded[writeOffset++] = (uint8_t)zeroRun;
+            readOffset += zeroRun;
+            continue;
+        }
+
+        uint32_t literalStart = readOffset;
+        uint32_t literalLength = 0;
+
+        while (readOffset < inputLength && literalLength < 255u) {
+            zeroRun = 0;
+            while ((readOffset + zeroRun) < inputLength &&
+                   ((const uint8_t*)input)[readOffset + zeroRun] == 0 &&
+                   zeroRun < 4u) {
+                zeroRun++;
+            }
+
+            if (zeroRun >= 4u) {
+                break;
+            }
+
+            readOffset++;
+            literalLength++;
+        }
+
+        encoded[writeOffset++] = 1;
+        encoded[writeOffset++] = (uint8_t)literalLength;
+        memcpy(encoded + writeOffset, ((const uint8_t*)input) + literalStart, literalLength);
+        writeOffset += literalLength;
+    }
+
+    *output = encoded;
+    *outputLength = writeOffset;
+    return 0;
+}
+
+static int custom_descriptor_decode(void* input, uint32_t inputLength, void* output, uint32_t* outputLength)
+{
+    uint32_t readOffset = 0;
+    uint32_t writeOffset = 0;
+
+    g_custom_descriptor_decode_calls++;
+
+    while (readOffset < inputLength) {
+        uint8_t tag;
+        uint8_t length;
+
+        if ((inputLength - readOffset) < 2u) {
+            errno = EINVAL;
+            return -1;
+        }
+
+        tag = ((uint8_t*)input)[readOffset++];
+        length = ((uint8_t*)input)[readOffset++];
+
+        if ((uint32_t)length > (*outputLength - writeOffset)) {
+            errno = ENOSPC;
+            return -1;
+        }
+
+        if (tag == 0) {
+            memset(((uint8_t*)output) + writeOffset, 0, length);
+            writeOffset += length;
+            continue;
+        }
+
+        if (tag != 1 || (inputLength - readOffset) < length) {
+            errno = EINVAL;
+            return -1;
+        }
+
+        memcpy(((uint8_t*)output) + writeOffset, ((uint8_t*)input) + readOffset, length);
+        readOffset += length;
+        writeOffset += length;
+    }
+
+    *outputLength = writeOffset;
+    return 0;
+}
+
+static int install_custom_descriptor_filter(struct VaFs* vafs)
+{
+    struct VaFsFeatureFilter filter;
+    struct VaFsFeatureFilterOps filterOps;
+    int status;
+
+    memcpy(&filter.Header.Guid, &g_filterGuid, sizeof(struct VaFsGuid));
+    filter.Header.Length = sizeof(struct VaFsFeatureFilter);
+    filter.DescriptorType = TEST_CUSTOM_DESCRIPTOR_FILTER_TYPE;
+    filter.DataType = VaFsFilterType_None;
+
+    status = vafs_feature_add(vafs, &filter.Header);
+    if (status != 0) {
+        return status;
+    }
+
+    memcpy(&filterOps.Header.Guid, &g_filterOpsGuid, sizeof(struct VaFsGuid));
+    filterOps.Header.Length = sizeof(struct VaFsFeatureFilterOps);
+    filterOps.DescriptorEncode = custom_descriptor_encode;
+    filterOps.DescriptorDecode = custom_descriptor_decode;
+    filterOps.DataEncode = NULL;
+    filterOps.DataDecode = NULL;
+    return vafs_feature_add(vafs, &filterOps.Header);
+}
+
+static int install_custom_descriptor_filter_ops(struct VaFs* vafs)
+{
+    struct VaFsFeatureFilterOps filterOps;
+
+    memcpy(&filterOps.Header.Guid, &g_filterOpsGuid, sizeof(struct VaFsGuid));
+    filterOps.Header.Length = sizeof(struct VaFsFeatureFilterOps);
+    filterOps.DescriptorEncode = custom_descriptor_encode;
+    filterOps.DescriptorDecode = custom_descriptor_decode;
+    filterOps.DataEncode = NULL;
+    filterOps.DataDecode = NULL;
     return vafs_feature_add(vafs, &filterOps.Header);
 }
 
@@ -521,6 +667,72 @@ static int test_descriptor_and_data_streams_can_diverge(void)
     TEST_PASS("Descriptor and data streams can use different block sizes and filter callbacks");
 }
 
+static int test_root_open_waits_for_custom_filter_ops(void)
+{
+    struct VaFs* vafs = NULL;
+    struct VaFsConfiguration config;
+    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsDirectoryHandle* reopenedRoot = NULL;
+    struct VaFsFileHandle* file = NULL;
+    struct VaFsFeatureFilter* filter = NULL;
+    char name[32];
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
+    int status;
+
+    // Read-mode open must succeed before custom filter callbacks are present,
+    // otherwise descriptor-filtered images would be impossible to reopen with
+    // application-defined codecs.
+
+    vafs_config_initialize(&config);
+    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    TEST_ASSERT(status == 0, "Failed to create custom-filter test image");
+
+    status = install_custom_descriptor_filter(vafs);
+    TEST_ASSERT(status == 0, "Failed to install custom descriptor filter");
+
+    status = vafs_directory_open(vafs, "/", &root);
+    TEST_ASSERT(status == 0, "Failed to open root directory for custom-filter image");
+
+    for (int i = 0; i < 64; ++i) {
+        snprintf(name, sizeof(name), "entry-%02d", i);
+        status = vafs_directory_create_file(root, name, &fileMetadata, &file);
+        TEST_ASSERT(status == 0, "Failed to create custom-filter descriptor entry");
+        vafs_file_close(file);
+        file = NULL;
+    }
+
+    vafs_directory_close(root);
+    root = NULL;
+    vafs_close(vafs);
+    vafs = NULL;
+
+    g_custom_descriptor_decode_calls = 0;
+
+    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    TEST_ASSERT(status == 0, "Open should succeed before custom filter ops are installed");
+
+    status = vafs_feature_query(vafs, &g_filterGuid, (struct VaFsFeatureHeader**)&filter);
+    TEST_ASSERT(status == 0, "Failed to query persisted custom filter feature");
+    TEST_ASSERT(filter->DescriptorType == TEST_CUSTOM_DESCRIPTOR_FILTER_TYPE,
+        "Persisted descriptor filter type mismatch");
+
+    errno = 0;
+    status = vafs_directory_open(vafs, "/", &reopenedRoot);
+    TEST_ASSERT(status != 0 && errno == ENOTSUP,
+        "Root open should fail with ENOTSUP before custom filter ops are installed");
+
+    status = install_custom_descriptor_filter_ops(vafs);
+    TEST_ASSERT(status == 0, "Failed to install custom descriptor filter ops after open");
+
+    status = vafs_directory_open(vafs, "/", &reopenedRoot);
+    TEST_ASSERT(status == 0, "Failed to open root directory after installing custom filter ops");
+    TEST_ASSERT(g_custom_descriptor_decode_calls > 0,
+        "Expected custom descriptor decode to run during lazy root open");
+
+    cleanup_image(vafs, reopenedRoot, NULL);
+    TEST_PASS("Read-mode root initialization waits for caller-supplied custom filter ops");
+}
+
 static int test_open_ops_accepts_read_at_only_backend(void)
 {
     struct VaFs* vafs = NULL;
@@ -787,6 +999,10 @@ int main(void)
 
     if (status == 0) {
         status = test_descriptor_and_data_streams_can_diverge();
+    }
+
+    if (status == 0) {
+        status = test_root_open_waits_for_custom_filter_ops();
     }
 
     if (status == 0) {
