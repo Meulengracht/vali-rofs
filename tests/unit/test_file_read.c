@@ -367,7 +367,7 @@ static int test_sequential_reads_advance_position(void)
     fill_pattern(expected, expectedLength);
 
     vafs_config_initialize(&config);
-    vafs_config_set_block_size(&config, TEST_BLOCK_SIZE);
+    vafs_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
     status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create test image");
@@ -427,7 +427,7 @@ static int test_stored_blocks_skip_runtime_decode(void)
     // reopen without runtime filter ops to verify that decode is skipped.
 
     vafs_config_initialize(&config);
-    vafs_config_set_block_size(&config, TEST_BLOCK_SIZE);
+    vafs_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
     status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create filtered test image");
@@ -539,7 +539,7 @@ static int test_open_ops_accepts_read_at_only_backend(void)
     // reopening an image through a backend that only implements readAt.
 
     vafs_config_initialize(&config);
-    vafs_config_set_block_size(&config, TEST_BLOCK_SIZE);
+    vafs_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
     status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create readAt-only test image");
@@ -607,7 +607,7 @@ static int test_boundary_read_does_not_prefetch_next_stream_block(void)
     fill_pattern(payload, TEST_BLOCK_SIZE);
 
     vafs_config_initialize(&config);
-    vafs_config_set_block_size(&config, TEST_BLOCK_SIZE);
+    vafs_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
     status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create boundary-read test image");
@@ -686,7 +686,7 @@ static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
     memcpy(expected, payload, sizeof(expected));
 
     vafs_config_initialize(&config);
-    vafs_config_set_block_size(&config, TEST_BLOCK_SIZE);
+    vafs_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
     status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create concurrent-read test image");

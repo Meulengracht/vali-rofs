@@ -231,17 +231,6 @@ extern void vafs_config_set_descriptor_block_size(struct VaFsConfiguration* conf
 extern void vafs_config_set_data_block_size(struct VaFsConfiguration* configuration, uint32_t blockSize);
 
 /**
- * @brief Backward-compatible alias for vafs_config_set_data_block_size.
- *
- * Values outside the supported range are ignored and reported through the library log. Passing NULL
- * is a no-op.
- *
- * @param configuration Configuration structure to update.
- * @param blockSize     Desired data stream block size in bytes.
- */
-extern void vafs_config_set_block_size(struct VaFsConfiguration* configuration, uint32_t blockSize);
-
-/**
  * @brief Allows custom backends as vafs images. The default API for vafs only supports
  * the standard C file, and memory backed images. To allow scenario's that differ from this
  * we allow the user to supply its own storage callbacks. Read-only backends may implement

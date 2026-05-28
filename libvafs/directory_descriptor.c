@@ -116,9 +116,8 @@ static void __materialize_descriptor_metadata(
 static void __initialize_root_metadata(
     struct VaFsMetadata* metadata)
 {
-    // New images persist root metadata in a real directory descriptor, but we
-    // still keep one canonical default here for freshly created in-memory roots
-    // and for older images whose header still points straight at the child list.
+    // Freshly created in-memory roots start from one canonical metadata shape
+    // so the later root descriptor write path always serializes the same fields.
     vafs_metadata_initialize(metadata);
     vafs_metadata_set_mode(metadata, VaFsEntryType_Directory, 0775);
     metadata->LinkCount = 1;
@@ -962,7 +961,6 @@ int vafs_directory_open_root(
     struct VaFsDirectory** directoryOut)
 {
     struct VaFsDirectoryReader  probe;
-    struct VaFsDirectoryReader* reader;
     struct VaFsStreamReader*    streamReader;
     VaFsDescriptor_t            descriptorBase;
     VaFsEntryDescriptorScratch_t descriptorScratch;
@@ -970,10 +968,8 @@ int vafs_directory_open_root(
     int                         status;
     size_t                      read;
 
-    // Root opens as a lazy read-mode wrapper around the persisted root
-    // descriptor position stored in the filesystem header. New images point at
-    // a real directory descriptor so root metadata can round-trip like every
-    // other directory, but older images still point directly at the child list.
+    // Root now always opens from a real persisted directory descriptor, so the
+    // root follows the exact same materialization rules as every other directory.
     if (vafs == NULL || position == NULL || directoryOut == NULL) {
         errno = EINVAL;
         return -1;
@@ -992,9 +988,8 @@ int vafs_directory_open_root(
         return status;
     }
 
-    // Peek only at the first descriptor header so the reader can distinguish
-    // the new "header -> root descriptor" layout from the older
-    // "header -> root child list" layout without forking the whole loader.
+    // Peek only at the generic descriptor header first so obviously malformed
+    // root coordinates fail before the full typed descriptor is materialized.
     status = vafs_stream_reader_read(streamReader, &descriptorBase, sizeof(VaFsDescriptor_t), &read);
     if (status != 0 || read != sizeof(VaFsDescriptor_t)) {
         vafs_stream_reader_close(streamReader);
@@ -1002,70 +997,41 @@ int vafs_directory_open_root(
         return -1;
     }
 
-    if (descriptorBase.Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY &&
-        descriptorBase.Length >= sizeof(VaFsDirectoryDescriptor_t)) {
-        // New images persist root exactly like any other directory, so reuse
-        // the normal directory-descriptor materialization path when possible.
-        memset(&probe, 0, sizeof(struct VaFsDirectoryReader));
-        probe.Base.VaFs = vafs;
-        probe.Reader = streamReader;
-
-        status = vafs_stream_reader_seek(streamReader, position->Index, position->Offset);
-        if (status != 0) {
-            vafs_stream_reader_close(streamReader);
-            return status;
-        }
-
-        status = __read_descriptor(&probe, (char*)&descriptorScratch, &extendedData);
+    if (descriptorBase.Type != VA_FS_DESCRIPTOR_TYPE_DIRECTORY ||
+        descriptorBase.Length < sizeof(VaFsDirectoryDescriptor_t)) {
         vafs_stream_reader_close(streamReader);
-        if (status != 0) {
-            free(extendedData);
-            return status;
-        }
-
-        *directoryOut = __create_directory_from_descriptor(
-            vafs,
-            &descriptorScratch.Directory,
-            extendedData
-        );
-        free(extendedData);
-        if (*directoryOut == NULL) {
-            return -1;
-        }
-
-        (*directoryOut)->DescriptorPosition = *position;
-        return 0;
-    }
-
-    vafs_stream_reader_close(streamReader);
-    // Fall back to the synthetic root wrapper only for legacy images whose
-    // header points straight at the child list. That preserves older layouts
-    // without forcing the rest of the codebase to carry two root models.
-    reader = (struct VaFsDirectoryReader*)calloc(1, sizeof(struct VaFsDirectoryReader));
-    if (!reader) {
-        VAFS_ERROR("vafs_directory_open_root: failed to allocate directory reader\n");
+        errno = EINVAL;
         return -1;
     }
 
-    reader->Base.VaFs = vafs;
-    reader->Base.Name = strdup("root");
-    reader->State = VaFsDirectoryState_Open;
-    reader->IndexDirty = 1;
-    memset(&reader->NameIndex, 0, sizeof(hashtable_t));
-    reader->Base.DescriptorPosition.Index = VA_FS_INVALID_BLOCK;
-    reader->Base.DescriptorPosition.Offset = VA_FS_INVALID_OFFSET;
-    __initialize_root_metadata(&reader->Base.Stat);
-    reader->Base.StatCached = 1;
+    memset(&probe, 0, sizeof(struct VaFsDirectoryReader));
+    probe.Base.VaFs = vafs;
+    probe.Reader = streamReader;
 
-    // Legacy fallback keeps the descriptor payload position aimed at the child
-    // list because there is no standalone root descriptor to reopen.
-    reader->Base.Descriptor.Base.Length = sizeof(VaFsDirectoryDescriptor_t);
-    reader->Base.Descriptor.Base.Type = VA_FS_DESCRIPTOR_TYPE_DIRECTORY;
-    reader->Base.Descriptor.Descriptor.Index = position->Index;
-    reader->Base.Descriptor.Descriptor.Offset = position->Offset;
-    __descriptor_metadata_initialize(&reader->Base.Descriptor.Metadata, &reader->Base.Stat);
+    status = vafs_stream_reader_seek(streamReader, position->Index, position->Offset);
+    if (status != 0) {
+        vafs_stream_reader_close(streamReader);
+        return status;
+    }
 
-    *directoryOut = (struct VaFsDirectory*)reader;
+    status = __read_descriptor(&probe, (char*)&descriptorScratch, &extendedData);
+    vafs_stream_reader_close(streamReader);
+    if (status != 0) {
+        free(extendedData);
+        return status;
+    }
+
+    *directoryOut = __create_directory_from_descriptor(
+        vafs,
+        &descriptorScratch.Directory,
+        extendedData
+    );
+    free(extendedData);
+    if (*directoryOut == NULL) {
+        return -1;
+    }
+
+    (*directoryOut)->DescriptorPosition = *position;
     return 0;
 }
 

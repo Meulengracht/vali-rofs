@@ -221,7 +221,7 @@ static int __default_fail_decode(void* Input, uint32_t InputLength, void* Output
     return -1;
 }
 
-static void __parse_known_features(
+static int __parse_known_features(
     struct VaFs* vafs)
 {
     // Persisted filter ids tell the reader which streams require runtime decode
@@ -231,9 +231,12 @@ static void __parse_known_features(
             struct VaFsFeatureFilter* filter = (struct VaFsFeatureFilter*)vafs->Features[i];
 
             if (filter->Header.Length < sizeof(struct VaFsFeatureFilter)) {
-                // Ignore malformed or legacy-sized payloads instead of reading
-                // split descriptor/data policy fields past the stored feature.
-                continue;
+                // Images now require the current split descriptor/data filter
+                // payload, so undersized records are malformed instead of legacy-compatible.
+                VAFS_ERROR("__parse_known_features: filter feature length %u smaller than expected %zu\n",
+                    filter->Header.Length, sizeof(struct VaFsFeatureFilter));
+                errno = EINVAL;
+                return -1;
             }
 
             if (filter->DescriptorType != VaFsFilterType_None) {
@@ -248,6 +251,8 @@ static void __parse_known_features(
             }
         }
     }
+
+    return 0;
 }
 
 static int __load_features(
@@ -566,7 +571,12 @@ static int __new_vafs(
     if (vafs->Mode == VaFsMode_Read) {
         // Apply persisted policies after both streams exist so runtime filter
         // placeholders land on the correct stream.
-        __parse_known_features(vafs);
+        status = __parse_known_features(vafs);
+        if (status) {
+            VAFS_ERROR("__new_vafs: failed to parse known features: %i\n", status);
+            vafs_destroy(vafs);
+            return status;
+        }
     }
 
     *vafsOut = vafs;

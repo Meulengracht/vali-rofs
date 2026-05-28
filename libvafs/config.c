@@ -76,10 +76,3 @@ void vafs_config_set_data_block_size(struct VaFsConfiguration* configuration, ui
 
     __set_block_size(&configuration->DataBlockSize, blockSize);
 }
-
-void vafs_config_set_block_size(struct VaFsConfiguration* configuration, uint32_t blockSize)
-{
-    // Preserve the legacy setter as shorthand for the data stream so existing
-    // callers remain source-compatible.
-    vafs_config_set_data_block_size(configuration, blockSize);
-}
