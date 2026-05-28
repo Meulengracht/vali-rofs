@@ -50,7 +50,7 @@ The VaFS project consists of several key components that work together:
 ┌───────────────────────────┴─────────────────────────────────┐
 │                   Storage Backends                           │
 │  ┌──────────┐  ┌──────────┐  ┌────────────────────────┐    │
-│  │   File   │  │  Memory  │  │  Custom (VaFsOperations)│    │
+│  │   File   │  │  Memory  │  │ Custom (VaFsOperations)│    │
 │  └──────────┘  └──────────┘  └────────────────────────┘    │
 └─────────────────────────────────────────────────────────────┘
 ```

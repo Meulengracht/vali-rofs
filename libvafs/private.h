@@ -343,6 +343,70 @@ struct VaFs {
 };
 
 /**
+ * @brief Completes the canonical metadata fields required for one entry.
+ *
+ * Descriptor writers and create paths both run through this helper so entry
+ * type, size, and fallback link-count behavior stay identical everywhere.
+ *
+ * @param[In,Out] metadata Metadata structure to normalize.
+ * @param[In]     type     Final entry type.
+ * @param[In]     size     Final logical size for the entry.
+ */
+extern void __finalize_entry_metadata(
+    struct VaFsMetadata* metadata,
+    enum VaFsEntryType   type,
+    uint64_t             size);
+
+/**
+ * @brief Returns non-zero when the supplied entry type is one of the supported special-node kinds.
+ *
+ * @param[In] type Entry type to inspect.
+ * @return Non-zero for supported special entry types, otherwise zero.
+ */
+extern int __is_special_entry_type(
+    enum VaFsEntryType type);
+
+/**
+ * @brief Initializes a file descriptor from already-normalized metadata.
+ *
+ * @param[Out] descriptor File descriptor to initialize.
+ * @param[In]  metadata   Metadata snapshot to copy into the descriptor.
+ */
+extern void __initialize_file_descriptor(
+    VaFsFileDescriptor_t*    descriptor,
+    const struct VaFsMetadata* metadata);
+
+/**
+ * @brief Initializes a directory descriptor from already-normalized metadata.
+ *
+ * @param[Out] descriptor Directory descriptor to initialize.
+ * @param[In]  metadata   Metadata snapshot to copy into the descriptor.
+ */
+extern void __initialize_directory_descriptor(
+    VaFsDirectoryDescriptor_t* descriptor,
+    const struct VaFsMetadata* metadata);
+
+/**
+ * @brief Initializes a symlink descriptor from already-normalized metadata.
+ *
+ * @param[Out] descriptor Symlink descriptor to initialize.
+ * @param[In]  metadata   Metadata snapshot to copy into the descriptor.
+ */
+extern void __initialize_symlink_descriptor(
+    VaFsSymlinkDescriptor_t*  descriptor,
+    const struct VaFsMetadata* metadata);
+
+/**
+ * @brief Initializes a special-entry descriptor from already-normalized metadata.
+ *
+ * @param[Out] descriptor Special-entry descriptor to initialize.
+ * @param[In]  metadata   Metadata snapshot to copy into the descriptor.
+ */
+extern void __initialize_special_descriptor(
+    VaFsSpecialDescriptor_t*  descriptor,
+    const struct VaFsMetadata* metadata);
+
+/**
  * @brief Opens a file-backed stream device for read access to a VaFS image.
  *
  * @param[In]  path      Path to the backing file on the host filesystem.
