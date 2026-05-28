@@ -808,6 +808,10 @@ struct VaFsDirectoryWriter {
 
 // Directory entries are the shared tagged-union node type used by lookup,
 // serialization, and metadata code across both read and write modes.
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4201)
+#endif
 struct VaFsDirectoryEntry {
     int Type;
     union {
@@ -819,6 +823,9 @@ struct VaFsDirectoryEntry {
     };
     struct VaFsDirectoryEntry* Link;
 };
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 /**
  * @brief Checks whether a path refers to the filesystem root.

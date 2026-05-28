@@ -404,7 +404,7 @@ size_t vafs_file_write(
 
     if (!handle || !buffer || size == 0) {
         errno = EINVAL;
-        return -1;
+        return (size_t)-1;
     }
 
     // Write mode keeps one ordered staging stream per image. The handle grabs
@@ -414,13 +414,13 @@ size_t vafs_file_write(
     // this is not valid when reading files
     if (handle->File->VaFs->Mode == VaFsMode_Read) {
         errno = ENOTSUP;
-        return -1;
+        return (size_t)-1;
     }
 
     if (handle->State != VaFsFileState_Write) {
         status = vafs_stream_lock(handle->File->VaFs->DataStream);
         if (status) {
-            return -1;
+            return (size_t)-1;
         }
 
         // Set current file state to writing, so the stream gets unlocked.
@@ -432,7 +432,7 @@ size_t vafs_file_write(
         // reads know where this file begins inside the shared data stream.
         status = vafs_stream_position(handle->File->VaFs->DataStream, &block, &offset);
         if (status) {
-            return -1;
+            return (size_t)-1;
         }
         handle->File->Descriptor.Data.Index = block;
         handle->File->Descriptor.Data.Offset = offset;
@@ -440,11 +440,16 @@ size_t vafs_file_write(
 
     status = vafs_stream_write(handle->File->VaFs->DataStream, buffer, size);
     if (status) {
-        return -1;
+        return (size_t)-1;
+    }
+
+    if (size > (size_t)(UINT32_MAX - handle->File->Descriptor.FileLength)) {
+        errno = EFBIG;
+        return (size_t)-1;
     }
 
     // add to filelength
-    handle->File->Descriptor.FileLength += size;
+    handle->File->Descriptor.FileLength += (uint32_t)size;
     handle->File->Stat.Size = handle->File->Descriptor.FileLength;
     handle->File->Stat.Mask |= VaFsMetadataMask_Size;
 

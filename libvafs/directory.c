@@ -551,6 +551,8 @@ static int __validate_file_descriptor(
 {
     size_t nameLength;
 
+    (void)extendedData;
+
     // Validate the descriptor length
     if (__validate_descriptor_length(&descriptor->Base, sizeof(VaFsFileDescriptor_t)) != 0) {
         return -1;
@@ -585,6 +587,8 @@ static int __validate_directory_descriptor(
 {
     size_t nameLength;
 
+    (void)extendedData;
+
     // Validate the descriptor length
     if (__validate_descriptor_length(&descriptor->Base, sizeof(VaFsDirectoryDescriptor_t)) != 0) {
         return -1;
@@ -612,6 +616,8 @@ static int __validate_symlink_descriptor(
 {
     size_t totalExtendedLength;
     size_t expectedLength;
+
+    (void)extendedData;
 
     // Validate the descriptor length
     if (__validate_descriptor_length(&descriptor->Base, sizeof(VaFsSymlinkDescriptor_t)) != 0) {
