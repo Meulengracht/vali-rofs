@@ -442,13 +442,13 @@ size_t vafs_file_write(
         handle->File->Descriptor.Data.Offset = offset;
     }
 
-    status = vafs_stream_write(handle->File->VaFs->DataStream, buffer, size);
-    if (status) {
+    if (size > (size_t)(UINT32_MAX - handle->File->Descriptor.FileLength)) {
+        errno = EFBIG;
         return (size_t)-1;
     }
 
-    if (size > (size_t)(UINT32_MAX - handle->File->Descriptor.FileLength)) {
-        errno = EFBIG;
+    status = vafs_stream_write(handle->File->VaFs->DataStream, buffer, size);
+    if (status) {
         return (size_t)-1;
     }
 

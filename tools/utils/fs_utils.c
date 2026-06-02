@@ -586,7 +586,7 @@ int platform_fs_create_hardlink(const char* targetPath, const char* path)
     }
     return 0;
 #else
-    if (link(targetPath, path) != 0 && errno != EEXIST) {
+    if (link(targetPath, path) != 0) {
         return -1;
     }
     return 0;

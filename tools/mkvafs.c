@@ -991,6 +991,7 @@ static int __create_image(struct __options* opts)
             status = symlink_utils_read(entry->path, &linkpath);
             if (status != 0) {
                 fprintf(stderr, "mkvafs: failed to read link %s\n", entry->path);
+                free(imagePath);
                 break;
             }
 
