@@ -66,6 +66,10 @@ struct VaFsStreamDevice {
     struct VaFsOperations Operations;
     void*                 UserData;
 
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4201)
+#endif
     union {
         struct {
             char* Buffer;
@@ -81,6 +85,9 @@ struct VaFsStreamDevice {
         } Memory;
         FILE* File;
     };
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 };
 
 static int __validate_ops(

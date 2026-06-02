@@ -6,6 +6,7 @@ add_subdirectory(cache)
 add_library(vafs STATIC
     config.c
     crc.c
+    directory_descriptor.c
     directory_cache.c
     directory.c
     file.c
@@ -15,6 +16,7 @@ add_library(vafs STATIC
     symlink.c
     utils.c
     vafs.c
+    xattr.c
 )
 target_include_directories(vafs PRIVATE include/vafs)
 target_include_directories(vafs PUBLIC include)

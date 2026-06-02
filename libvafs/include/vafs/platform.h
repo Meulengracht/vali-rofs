@@ -75,8 +75,38 @@ static inline int mtx_unlock(mtx_t* mtx) {
     #define S_IFLNK 0xA000
 #endif
 
+#if !defined(S_IFMT) && defined(_S_IFMT)
+    #define S_IFMT _S_IFMT
+#elif !defined(S_IFMT)
+    #define S_IFMT 0xF000
+#endif
+
+#if !defined(S_IFIFO)
+    #define S_IFIFO 0x1000
+#endif
+
+#if !defined(S_IFCHR)
+    #define S_IFCHR 0x2000
+#endif
+
+#if !defined(S_IFBLK)
+    #define S_IFBLK 0x6000
+#endif
+
 #if !defined S_ISLNK
     #define S_ISLNK(m) (((m) & S_IFLNK) == S_IFLNK)
+#endif
+
+#if !defined(S_ISFIFO)
+    #define S_ISFIFO(m) (((m) & S_IFMT) == S_IFIFO)
+#endif
+
+#if !defined(S_ISCHR)
+    #define S_ISCHR(m) (((m) & S_IFMT) == S_IFCHR)
+#endif
+
+#if !defined(S_ISBLK)
+    #define S_ISBLK(m) (((m) & S_IFMT) == S_IFBLK)
 #endif
 
 #if !defined CLOCK_MONOTONIC

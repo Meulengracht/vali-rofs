@@ -58,7 +58,7 @@ extern int __handle_filter(struct VaFs* vafs);
  *    expected to properly handle the O_APPEND flag and ensure
  *    that each write is appending to the end of the file.
  * 
-     *  - When writeback caching is enabled, the kernel will
+ *  - When writeback caching is enabled, the kernel will
  *    handle O_APPEND. However, unless all changes to the file
  *    come through the kernel this will not work reliably. The
  *    filesystem should thus either ignore the O_APPEND flag
@@ -117,15 +117,15 @@ int __vafs_access(const char* path, int permissions)
 {
     struct fuse_context* context = fuse_get_context();
     struct VaFs*         vafs    = context->private_data;
-    struct vafs_stat     stat;
+    struct VaFsMetadata  metadata;
     int                  status;
 
-    status = vafs_path_stat(vafs, path, 1, &stat);
+    status = vafs_path_stat(vafs, path, 1, &metadata);
     if (status) {
         return status;
     }
 
-    if ((stat.mode & (uint32_t)permissions) != (uint32_t)permissions) {
+    if ((metadata.Mode & (uint32_t)permissions) != (uint32_t)permissions) {
         errno = EACCES;
         return -1;
     }
@@ -182,7 +182,7 @@ int __vafs_getattr(const char* path, struct stat* stat, struct fuse_file_info *f
 {
     struct fuse_context* context = fuse_get_context();
     struct VaFs*         vafs    = context->private_data;
-    struct vafs_stat     vstat;
+    struct VaFsMetadata  metadata;
     int                  status;
     int                  isRoot;
 
@@ -190,14 +190,19 @@ int __vafs_getattr(const char* path, struct stat* stat, struct fuse_file_info *f
     if (fi != NULL && fi->fh != 0) {
         struct VaFsFileHandle* handle = (struct VaFsFileHandle*)fi->fh;
 
+        status = vafs_file_stat(handle, &metadata);
+        if (status) {
+            return status;
+        }
+
         stat->st_blksize = 512;
-        stat->st_mode    = vafs_file_permissions(handle);
-        stat->st_size    = (off_t)vafs_file_length(handle);
-        stat->st_nlink   = 1;
+        stat->st_mode    = metadata.Mode;
+        stat->st_size    = (off_t)metadata.Size;
+        stat->st_nlink   = metadata.LinkCount ? metadata.LinkCount : 1;
         return 0;
     }
 
-    status = vafs_path_stat(vafs, path, 0, &vstat);
+    status = vafs_path_stat(vafs, path, 0, &metadata);
     if (status) {
         return status;
     }
@@ -206,9 +211,9 @@ int __vafs_getattr(const char* path, struct stat* stat, struct fuse_file_info *f
     isRoot = (strcmp(path, "/") == 0);
 
     stat->st_blksize = 512;
-    stat->st_mode    = vstat.mode;
-    stat->st_size    = (off_t)vstat.size;
-    stat->st_nlink   = isRoot + 1;
+    stat->st_mode    = metadata.Mode;
+    stat->st_size    = (off_t)metadata.Size;
+    stat->st_nlink   = isRoot ? 2 : (metadata.LinkCount ? metadata.LinkCount : 1);
     return 0;
 }
 

@@ -73,6 +73,10 @@ int __vafs_file_open_internal(
         return -1;
     }
 
+    if (__vafs_ensure_root_open(vafs) != 0) {
+        return -1;
+    }
+
     // Resolve the path one token at a time until it terminates in a file.
     // Directory edges advance traversal, symlinks recurse with a depth budget,
     // and regular files must be the final component.
@@ -105,6 +109,16 @@ int __vafs_file_open_internal(
         if (entry == NULL) {
             // Path resolution stops on the first missing component.
             return -1;
+        }
+
+        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
+            // Resolve aliases before any type-specific branching so a hardlink
+            // to a symlink inherits normal symlink traversal instead of acting
+            // like a separate terminal file type.
+            entry = __vafs_resolve_hardlink(vafs, entry);
+            if (entry == NULL) {
+                return -1;
+            }
         }
 
         if (entry->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
@@ -203,6 +217,7 @@ void vafs_file_destroy(
         return;
     }
 
+    __vafs_xattr_set_destroy(file->Xattrs);
     free((void*)file->Name);
     free(file);
 }
@@ -240,15 +255,30 @@ size_t vafs_file_length(
     return handle->File->Descriptor.FileLength;
 }
 
-uint32_t vafs_file_permissions(
-    struct VaFsFileHandle* handle)
+int vafs_file_stat(
+    struct VaFsFileHandle* handle,
+    struct VaFsMetadata*   metadata)
 {
-    if (!handle) {
+    if (!handle || metadata == NULL) {
         errno = EINVAL;
-        return (uint32_t)-1;
+        return -1;
     }
 
-    return handle->File->Descriptor.Permissions;
+    if (!handle->File->StatCached) {
+        vafs_metadata_initialize(&handle->File->Stat);
+    }
+
+    handle->File->Stat.Type = VaFsEntryType_File;
+    handle->File->Stat.Size = handle->File->Descriptor.FileLength;
+    handle->File->Stat.Mask |= VaFsMetadataMask_Type | VaFsMetadataMask_Size;
+    if ((handle->File->Stat.Mask & VaFsMetadataMask_LinkCount) == 0) {
+        handle->File->Stat.LinkCount = 1;
+        handle->File->Stat.Mask |= VaFsMetadataMask_LinkCount;
+    }
+
+    handle->File->StatCached = 1;
+    *metadata = handle->File->Stat;
+    return 0;
 }
 
 int vafs_file_seek(
@@ -378,7 +408,7 @@ size_t vafs_file_write(
 
     if (!handle || !buffer || size == 0) {
         errno = EINVAL;
-        return -1;
+        return (size_t)-1;
     }
 
     // Write mode keeps one ordered staging stream per image. The handle grabs
@@ -388,13 +418,13 @@ size_t vafs_file_write(
     // this is not valid when reading files
     if (handle->File->VaFs->Mode == VaFsMode_Read) {
         errno = ENOTSUP;
-        return -1;
+        return (size_t)-1;
     }
 
     if (handle->State != VaFsFileState_Write) {
         status = vafs_stream_lock(handle->File->VaFs->DataStream);
         if (status) {
-            return -1;
+            return (size_t)-1;
         }
 
         // Set current file state to writing, so the stream gets unlocked.
@@ -406,19 +436,26 @@ size_t vafs_file_write(
         // reads know where this file begins inside the shared data stream.
         status = vafs_stream_position(handle->File->VaFs->DataStream, &block, &offset);
         if (status) {
-            return -1;
+            return (size_t)-1;
         }
         handle->File->Descriptor.Data.Index = block;
         handle->File->Descriptor.Data.Offset = offset;
     }
 
+    if (size > (size_t)(UINT32_MAX - handle->File->Descriptor.FileLength)) {
+        errno = EFBIG;
+        return (size_t)-1;
+    }
+
     status = vafs_stream_write(handle->File->VaFs->DataStream, buffer, size);
     if (status) {
-        return -1;
+        return (size_t)-1;
     }
 
     // add to filelength
-    handle->File->Descriptor.FileLength += size;
+    handle->File->Descriptor.FileLength += (uint32_t)size;
+    handle->File->Stat.Size = handle->File->Descriptor.FileLength;
+    handle->File->Stat.Mask |= VaFsMetadataMask_Size;
 
     // add to overview
     handle->File->VaFs->Overview.TotalSizeUncompressed += size;

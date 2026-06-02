@@ -112,6 +112,7 @@ For more detail on the API surface and internals, see:
 
 - [docs/LIBRARY_ARCHITECTURE.md](docs/LIBRARY_ARCHITECTURE.md)
 - [docs/VAFS_FORMAT_SPEC.md](docs/VAFS_FORMAT_SPEC.md)
+- [docs/VAFS_ROOTFS_METADATA_REQUIREMENTS.md](docs/VAFS_ROOTFS_METADATA_REQUIREMENTS.md)
 - [benchmarks/README.md](benchmarks/README.md)
 
 ## License

@@ -28,6 +28,7 @@
 #include <vafs/file.h>
 #include <vafs/directory.h>
 #include <vafs/stat.h>
+#include <vafs/xattr.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +53,12 @@
 #define PATH_LOOKUP_ITERATIONS         5
 #define WIDE_LOOKUP_ITERATIONS         5
 #define DEEP_STAT_ITERATIONS           10
+#define XATTR_GET_ITERATIONS           20
+#define XATTR_LIST_ITERATIONS          20
+
+#if !defined(PATH_MAX)
+#define PATH_MAX 4096
+#endif
 
 // ============================
 // Benchmark Context Structures
@@ -101,6 +108,16 @@ typedef struct {
 } WideLookupBenchmarkContext;
 
 typedef struct {
+    char         generated_image_path[PATH_MAX];
+    const char*  path;
+    const char*  name;
+    struct VaFs* vafs;
+    char*        buffer;
+    size_t       buffer_size;
+    size_t       bytes_processed;
+} XattrBenchmarkContext;
+
+typedef struct {
     uint64_t iteration_override;
     uint64_t warmup_iterations;
 } BenchmarkCliOptions;
@@ -148,12 +165,203 @@ static int parse_uint64_option(
     return 0;
 }
 
+static struct VaFsMetadata make_metadata(
+    enum VaFsEntryType type,
+    uint32_t           mode)
+{
+    struct VaFsMetadata metadata;
+
+    vafs_metadata_initialize(&metadata);
+    vafs_metadata_set_mode(&metadata, type, mode);
+    return metadata;
+}
+
+static int make_temp_image_path(
+    char*  buffer,
+    size_t buffer_size)
+{
+#if defined(_WIN32) || defined(_WIN64)
+    char  temp_path[MAX_PATH];
+    char  temp_file[MAX_PATH];
+    DWORD path_length;
+
+    if (buffer == NULL || buffer_size == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    path_length = GetTempPathA((DWORD)sizeof(temp_path), temp_path);
+    if (path_length == 0 || path_length >= sizeof(temp_path)) {
+        errno = EIO;
+        return -1;
+    }
+
+    if (GetTempFileNameA(temp_path, "vbx", 0, temp_file) == 0) {
+        errno = EIO;
+        return -1;
+    }
+
+    DeleteFileA(temp_file);
+    if (snprintf(buffer, buffer_size, "%s.vafs", temp_file) >= (int)buffer_size) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+#else
+    char template_path[] = "/tmp/vafs-bench-xattr-XXXXXX";
+    int  fd;
+
+    if (buffer == NULL || buffer_size == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    fd = mkstemp(template_path);
+    if (fd < 0) {
+        return -1;
+    }
+
+    close(fd);
+    remove(template_path);
+    if (snprintf(buffer, buffer_size, "%s.vafs", template_path) >= (int)buffer_size) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+#endif
+}
+
+static int create_xattr_benchmark_image(
+    const char* image_path)
+{
+    static const char payload[] = "Synthetic xattr benchmark payload\n";
+    struct VaFs*                vafs = NULL;
+    struct VaFsConfiguration    config;
+    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsFileHandle*      file_handle = NULL;
+    struct VaFsMetadata         file_metadata = make_metadata(VaFsEntryType_File, 0644);
+    int                         status = -1;
+
+    if (image_path == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    remove(image_path);
+    vafs_config_initialize(&config);
+    if (vafs_create(image_path, &config, &vafs) != 0) {
+        goto cleanup;
+    }
+
+    if (vafs_directory_open(vafs, "/", &root) != 0) {
+        goto cleanup;
+    }
+
+    if (vafs_directory_create_file(root, "xattr_target", &file_metadata, &file_handle) != 0) {
+        goto cleanup;
+    }
+
+    if (vafs_file_write(file_handle, (void*)payload, strlen(payload)) != 0) {
+        goto cleanup;
+    }
+
+    if (vafs_file_close(file_handle) != 0) {
+        file_handle = NULL;
+        goto cleanup;
+    }
+    file_handle = NULL;
+
+    // Create the xattr-bearing image in-process so the benchmark stays
+    // reproducible even on hosts whose filesystem APIs cannot store xattrs.
+    if (vafs_path_setxattr(vafs, "/xattr_target", "user.mime", "text/plain", strlen("text/plain")) != 0 ||
+        vafs_path_setxattr(vafs, "/xattr_target", "user.owner", "root", strlen("root")) != 0 ||
+        vafs_path_setxattr(vafs, "/xattr_target", "user.checksum", "0123456789abcdef", strlen("0123456789abcdef")) != 0 ||
+        vafs_path_setxattr(vafs, "/xattr_target", "user.empty", NULL, 0) != 0) {
+        goto cleanup;
+    }
+
+    status = 0;
+
+cleanup:
+    if (file_handle != NULL) {
+        vafs_file_close(file_handle);
+    }
+    if (root != NULL) {
+        vafs_directory_close(root);
+    }
+    if (vafs != NULL) {
+        vafs_close(vafs);
+    }
+    if (status != 0) {
+        remove(image_path);
+    }
+    return status;
+}
+
+static int xattr_benchmark_open(
+    XattrBenchmarkContext* ctx)
+{
+    int status;
+
+    if (ctx == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (make_temp_image_path(ctx->generated_image_path, sizeof(ctx->generated_image_path)) != 0) {
+        return -1;
+    }
+
+    if (create_xattr_benchmark_image(ctx->generated_image_path) != 0) {
+        return -1;
+    }
+
+    status = vafs_open_file(ctx->generated_image_path, &ctx->vafs);
+    if (status != 0) {
+        remove(ctx->generated_image_path);
+        ctx->generated_image_path[0] = '\0';
+        return -1;
+    }
+
+    status = __handle_filter(ctx->vafs);
+    if (status != 0) {
+        vafs_close(ctx->vafs);
+        ctx->vafs = NULL;
+        remove(ctx->generated_image_path);
+        ctx->generated_image_path[0] = '\0';
+        return -1;
+    }
+    return 0;
+}
+
+static void xattr_benchmark_teardown_common(
+    XattrBenchmarkContext* ctx)
+{
+    if (ctx == NULL) {
+        return;
+    }
+
+    free(ctx->buffer);
+    ctx->buffer = NULL;
+
+    if (ctx->vafs != NULL) {
+        vafs_close(ctx->vafs);
+        ctx->vafs = NULL;
+    }
+
+    if (ctx->generated_image_path[0] != '\0') {
+        remove(ctx->generated_image_path);
+        ctx->generated_image_path[0] = '\0';
+    }
+}
+
 // ============================
 // Mount Latency Benchmark
 // ============================
 
 static int mount_benchmark_setup(void* user_data)
 {
+    (void)user_data;
     // No setup needed
     return 0;
 }
@@ -184,6 +392,7 @@ static int mount_benchmark_run(void* user_data)
 
 static void mount_benchmark_teardown(void* user_data)
 {
+    (void)user_data;
     // No teardown needed
 }
 
@@ -560,7 +769,7 @@ static BenchmarkResult run_path_lookup_benchmark(const char* image_path, const c
 static int path_stat_setup(void* user_data)
 {
     PathStatBenchmarkContext* ctx = (PathStatBenchmarkContext*)user_data;
-    struct vafs_stat          statbuf;
+    struct VaFsMetadata       statbuf;
     int status;
 
     status = vafs_open_file(ctx->image_path, &ctx->vafs);
@@ -591,7 +800,7 @@ static int path_stat_setup(void* user_data)
 static int path_stat_run(void* user_data)
 {
     PathStatBenchmarkContext* ctx = (PathStatBenchmarkContext*)user_data;
-    struct vafs_stat statbuf;
+    struct VaFsMetadata statbuf;
     int status;
 
     status = vafs_path_stat(ctx->vafs, ctx->path, 1, &statbuf);
@@ -708,7 +917,7 @@ static int wide_lookup_setup(void* user_data)
 static int wide_lookup_run(void* user_data)
 {
     WideLookupBenchmarkContext* ctx = (WideLookupBenchmarkContext*)user_data;
-    struct vafs_stat statbuf;
+    struct VaFsMetadata statbuf;
     size_t index;
     char path_buffer[1024];
     int status;
@@ -768,6 +977,158 @@ static BenchmarkResult run_wide_lookup_benchmark(const char* image_path, const c
 }
 
 // ============================
+// Xattr Benchmarks
+// ============================
+
+static int xattr_get_setup(void* user_data)
+{
+    XattrBenchmarkContext* ctx = (XattrBenchmarkContext*)user_data;
+    int                    status;
+
+    status = xattr_benchmark_open(ctx);
+    if (status != 0) {
+        return -1;
+    }
+
+    status = vafs_path_getxattr(ctx->vafs, ctx->path, ctx->name, NULL, 0, &ctx->buffer_size);
+    if (status != 0) {
+        xattr_benchmark_teardown_common(ctx);
+        return -1;
+    }
+
+    ctx->buffer = (char*)malloc(ctx->buffer_size == 0 ? 1 : ctx->buffer_size);
+    if (ctx->buffer == NULL) {
+        xattr_benchmark_teardown_common(ctx);
+        errno = ENOMEM;
+        return -1;
+    }
+
+    // Warm the first xattr read once so timed iterations measure steady-state
+    // lookup cost instead of first-use xattr-set materialization.
+    status = vafs_path_getxattr(ctx->vafs, ctx->path, ctx->name, ctx->buffer, ctx->buffer_size, &ctx->bytes_processed);
+    if (status != 0) {
+        xattr_benchmark_teardown_common(ctx);
+        return -1;
+    }
+    return 0;
+}
+
+static int xattr_get_run(void* user_data)
+{
+    XattrBenchmarkContext* ctx = (XattrBenchmarkContext*)user_data;
+    int                    status;
+
+    status = vafs_path_getxattr(ctx->vafs, ctx->path, ctx->name, ctx->buffer, ctx->buffer_size, &ctx->bytes_processed);
+    if (status != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static void xattr_get_teardown(void* user_data)
+{
+    xattr_benchmark_teardown_common((XattrBenchmarkContext*)user_data);
+}
+
+static BenchmarkResult run_xattr_get_benchmark(const BenchmarkRunConfig* run_config)
+{
+    XattrBenchmarkContext ctx = {
+        .generated_image_path = { 0 },
+        .path = "/xattr_target",
+        .name = "user.checksum",
+        .vafs = NULL,
+        .buffer = NULL,
+        .buffer_size = 0,
+        .bytes_processed = 0
+    };
+    BenchmarkResult result = benchmark_run(
+        "Repeated Xattr Get",
+        run_config,
+        xattr_get_setup,
+        xattr_get_run,
+        xattr_get_teardown,
+        &ctx
+    );
+
+    result.bytes_processed = ctx.bytes_processed * result.iterations;
+    result.throughput_mbps = benchmark_calculate_throughput(result.bytes_processed, result.total_time_ms);
+    return result;
+}
+
+static int xattr_list_setup(void* user_data)
+{
+    XattrBenchmarkContext* ctx = (XattrBenchmarkContext*)user_data;
+    int                    status;
+
+    status = xattr_benchmark_open(ctx);
+    if (status != 0) {
+        return -1;
+    }
+
+    status = vafs_path_listxattr(ctx->vafs, ctx->path, NULL, 0, &ctx->buffer_size);
+    if (status != 0) {
+        xattr_benchmark_teardown_common(ctx);
+        return -1;
+    }
+
+    ctx->buffer = (char*)malloc(ctx->buffer_size == 0 ? 1 : ctx->buffer_size);
+    if (ctx->buffer == NULL) {
+        xattr_benchmark_teardown_common(ctx);
+        errno = ENOMEM;
+        return -1;
+    }
+
+    status = vafs_path_listxattr(ctx->vafs, ctx->path, ctx->buffer, ctx->buffer_size, &ctx->bytes_processed);
+    if (status != 0) {
+        xattr_benchmark_teardown_common(ctx);
+        return -1;
+    }
+    return 0;
+}
+
+static int xattr_list_run(void* user_data)
+{
+    XattrBenchmarkContext* ctx = (XattrBenchmarkContext*)user_data;
+    int                    status;
+
+    status = vafs_path_listxattr(ctx->vafs, ctx->path, ctx->buffer, ctx->buffer_size, &ctx->bytes_processed);
+    if (status != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static void xattr_list_teardown(void* user_data)
+{
+    xattr_benchmark_teardown_common((XattrBenchmarkContext*)user_data);
+}
+
+static BenchmarkResult run_xattr_list_benchmark(const BenchmarkRunConfig* run_config)
+{
+    XattrBenchmarkContext ctx = {
+        .generated_image_path = { 0 },
+        .path = "/xattr_target",
+        .name = NULL,
+        .vafs = NULL,
+        .buffer = NULL,
+        .buffer_size = 0,
+        .bytes_processed = 0
+    };
+    BenchmarkResult result = benchmark_run(
+        "Repeated Xattr List",
+        run_config,
+        xattr_list_setup,
+        xattr_list_run,
+        xattr_list_teardown,
+        &ctx
+    );
+
+    result.bytes_processed = ctx.bytes_processed * result.iterations;
+    result.throughput_mbps = benchmark_calculate_throughput(result.bytes_processed, result.total_time_ms);
+    return result;
+}
+
+// ============================
 // Main Benchmark Runner
 // ============================
 
@@ -784,12 +1145,13 @@ static void print_usage(const char* program_name)
     printf("  --lookup-path=<path> Path for repeated lookup benchmark\n");
     printf("  --wide-directory=<path> Directory with many entries for wide lookup stat benchmark\n");
     printf("  --deep-path=<path>   Deep path for repeated stat benchmark\n");
-    printf("  --only=<name>        Run a single benchmark (mount, traversal, small, large, lookup, deepstat, wide)\n");
+    printf("  --only=<name>        Run a single benchmark (mount, traversal, small, large, lookup, deepstat, wide, xattrget, xattrlist, xattrs)\n");
     printf("  --help               Display this help message\n");
     printf("\nExamples:\n");
     printf("  %s test.vafs\n", program_name);
     printf("  %s --format=json --small-file=/config.txt test.vafs\n", program_name);
     printf("  %s --warmup=10 --iterations=100 test.vafs\n", program_name);
+    printf("  %s --only=xattrs --warmup=50 --iterations=1000\n", program_name);
 }
 
 static int should_run_benchmark(const char* only_benchmark, const char* name)
@@ -797,9 +1159,18 @@ static int should_run_benchmark(const char* only_benchmark, const char* name)
     return (only_benchmark == NULL) || (strcmp(only_benchmark, name) == 0);
 }
 
+static int is_synthetic_xattr_only_selection(const char* only_benchmark)
+{
+    return only_benchmark != NULL &&
+        (strcmp(only_benchmark, "xattrget") == 0 ||
+         strcmp(only_benchmark, "xattrlist") == 0 ||
+         strcmp(only_benchmark, "xattrs") == 0);
+}
+
 int main(int argc, char** argv)
 {
     const char* image_path = NULL;
+    const char* display_image = NULL;
     const char* output_format = "human";
     const char* small_file_path = "/small.txt";
     const char* large_file_path = "/large.bin";
@@ -809,7 +1180,7 @@ int main(int argc, char** argv)
     const char* deep_stat_path = "/lookup_test/subdir1/subdir2/subdir3/target.txt";
     const char* only_benchmark = NULL;
     BenchmarkCliOptions cli_options = { 0 };
-    BenchmarkResult results[7];
+    BenchmarkResult results[9];
     int result_count = 0;
     int i;
 
@@ -851,29 +1222,32 @@ int main(int argc, char** argv)
         }
     }
 
-    if (!image_path) {
+    if (!image_path && !is_synthetic_xattr_only_selection(only_benchmark)) {
         fprintf(stderr, "Error: No image path specified\n\n");
         print_usage(argv[0]);
         return 1;
     }
 
-    // Check if image file exists
-    if (access(image_path, R_OK) != 0) {
+    if (image_path != NULL && access(image_path, R_OK) != 0) {
         fprintf(stderr, "Error: Cannot access image file: %s\n", image_path);
         return 1;
     }
+
+    display_image = is_synthetic_xattr_only_selection(only_benchmark) ?
+        "(synthetic xattr benchmark image)" :
+        image_path;
 
     // Print header
     if (strcmp(output_format, "json") == 0) {
         printf("{\n");
         printf("  \"image\": ");
-        benchmark_print_json_string(image_path);
+        benchmark_print_json_string(display_image);
         printf(",\n");
         printf("  \"benchmarks\": [\n");
     } else if (strcmp(output_format, "human") == 0) {
         printf("VaFS Benchmark Suite\n");
         printf("====================\n");
-        printf("Image: %s\n", image_path);
+        printf("Image: %s\n", display_image);
     }
 
     // Run benchmarks
@@ -904,6 +1278,14 @@ int main(int argc, char** argv)
     if (should_run_benchmark(only_benchmark, "wide")) {
         BenchmarkRunConfig run_config = make_benchmark_run_config(WIDE_LOOKUP_ITERATIONS, &cli_options);
         results[result_count++] = run_wide_lookup_benchmark(image_path, wide_directory_path, &run_config);
+    }
+    if (should_run_benchmark(only_benchmark, "xattrget") || should_run_benchmark(only_benchmark, "xattrs")) {
+        BenchmarkRunConfig run_config = make_benchmark_run_config(XATTR_GET_ITERATIONS, &cli_options);
+        results[result_count++] = run_xattr_get_benchmark(&run_config);
+    }
+    if (should_run_benchmark(only_benchmark, "xattrlist") || should_run_benchmark(only_benchmark, "xattrs")) {
+        BenchmarkRunConfig run_config = make_benchmark_run_config(XATTR_LIST_ITERATIONS, &cli_options);
+        results[result_count++] = run_xattr_list_benchmark(&run_config);
     }
 
     // Print results

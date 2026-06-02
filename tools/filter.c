@@ -117,19 +117,15 @@ static int __aplib_decode(void* Input, uint32_t InputLength, void* Output, uint3
 # endif
 #endif
 
-struct __brieflz_block {
-    uint64_t usize;
-    char     payload[];
-};
-
 static int __brieflz_encode(void* source, uint32_t sourceLength, void** output, uint32_t* outputLength)
 {
-    struct __brieflz_block* block;
-    uint32_t                compressedSize;
-    void*                   workmemory = NULL;
+    uint8_t*  buffer;
+    uint32_t  compressedSize;
+    uint64_t  uncompressedSize = sourceLength;
+    void*     workmemory = NULL;
 
-    block = malloc(blz_max_packed_size(sourceLength) + sizeof(struct __brieflz_block));
-    if (block == NULL) {
+    buffer = malloc(blz_max_packed_size(sourceLength) + sizeof(uint64_t));
+    if (buffer == NULL) {
         errno = ENOMEM;
         goto error;
     }
@@ -140,37 +136,50 @@ static int __brieflz_encode(void* source, uint32_t sourceLength, void** output, 
         goto error;
     }
 
-    compressedSize = blz_pack_level(source, &block->payload[0], sourceLength, workmemory, 9);
+    compressedSize = blz_pack_level(source, buffer + sizeof(uint64_t), sourceLength, workmemory, 9);
     if (compressedSize == BLZ_ERROR) {
         errno = EINVAL;
         goto error;
     }
     free(workmemory);
 
-    // store the uncompressed size
-    block->usize = sourceLength;
+    // Persist the logical size ahead of the compressed payload so the decoder
+    // can size its destination buffer before calling into BriefLZ.
+    memcpy(buffer, &uncompressedSize, sizeof(uint64_t));
 
-    *output = block;
-    *outputLength = compressedSize + sizeof(struct __brieflz_block);
+    *output = buffer;
+    *outputLength = compressedSize + (uint32_t)sizeof(uint64_t);
     return 0;
 
 error:
-    free(block);
+    free(buffer);
     free(workmemory);
     return -1;
 }
 
 static int __brieflz_decode(void* source, uint32_t sourceLength, void* output, uint32_t* outputLength)
 {
-    uint64_t                decompressedSize;
-    struct __brieflz_block* block = source;
+    uint64_t decompressedSize;
+    uint8_t* bytes = source;
 
-    if (block->usize > *outputLength) {
+    if (sourceLength < sizeof(uint64_t)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    memcpy(&decompressedSize, bytes, sizeof(uint64_t));
+
+    if (decompressedSize > *outputLength) {
         errno = ENOSPC;
         return -1;
     }
 
-    decompressedSize = blz_depack_safe(&block->payload[0], sourceLength, output, (unsigned long)block->usize);
+    decompressedSize = blz_depack_safe(
+        bytes + sizeof(uint64_t),
+        sourceLength - (uint32_t)sizeof(uint64_t),
+        output,
+        (unsigned long)decompressedSize
+    );
     if (decompressedSize == BLZ_ERROR) {
         errno = EINVAL;
         return -1;

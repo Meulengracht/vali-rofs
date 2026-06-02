@@ -4,7 +4,7 @@ This directory contains a comprehensive benchmark suite for measuring VaFS (Vali
 
 ## Overview
 
-The benchmark suite measures seven core workload categories:
+The benchmark suite measures nine core workload categories:
 
 1. **Mount Latency** - Time to open and initialize a VaFS image
 2. **Metadata Traversal** - Speed of directory listing and metadata operations
@@ -13,10 +13,14 @@ The benchmark suite measures seven core workload categories:
 5. **Repeated Path Lookup** - Path resolution performance with repeated lookups
 6. **Deep Path Stat** - Repeated `stat` on a long/deep path
 7. **Wide Directory Stat** - Repeated `stat` across many siblings in a wide directory
+8. **Repeated Xattr Get** - Repeated `getxattr` against a file with persisted xattrs
+9. **Repeated Xattr List** - Repeated `listxattr` against the same xattr-bearing file
 
 The `deepstat` and `wide` benchmarks are the closest stand-ins for hot FUSE `getattr` and `access` workloads because they repeatedly call `vafs_path_stat()` against already-open images.
 
 The `lookup` benchmark is the closest stand-in for repeated open/lookup traffic because it repeatedly resolves the same file path through `vafs_file_open()`.
+
+The xattr benchmarks synthesize their own temporary VaFS image with persisted xattrs during setup so they stay reproducible on hosts, including Windows, where the local filesystem may not expose xattrs at all.
 
 ## Building
 
@@ -89,6 +93,12 @@ For steadier measurements on very fast workloads, use warmup and higher iteratio
 
 ```bash
 ./build/bin/vafs-bench --warmup=50 --iterations=1000 /tmp/vafs-benchmark-data/benchmark.vafs
+```
+
+To run only the synthetic xattr workloads, no external image path is required:
+
+```bash
+./build/bin/vafs-bench --only=xattrs --warmup=50 --iterations=1000
 ```
 
 ### Output Formats
