@@ -35,14 +35,22 @@ struct VaFsStreamDevice;
 
 typedef uint32_t vafsblock_t;
 
+// Image headers begin with a fixed magic so readers can reject unrelated
+// files before trying to interpret any packed descriptor layout.
 #define VA_FS_MAGIC       0x3144524D
-#define VA_FS_VERSION     0x00010000
+// Descriptor bodies now persist full entry metadata, so older readers must
+// reject these images instead of interpreting the expanded fixed records as
+// variable-length name payloads.
+#define VA_FS_VERSION     0x00020000
 
+// Sentinel positions mark metadata that has not been assigned a final stream
+// coordinate yet, or optional sections that are absent from an image.
 #define VA_FS_INVALID_BLOCK  0xFFFF
 #define VA_FS_INVALID_OFFSET 0xFFFFFFFF
+#define VA_FS_INVALID_XATTR_INDEX 0xFFFFFFFFu
 
-// I mean, do we really need more? But it's just a lazy implementation
-// decision this.
+// Feature discovery stays bounded because images only carry a small set of
+// global capabilities, and a fixed upper limit keeps header handling simple.
 #define VA_FS_MAX_FEATURES 16
 
 // The default block size for the descriptor stream is 8kb.
@@ -64,6 +72,9 @@ typedef uint32_t vafsblock_t;
 #define VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY  4
 #define VAFS_LOOKUP_CACHE_CAPACITY           (VAFS_LOOKUP_CACHE_SET_COUNT * VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY)
 
+// Feature GUID for the optional cold xattr section.
+#define VA_FS_FEATURE_XATTRS { 0x6D0DB4A6, 0x2F7C, 0x4A8E, { 0x8D, 0x55, 0x62, 0x93, 0xB0, 0x35, 0x74, 0xE1 } }
+
 // Logging macros
 #define VAFS_ERROR(...)  vafs_log_message(VaFsLogLevel_Error, "libvafs: " __VA_ARGS__)
 #define VAFS_WARN(...)   vafs_log_message(VaFsLogLevel_Warning, "libvafs: " __VA_ARGS__)
@@ -78,6 +89,7 @@ typedef uint32_t vafsblock_t;
 // A directory with more than 1 million entries is suspicious and likely malformed
 #define VAFS_MAX_DIRECTORY_ENTRIES 1000000
 
+// The packed structs below define the stable on-disk image layout.
 VAFS_ONDISK_STRUCT(VaFsBlockPosition, {
     vafsblock_t Index;
     uint32_t    Offset;
@@ -95,26 +107,55 @@ VAFS_ONDISK_STRUCT(VaFsHeader, {
     VaFsBlockPosition_t RootDescriptor;
 });
 
+// Descriptor type tags identify which fixed record body follows each generic
+// descriptor header in the descriptor stream.
 #define VA_FS_DESCRIPTOR_TYPE_FILE      0x01
 #define VA_FS_DESCRIPTOR_TYPE_DIRECTORY 0x02
 #define VA_FS_DESCRIPTOR_TYPE_SYMLINK   0x03
+#define VA_FS_DESCRIPTOR_TYPE_SPECIAL   0x04
+#define VA_FS_DESCRIPTOR_TYPE_HARDLINK  0x05
 
 VAFS_ONDISK_STRUCT(VaFsDescriptor, {
     uint16_t Type;
     uint16_t Length; // Length of the descriptor
 });
 
+VAFS_ONDISK_STRUCT(VaFsDescriptorTimestamp, {
+    int64_t  Seconds;
+    uint32_t Nanoseconds;
+});
+
+VAFS_ONDISK_STRUCT(VaFsDescriptorMetadata, {
+    uint32_t                  Mask;
+    uint32_t                  Mode;
+    uint32_t                  Uid;
+    uint32_t                  Gid;
+    uint32_t                  LinkCount;
+    uint32_t                  XattrCount;
+    // Hot descriptors carry only the xattr-set index so common metadata reads
+    // do not drag the colder variable-length xattr payload into every entry.
+    uint32_t                  XattrIndex;
+    uint64_t                  ObjectId;
+    VaFsDescriptorTimestamp_t MTime;
+    VaFsDescriptorTimestamp_t ATime;
+    VaFsDescriptorTimestamp_t CTime;
+    VaFsDescriptorTimestamp_t BirthTime;
+    uint32_t                  DeviceMajor;
+    uint32_t                  DeviceMinor;
+    uint32_t                  WindowsAttributes;
+});
+
 VAFS_ONDISK_STRUCT(VaFsFileDescriptor, {
     VaFsDescriptor_t    Base;
     VaFsBlockPosition_t Data;
     uint32_t            FileLength;
-    uint32_t            Permissions;
+    VaFsDescriptorMetadata_t Metadata;
 });
 
 VAFS_ONDISK_STRUCT(VaFsDirectoryDescriptor, {
     VaFsDescriptor_t    Base;
     VaFsBlockPosition_t Descriptor;
-    uint32_t            Permissions;
+    VaFsDescriptorMetadata_t Metadata;
 });
 
 VAFS_ONDISK_STRUCT(VaFsDirectoryHeader, {
@@ -122,10 +163,59 @@ VAFS_ONDISK_STRUCT(VaFsDirectoryHeader, {
 });
 
 VAFS_ONDISK_STRUCT(VaFsSymlinkDescriptor, {
-    VaFsDescriptor_t    Base;
-    uint16_t            NameLength;
-    uint16_t            TargetLength;
+    VaFsDescriptor_t         Base;
+    uint16_t                 NameLength;
+    uint16_t                 TargetLength;
+    VaFsDescriptorMetadata_t Metadata;
 });
+
+VAFS_ONDISK_STRUCT(VaFsSpecialDescriptor, {
+    VaFsDescriptor_t         Base;
+    uint16_t                 EntryType;
+    uint16_t                 Reserved;
+    VaFsDescriptorMetadata_t Metadata;
+});
+
+VAFS_ONDISK_STRUCT(VaFsHardlinkDescriptor, {
+    VaFsDescriptor_t Base;
+    uint16_t         NameLength;
+    uint16_t         Reserved;
+    uint64_t         ObjectId;
+});
+
+VAFS_ONDISK_STRUCT(VaFsXattrSetDescriptor, {
+    uint32_t Count;
+});
+
+VAFS_ONDISK_STRUCT(VaFsXattrRecordDescriptor, {
+    uint16_t NameLength;
+    uint16_t Reserved;
+    uint32_t ValueLength;
+});
+
+VAFS_ONDISK_STRUCT(VaFsFeatureXattrs, {
+    struct VaFsFeatureHeader Header;
+    // The feature anchors the cold xattr section because entry descriptors only
+    // know which set they want, not where the section itself begins.
+    uint32_t                 DescriptorIndex;
+    uint32_t                 DescriptorOffset;
+    uint32_t                 Count;
+});
+
+// Readers keep one scratch object large enough for any fixed entry-descriptor
+// body and then fetch variable-length names or targets separately.
+typedef union VaFsEntryDescriptorScratch {
+    VaFsDescriptor_t          Base;
+    VaFsFileDescriptor_t      File;
+    VaFsDirectoryDescriptor_t Directory;
+    VaFsSymlinkDescriptor_t   Symlink;
+    VaFsSpecialDescriptor_t   Special;
+    VaFsHardlinkDescriptor_t  Hardlink;
+} VaFsEntryDescriptorScratch_t;
+
+enum {
+    VA_FS_MAX_DESCRIPTOR_SIZE = sizeof(VaFsEntryDescriptorScratch_t)
+};
 
 enum VaFsMode {
     VaFsMode_Read,
@@ -155,14 +245,24 @@ struct VaFsFile {
     struct VaFs*         VaFs;
     VaFsFileDescriptor_t Descriptor;
     const char*          Name;
-    struct vafs_stat     Stat;
+    struct VaFsMetadata  Stat;
+    struct VaFsXattrSet* Xattrs;
     int                  StatCached;
+    int                  XattrsLoaded;
 };
 
 struct VaFsDirectory {
     struct VaFs*              VaFs;
     VaFsDirectoryDescriptor_t Descriptor;
+    // Only the root directory needs its own descriptor position persisted back
+    // to the image header because every other directory descriptor is anchored
+    // by its parent entry.
+    VaFsBlockPosition_t       DescriptorPosition;
     const char*               Name;
+    struct VaFsMetadata       Stat;
+    struct VaFsXattrSet*      Xattrs;
+    int                       StatCached;
+    int                       XattrsLoaded;
 };
 
 struct VaFsSymlink {
@@ -170,8 +270,52 @@ struct VaFsSymlink {
     VaFsSymlinkDescriptor_t Descriptor;
     const char*             Name;
     const char*             Target;
-    struct vafs_stat        Stat;
+    struct VaFsMetadata     Stat;
+    struct VaFsXattrSet*    Xattrs;
     int                     StatCached;
+    int                     XattrsLoaded;
+};
+
+struct VaFsSpecial {
+    struct VaFs*            VaFs;
+    VaFsSpecialDescriptor_t Descriptor;
+    const char*             Name;
+    struct VaFsMetadata     Stat;
+    struct VaFsXattrSet*    Xattrs;
+    int                     StatCached;
+    int                     XattrsLoaded;
+};
+
+struct VaFsHardlink {
+    struct VaFs*             VaFs;
+    VaFsHardlinkDescriptor_t Descriptor;
+    const char*              Name;
+};
+
+struct VaFsXattr {
+    char*               Name;
+    void*               Value;
+    uint32_t            ValueLength;
+    struct VaFsXattr*   Link;
+};
+
+struct VaFsXattrSet {
+    uint32_t            Count;
+    // Writer-side dedup assigns one stable section-local index that multiple
+    // entries can share when their xattr payloads are identical.
+    uint32_t            Index;
+    struct VaFsXattr*   Entries;
+};
+
+struct VaFsXattrStore {
+    int                    Present;
+    int                    PositionsLoaded;
+    // Readers discover the section once through the feature table, then cache
+    // per-set positions only if some caller actually touches xattrs.
+    VaFsBlockPosition_t    Start;
+    uint32_t               Count;
+    VaFsBlockPosition_t*   Positions;
+    struct VaFsXattrSet**  Sets;
 };
 
 struct VaFs {
@@ -195,7 +339,72 @@ struct VaFs {
 
     struct VaFsDirectory*  RootDirectory;
     struct VaFsLookupCache LookupCache;
+    struct VaFsXattrStore  XattrStore;
 };
+
+/**
+ * @brief Completes the canonical metadata fields required for one entry.
+ *
+ * Descriptor writers and create paths both run through this helper so entry
+ * type, size, and fallback link-count behavior stay identical everywhere.
+ *
+ * @param[In,Out] metadata Metadata structure to normalize.
+ * @param[In]     type     Final entry type.
+ * @param[In]     size     Final logical size for the entry.
+ */
+extern void __finalize_entry_metadata(
+    struct VaFsMetadata* metadata,
+    enum VaFsEntryType   type,
+    uint64_t             size);
+
+/**
+ * @brief Returns non-zero when the supplied entry type is one of the supported special-node kinds.
+ *
+ * @param[In] type Entry type to inspect.
+ * @return Non-zero for supported special entry types, otherwise zero.
+ */
+extern int __is_special_entry_type(
+    enum VaFsEntryType type);
+
+/**
+ * @brief Initializes a file descriptor from already-normalized metadata.
+ *
+ * @param[Out] descriptor File descriptor to initialize.
+ * @param[In]  metadata   Metadata snapshot to copy into the descriptor.
+ */
+extern void __initialize_file_descriptor(
+    VaFsFileDescriptor_t*    descriptor,
+    const struct VaFsMetadata* metadata);
+
+/**
+ * @brief Initializes a directory descriptor from already-normalized metadata.
+ *
+ * @param[Out] descriptor Directory descriptor to initialize.
+ * @param[In]  metadata   Metadata snapshot to copy into the descriptor.
+ */
+extern void __initialize_directory_descriptor(
+    VaFsDirectoryDescriptor_t* descriptor,
+    const struct VaFsMetadata* metadata);
+
+/**
+ * @brief Initializes a symlink descriptor from already-normalized metadata.
+ *
+ * @param[Out] descriptor Symlink descriptor to initialize.
+ * @param[In]  metadata   Metadata snapshot to copy into the descriptor.
+ */
+extern void __initialize_symlink_descriptor(
+    VaFsSymlinkDescriptor_t*  descriptor,
+    const struct VaFsMetadata* metadata);
+
+/**
+ * @brief Initializes a special-entry descriptor from already-normalized metadata.
+ *
+ * @param[Out] descriptor Special-entry descriptor to initialize.
+ * @param[In]  metadata   Metadata snapshot to copy into the descriptor.
+ */
+extern void __initialize_special_descriptor(
+    VaFsSpecialDescriptor_t*  descriptor,
+    const struct VaFsMetadata* metadata);
 
 /**
  * @brief Opens a file-backed stream device for read access to a VaFS image.
@@ -570,6 +779,15 @@ extern int vafs_directory_flush(
     struct VaFsDirectory* directory);
 
 /**
+ * @brief Writes the standalone root directory descriptor for a writable image.
+ *
+ * @param[In] directory Writable root directory whose child payload is already flushed.
+ * @return 0 on success, otherwise -1 with `errno` set.
+ */
+extern int vafs_directory_write_root_descriptor(
+    struct VaFsDirectory* directory);
+
+/**
  * @brief Opens the root directory of an existing image for read access.
  *
  * @param[In]  vafs         Filesystem instance that owns the root directory.
@@ -622,6 +840,8 @@ extern void vafs_log_message(
 // Utility functions
 struct VaFsDirectoryEntry;
 
+// Read-mode directories start in a lightweight open state and only transition
+// to loaded once their child descriptors have been materialized.
 enum VaFsDirectoryState {
     VaFsDirectoryState_Open,
     VaFsDirectoryState_Loaded
@@ -650,15 +870,26 @@ struct VaFsDirectoryWriter {
     int                        IndexDirty;
 };
 
+// Directory entries are the shared tagged-union node type used by lookup,
+// serialization, and metadata code across both read and write modes.
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4201)
+#endif
 struct VaFsDirectoryEntry {
     int Type;
     union {
         struct VaFsFile*      File;
         struct VaFsDirectory* Directory;
         struct VaFsSymlink*   Symlink;
+        struct VaFsSpecial*   Special;
+        struct VaFsHardlink*  Hardlink;
     };
     struct VaFsDirectoryEntry* Link;
 };
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 /**
  * @brief Checks whether a path refers to the filesystem root.
@@ -669,6 +900,18 @@ struct VaFsDirectoryEntry {
  * @return 1 when the path resolves to root, otherwise 0.
  */
 extern int __vafs_is_root_path(const char* path);
+
+/**
+ * @brief Materializes the read-mode root directory on first use.
+ *
+ * Read-mode opens leave the root unopened until a path operation actually
+ * needs descriptor bytes so callers can install custom runtime filter
+ * callbacks immediately after `vafs_open_*` and before the first decode.
+ *
+ * @param[In] vafs Filesystem instance whose root should be available.
+ * @return 0 when the root is ready, otherwise -1 with `errno` set.
+ */
+extern int __vafs_ensure_root_open(struct VaFs* vafs);
 
 /**
  * @brief Extracts the next path component from a path string.
@@ -703,16 +946,16 @@ extern int __vafs_resolve_symlink(char* buffer, size_t bufferLength, const char*
  * @brief Internal path-stat implementation with explicit symlink depth tracking.
  *
  * This resolves the path component-by-component, optionally follows symlinks,
- * and fills the lightweight `vafs_stat` structure for the final entry.
+ * and fills the metadata structure for the final entry.
  *
  * @param[In]  vafs         Filesystem instance to resolve within.
  * @param[In]  path         Absolute or root-relative path to stat.
  * @param[In]  followLinks  Non-zero to follow symlinks, zero to report the symlink itself.
- * @param[Out] stat         Receives the resolved metadata on success.
+ * @param[Out] metadata     Receives the resolved metadata on success.
  * @param[In]  symlinkDepth Current recursive symlink depth.
  * @return 0 on success, otherwise -1 with `errno` set.
  */
-extern int __vafs_path_stat_internal(struct VaFs* vafs, const char* path, int followLinks, struct vafs_stat* stat, int symlinkDepth);
+extern int __vafs_path_stat_internal(struct VaFs* vafs, const char* path, int followLinks, struct VaFsMetadata* metadata, int symlinkDepth);
 
 /**
  * @brief Internal directory-open implementation with explicit symlink depth tracking.
@@ -735,6 +978,94 @@ extern int __vafs_directory_open_internal(struct VaFs* vafs, const char* path, s
  * @return 0 on success, otherwise -1 with `errno` set.
  */
 extern int __vafs_file_open_internal(struct VaFs* vafs, const char* path, struct VaFsFileHandle** handleOut, int symlinkDepth);
+
+/**
+ * @brief Resolves a hardlink placeholder entry to its canonical backing object.
+ *
+ * Internal metadata and xattr code calls this first so aliases cannot diverge
+ * from the payload-bearing entry that owns the shared object state.
+ *
+ * @param[In] vafs  Filesystem instance that owns the entry.
+ * @param[In] entry Directory entry that may represent a hardlink alias.
+ * @return Canonical backing entry on success, otherwise `NULL` with `errno` set.
+ */
+extern struct VaFsDirectoryEntry* __vafs_resolve_hardlink(struct VaFs* vafs, struct VaFsDirectoryEntry* entry);
+
+/**
+ * @brief Internal listxattr implementation with explicit symlink-follow policy.
+ *
+ * Tooling uses this to preserve symlink-object xattrs without changing the
+ * public API contract that always follows the final symlink component.
+ *
+ * @param[In]  vafs         Filesystem instance to query.
+ * @param[In]  path         Absolute path of the entry.
+ * @param[In]  followLinks  Non-zero to resolve symlinks, zero to stop on the link itself.
+ * @param[Out] buffer       Optional output buffer for the packed xattr name list.
+ * @param[In]  bufferSize   Size of `buffer` in bytes.
+ * @param[Out] bytesWritten Receives the required or written byte count.
+ * @return 0 on success, otherwise -1 with `errno` set.
+ */
+extern int __vafs_path_listxattr(struct VaFs* vafs, const char* path, int followLinks, char* buffer, size_t bufferSize, size_t* bytesWritten);
+
+/**
+ * @brief Internal getxattr implementation with explicit symlink-follow policy.
+ *
+ * @param[In]  vafs         Filesystem instance to query.
+ * @param[In]  path         Absolute path of the entry.
+ * @param[In]  followLinks  Non-zero to resolve symlinks, zero to stop on the link itself.
+ * @param[In]  name         Xattr name to fetch.
+ * @param[Out] value        Optional destination buffer for the xattr value.
+ * @param[In]  valueSize    Size of `value` in bytes.
+ * @param[Out] bytesWritten Receives the required or written byte count.
+ * @return 0 on success, otherwise -1 with `errno` set.
+ */
+extern int __vafs_path_getxattr(struct VaFs* vafs, const char* path, int followLinks, const char* name, void* value, size_t valueSize, size_t* bytesWritten);
+
+/**
+ * @brief Internal setxattr implementation with explicit symlink-follow policy.
+ *
+ * @param[In] vafs        Filesystem instance opened in write mode.
+ * @param[In] path        Absolute path of the entry.
+ * @param[In] followLinks Non-zero to resolve symlinks, zero to stop on the link itself.
+ * @param[In] name        Xattr name to write.
+ * @param[In] value       Optional value buffer. May be `NULL` only when `valueSize` is zero.
+ * @param[In] valueSize   Size of `value` in bytes.
+ * @return 0 on success, otherwise -1 with `errno` set.
+ */
+extern int __vafs_path_setxattr(struct VaFs* vafs, const char* path, int followLinks, const char* name, const void* value, size_t valueSize);
+
+/**
+ * @brief Assigns stable xattr-set indices before descriptors are serialized.
+ *
+ * The writer runs this after all entry metadata has been finalized so hot
+ * descriptors can point at deduplicated cold xattr payloads.
+ *
+ * @param[In] vafs Filesystem instance being written.
+ * @return 0 on success, otherwise -1 with `errno` set.
+ */
+extern int __vafs_xattr_prepare_write(struct VaFs* vafs);
+
+/**
+ * @brief Serializes the deduplicated cold xattr section into the descriptor stream.
+ *
+ * @param[In] vafs Filesystem instance being written.
+ * @return 0 on success, otherwise -1 with `errno` set.
+ */
+extern int __vafs_xattr_write_section(struct VaFs* vafs);
+
+/**
+ * @brief Releases cached reader-side xattr store state for an image.
+ *
+ * @param[In] vafs Filesystem instance whose xattr store should be discarded.
+ */
+extern void __vafs_xattr_store_destroy(struct VaFs* vafs);
+
+/**
+ * @brief Destroys one deduplicated xattr set and all of its entries.
+ *
+ * @param[In] set Xattr set to destroy. `NULL` is ignored.
+ */
+extern void __vafs_xattr_set_destroy(struct VaFsXattrSet* set);
 
 /**
  * @brief Returns the linked-list entries for a directory, loading them on demand in read mode.
@@ -768,15 +1099,15 @@ extern struct VaFsDirectoryEntry* __vafs_directory_find_entry(struct VaFsDirecto
 extern size_t __vafs_directory_lookup_cache_set(const struct VaFsDirectory* directory, const char* token);
 
 /**
- * @brief Materializes a lightweight stat structure for a directory entry.
+ * @brief Materializes metadata for a directory entry.
  *
  * Read mode may satisfy this from cached metadata stored on the entry object.
  *
  * @param[In]  entry Directory entry to describe.
- * @param[Out] stat  Receives the entry metadata on success.
+ * @param[Out] metadata Receives the entry metadata on success.
  * @return 0 on success, otherwise -1 with `errno` set.
  */
-extern int __vafs_directory_entry_stat(struct VaFsDirectoryEntry* entry, struct vafs_stat* stat);
+extern int __vafs_directory_entry_stat(struct VaFsDirectoryEntry* entry, struct VaFsMetadata* metadata);
 
 /**
  * @brief Returns the stable name string associated with a directory entry.
@@ -803,7 +1134,18 @@ extern int __vafs_directory_index_build(struct VaFsDirectoryReader* reader);
  */
 extern struct VaFsDirectoryEntry* __vafs_directory_get(struct VaFsDirectory* directory, const char* token);
 
+/**
+ * @brief Releases the sorted and hashed lookup accelerators owned by a read-mode directory.
+ *
+ * @param[In] reader Directory reader whose cached indexes should be dropped.
+ */
 extern void __directory_reader_index_delete(struct VaFsDirectoryReader* reader);
+
+/**
+ * @brief Releases the name index cache owned by a write-mode directory.
+ *
+ * @param[In] writer Directory writer whose cached indexes should be dropped.
+ */
 extern void __directory_writer_index_delete(struct VaFsDirectoryWriter* writer);
 
 #endif // __VAFS_PRIVATE_H__

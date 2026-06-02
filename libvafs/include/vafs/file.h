@@ -23,6 +23,7 @@
 #define __VAFS_FILE_H__
 
 #include <vafs/vafs.h>
+#include <vafs/stat.h>
 
 /**
  * @brief Opens a file by absolute path for reading from an image opened in read mode.
@@ -59,15 +60,6 @@ extern int vafs_file_close(
  * @return size_t File length in bytes, or (size_t)-1 if handle is invalid.
  */
 extern size_t vafs_file_length(
-    struct VaFsFileHandle* handle);
-
-/**
- * @brief Returns the stored permission bits for the file.
- *
- * @param handle File handle to query.
- * @return uint32_t Permission bits for the file, or (uint32_t)-1 if handle is invalid.
- */
-extern uint32_t vafs_file_permissions(
     struct VaFsFileHandle* handle);
 
 /**

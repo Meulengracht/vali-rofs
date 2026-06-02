@@ -221,33 +221,55 @@ static int __default_fail_decode(void* Input, uint32_t InputLength, void* Output
     return -1;
 }
 
-static void __parse_known_features(
+static int __parse_known_features(
     struct VaFs* vafs)
 {
     // Persisted filter ids tell the reader which streams require runtime decode
-    // support, even before the actual callback table is installed.
+    // support. Read-mode open leaves the root lazy so callers can replace
+    // these placeholders with custom filter ops before the first root access.
     for (int i = 0; i < vafs->Header.FeatureCount; i++) {
         if (!__compare_guids(&vafs->Features[i]->Guid, &g_filterGuid)) {
             struct VaFsFeatureFilter* filter = (struct VaFsFeatureFilter*)vafs->Features[i];
 
             if (filter->Header.Length < sizeof(struct VaFsFeatureFilter)) {
-                // Ignore malformed or legacy-sized payloads instead of reading
-                // split descriptor/data policy fields past the stored feature.
-                continue;
+                // Images now require the current split descriptor/data filter
+                // payload, so undersized records are malformed instead of legacy-compatible.
+                VAFS_ERROR("__parse_known_features: filter feature length %u smaller than expected %zu\n",
+                    filter->Header.Length, sizeof(struct VaFsFeatureFilter));
+                errno = EINVAL;
+                return -1;
             }
 
             if (filter->DescriptorType != VaFsFilterType_None) {
-                // Fail fast if descriptor blocks require decode but no runtime
-                // filter ops have been supplied yet.
                 vafs_stream_set_filter(vafs->DescriptorStream, __default_fail_encode, __default_fail_decode);
             }
             if (filter->DataType != VaFsFilterType_None) {
-                // Apply the same guard independently to file-data blocks because
-                // the two streams may now use different filter policies.
+                // Apply the same placeholder independently to file-data blocks
+                // because descriptor and data streams can use different filters.
                 vafs_stream_set_filter(vafs->DataStream, __default_fail_encode, __default_fail_decode);
             }
         }
     }
+
+    return 0;
+}
+
+int __vafs_ensure_root_open(
+    struct VaFs* vafs)
+{
+    if (vafs == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (vafs->RootDirectory != NULL) {
+        return 0;
+    }
+
+    // Read-mode images postpone root materialization so callers can install
+    // custom runtime filter callbacks immediately after open and before the
+    // first descriptor block is decoded.
+    return __initialize_root(vafs);
 }
 
 static int __load_features(
@@ -553,20 +575,22 @@ static int __new_vafs(
             vafs_destroy(vafs);
             return -1;
         }
-    }
 
-    status = __initialize_root(vafs);
-    if (status) {
-        VAFS_ERROR("__new_vafs: failed to initialize root directory: %i\n", status);
-        vafs_destroy(vafs);
-        return -1;
-    }
-
-    // Handle any known features that have been loaded
-    if (vafs->Mode == VaFsMode_Read) {
-        // Apply persisted policies after both streams exist so runtime filter
-        // placeholders land on the correct stream.
-        __parse_known_features(vafs);
+        // Apply persisted stream policy before touching the root descriptor so
+        // filtered descriptor blocks can be materialized during root open.
+        status = __parse_known_features(vafs);
+        if (status) {
+            VAFS_ERROR("__new_vafs: failed to parse known features: %i\n", status);
+            vafs_destroy(vafs);
+            return status;
+        }
+    } else {
+        status = __initialize_root(vafs);
+        if (status) {
+            VAFS_ERROR("__new_vafs: failed to initialize root directory: %i\n", status);
+            vafs_destroy(vafs);
+            return -1;
+        }
     }
 
     *vafsOut = vafs;
@@ -710,8 +734,8 @@ static int __write_vafs_header(
     VAFS_DEBUG("__write_vafs_header: descriptor block offset: %i\n", vafs->Header.DescriptorBlockOffset);
     VAFS_DEBUG("__write_vafs_header: data block offset: %i\n", vafs->Header.DataBlockOffset);
 
-    vafs->Header.RootDescriptor.Index = vafs->RootDirectory->Descriptor.Descriptor.Index;
-    vafs->Header.RootDescriptor.Offset = vafs->RootDirectory->Descriptor.Descriptor.Offset;
+    vafs->Header.RootDescriptor.Index = vafs->RootDirectory->DescriptorPosition.Index;
+    vafs->Header.RootDescriptor.Offset = vafs->RootDirectory->DescriptorPosition.Offset;
     VAFS_DEBUG("__write_vafs_header: root descriptor index: %i\n", vafs->Header.RootDescriptor.Index);
     VAFS_DEBUG("__write_vafs_header: root descriptor offset: %i\n", vafs->Header.RootDescriptor.Offset);
 
@@ -723,11 +747,36 @@ static int __create_image(
 {
     int status;
 
+    // Hot descriptors only store xattr indices, so the writer has to assign the
+    // final deduplicated section order before any directory payload is flushed.
+    status = __vafs_xattr_prepare_write(vafs);
+    if (status) {
+        VAFS_ERROR("Failed to prepare xattr section: %i\n", status);
+        return -1;
+    }
+
     // flush files
     VAFS_DEBUG("__create_image: flushing files\n");
     status = vafs_directory_flush(vafs->RootDirectory);
     if (status) {
         VAFS_ERROR("Failed to flush files: %i\n", status);
+        return -1;
+    }
+
+    // Root metadata is written after the child list because only then does the
+    // root descriptor know the final location of that list, and before the cold
+    // xattr section so every hot descriptor stays in one contiguous descriptor region.
+    status = vafs_directory_write_root_descriptor(vafs->RootDirectory);
+    if (status) {
+        VAFS_ERROR("Failed to write root descriptor: %i\n", status);
+        return -1;
+    }
+
+    // Xattr sets live outside the hot directory payloads so directory readers
+    // never pay to walk them during ordinary lookup or stat traversal.
+    status = __vafs_xattr_write_section(vafs);
+    if (status) {
+        VAFS_ERROR("Failed to write xattr section: %i\n", status);
         return -1;
     }
 
@@ -823,6 +872,7 @@ static void vafs_destroy(
 
     // cleanup directory instances
     vafs_directory_destroy(vafs->RootDirectory);
+    __vafs_xattr_store_destroy(vafs);
     
     // cleanup the base instance
     free(vafs);

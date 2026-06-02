@@ -109,6 +109,10 @@ enum VaFsEntryType {
     VaFsEntryType_File,
     VaFsEntryType_Directory,
     VaFsEntryType_Symlink,
+    VaFsEntryType_CharacterDevice,
+    VaFsEntryType_BlockDevice,
+    VaFsEntryType_Fifo,
+    VaFsEntryType_Hardlink,
 };
 
 /**
@@ -117,6 +121,8 @@ enum VaFsEntryType {
 struct VaFsEntry {
     const char*        Name;
     enum VaFsEntryType Type;
+    uint64_t           ObjectId;
+    uint32_t           MetadataMask;
 };
 
 /**
@@ -153,8 +159,10 @@ VAFS_ONDISK_STRUCT(VaFsFeatureFilter, {
 /**
  * @brief Runtime filter callbacks used when a filesystem image is read or written through filtered streams.
  *
- * Install this feature after opening or creating an image and again when reopening that same image later.
- * The callback table is consumed at runtime and is not serialized into the on-disk image.
+ * Install this feature after opening or creating an image. When reopening a filtered image, install the
+ * callbacks after `vafs_open_*` returns and before the first directory, path, or file operation that would
+ * force descriptor-stream decode. The callback table is consumed at runtime and is not serialized into the
+ * on-disk image.
  */
 struct VaFsFeatureFilterOps {
     struct VaFsFeatureHeader Header;
@@ -223,17 +231,6 @@ extern void vafs_config_set_descriptor_block_size(struct VaFsConfiguration* conf
  * @param blockSize     Desired data stream block size in bytes.
  */
 extern void vafs_config_set_data_block_size(struct VaFsConfiguration* configuration, uint32_t blockSize);
-
-/**
- * @brief Backward-compatible alias for vafs_config_set_data_block_size.
- *
- * Values outside the supported range are ignored and reported through the library log. Passing NULL
- * is a no-op.
- *
- * @param configuration Configuration structure to update.
- * @param blockSize     Desired data stream block size in bytes.
- */
-extern void vafs_config_set_block_size(struct VaFsConfiguration* configuration, uint32_t blockSize);
 
 /**
  * @brief Allows custom backends as vafs images. The default API for vafs only supports

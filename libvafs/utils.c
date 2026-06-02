@@ -137,6 +137,13 @@ int __vafs_resolve_symlink(
         return -1;
     }
 
+    // Absolute symlink targets define a fresh path from root, so preserving
+    // the traversed parent prefix would duplicate directories during follow-up
+    // resolution such as "/meta/link" -> "/meta/target".
+    if (symlinkTarget[0] == '/') {
+        j = 0;
+    }
+
     // now we resolve the final path by appending the symlink target,
     // while canonicalization of the final path
     for (i = 0; i < strlen(symlinkTarget) && j < bufferLength; i++) {
@@ -194,19 +201,23 @@ int __vafs_resolve_symlink(
 }
 
 int __vafs_path_stat_internal(
-    struct VaFs*      vafs,
-    const char*       path,
-    int               followLinks,
-    struct vafs_stat* stat,
-    int               symlinkDepth)
+    struct VaFs*         vafs,
+    const char*          path,
+    int                  followLinks,
+    struct VaFsMetadata* metadata,
+    int                  symlinkDepth)
 {
     struct VaFsDirectory*      currentDirectory;
     struct VaFsDirectoryEntry* entry;
     const char*                remainingPath = path;
     char                       token[VAFS_NAME_MAX + 1];
 
-    if (vafs == NULL || path == NULL || stat == NULL) {
+    if (vafs == NULL || path == NULL || metadata == NULL) {
         errno = EINVAL;
+        return -1;
+    }
+
+    if (__vafs_ensure_root_open(vafs) != 0) {
         return -1;
     }
 
@@ -221,9 +232,13 @@ int __vafs_path_stat_internal(
     // special case - root directory, we specfiy
     // default access for it for now
     if (__vafs_is_root_path(path)) {
-        stat->mode = S_IFDIR | 0755;
-        stat->size = 0;
-        return 0;
+        return __vafs_directory_entry_stat(
+            &(struct VaFsDirectoryEntry) {
+                .Type = VA_FS_DESCRIPTOR_TYPE_DIRECTORY,
+                .Directory = vafs->RootDirectory
+            },
+            metadata
+        );
     }
 
     currentDirectory = vafs->RootDirectory;
@@ -240,9 +255,19 @@ int __vafs_path_stat_internal(
             return -1;
         }
 
+        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
+            // Path stat follows the same alias rules as open so callers never
+            // see different answers for the same shared object depending on
+            // which API they chose.
+            entry = __vafs_resolve_hardlink(vafs, entry);
+            if (entry == NULL) {
+                return -1;
+            }
+        }
+
         if (entry->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
             if (remainingPath[0] == '\0') {
-                return __vafs_directory_entry_stat(entry, stat);
+                return __vafs_directory_entry_stat(entry, metadata);
             }
 
             currentDirectory = entry->Directory;
@@ -252,7 +277,7 @@ int __vafs_path_stat_internal(
         if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
             if (!followLinks) {
                 if (remainingPath[0] == '\0') {
-                    return __vafs_directory_entry_stat(entry, stat);
+                    return __vafs_directory_entry_stat(entry, metadata);
                 }
 
                 errno = ENOTDIR;
@@ -281,18 +306,19 @@ int __vafs_path_stat_internal(
                 return -1;
             }
 
-            status = __vafs_path_stat_internal(vafs, pathBuffer, followLinks, stat, symlinkDepth + 1);
+            status = __vafs_path_stat_internal(vafs, pathBuffer, followLinks, metadata, symlinkDepth + 1);
             free(pathBuffer);
             return status;
         }
 
-        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_FILE) {
+        if (entry->Type != VA_FS_DESCRIPTOR_TYPE_DIRECTORY &&
+            entry->Type != VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
             if (remainingPath[0] != '\0') {
                 errno = ENOTDIR;
                 return -1;
             }
 
-            return __vafs_directory_entry_stat(entry, stat);
+            return __vafs_directory_entry_stat(entry, metadata);
         }
 
         errno = ENOENT;
@@ -304,10 +330,10 @@ int __vafs_path_stat_internal(
 }
 
 int vafs_path_stat(
-    struct VaFs*      vafs,
-    const char*       path,
-    int               followLinks,
-    struct vafs_stat* stat)
+    struct VaFs*         vafs,
+    const char*          path,
+    int                  followLinks,
+    struct VaFsMetadata* metadata)
 {
-    return __vafs_path_stat_internal(vafs, path, followLinks, stat, 0);
+    return __vafs_path_stat_internal(vafs, path, followLinks, metadata, 0);
 }

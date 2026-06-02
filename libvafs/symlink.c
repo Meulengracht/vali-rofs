@@ -59,6 +59,10 @@ int vafs_symlink_open(
         return -1;
     }
 
+    if (__vafs_ensure_root_open(vafs) != 0) {
+        return -1;
+    }
+
     if (__vafs_is_root_path(path)) {
         errno = EISDIR;
         return -1;
@@ -111,6 +115,7 @@ void vafs_symlink_destroy(
         return;
     }
 
+    __vafs_xattr_set_destroy(symlink->Xattrs);
     free((void*)symlink->Name);
     free((void*)symlink->Target);
     free(symlink);
@@ -139,5 +144,31 @@ int vafs_symlink_target(
     }
 
     strncpy(buffer, handle->Symlink->Target, size);
+    return 0;
+}
+
+int vafs_symlink_stat(
+        struct VaFsSymlinkHandle* handle,
+        struct VaFsMetadata*      metadata)
+{
+    if (handle == NULL || metadata == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (!handle->Symlink->StatCached) {
+        vafs_metadata_initialize(&handle->Symlink->Stat);
+    }
+
+    handle->Symlink->Stat.Type = VaFsEntryType_Symlink;
+    handle->Symlink->Stat.Size = strlen(handle->Symlink->Target);
+    handle->Symlink->Stat.Mask |= VaFsMetadataMask_Type | VaFsMetadataMask_Size;
+    if ((handle->Symlink->Stat.Mask & VaFsMetadataMask_LinkCount) == 0) {
+        handle->Symlink->Stat.LinkCount = 1;
+        handle->Symlink->Stat.Mask |= VaFsMetadataMask_LinkCount;
+    }
+
+    handle->Symlink->StatCached = 1;
+    *metadata = handle->Symlink->Stat;
     return 0;
 }

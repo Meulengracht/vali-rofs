@@ -23,6 +23,7 @@
 #define __VAFS_DIRECTORY_H__
 
 #include <vafs/vafs.h>
+#include <vafs/stat.h>
 
 /**
  * @brief Opens a directory by absolute path.
@@ -48,15 +49,6 @@ extern int vafs_directory_open(
  * @return int Returns 0 on success, -1 if handle is invalid.
  */
 extern int vafs_directory_close(
-    struct VaFsDirectoryHandle* handle);
-
-/**
- * @brief Returns the stored permission bits for the directory.
- *
- * @param handle Directory handle to query.
- * @return uint32_t Permission bits for the directory, or (uint32_t)-1 if handle is invalid.
- */
-extern uint32_t vafs_directory_permissions(
     struct VaFsDirectoryHandle* handle);
 
 /**
@@ -94,28 +86,30 @@ extern int vafs_directory_open_directory(
  *
  * @param handle      Parent directory handle opened in write mode.
  * @param name        Name of the child directory to create.
- * @param permissions Permission bits to store for the directory.
+ * @param metadata    Metadata to store for the directory.
  * @param handleOut   Receives the created or existing child directory handle.
  * @return int Returns 0 on success, -1 on failure.
  */
 extern int vafs_directory_create_directory(
     struct VaFsDirectoryHandle*  handle,
     const char*                  name,
-    uint32_t                     permissions,
+     const struct VaFsMetadata*   metadata,
     struct VaFsDirectoryHandle** handleOut);
 
 /**
  * @brief Creates a symbolic link entry in a directory opened for writing.
  *
- * @param handle Parent directory handle opened in write mode.
- * @param name   Name of the symbolic link entry.
- * @param target Target path stored in the symbolic link.
+ * @param handle   Parent directory handle opened in write mode.
+ * @param name     Name of the symbolic link entry.
+ * @param target   Target path stored in the symbolic link.
+ * @param metadata Metadata to store for the link entry.
  * @return int Returns 0 on success, -1 on failure. Returns EEXIST if name already exists.
  */
 extern int vafs_directory_create_symlink(
     struct VaFsDirectoryHandle* handle,
     const char*                 name,
-    const char*                 target);
+     const char*                 target,
+     const struct VaFsMetadata*  metadata);
 
 /**
  * @brief Looks up a child symbolic link and returns its stored target string.
@@ -154,14 +148,43 @@ extern int vafs_directory_open_file(
  *
  * @param handle      Parent directory handle opened in write mode.
  * @param name        Name of the child file to create.
- * @param permissions Permission bits to store for the file.
+ * @param metadata    Metadata to store for the file.
  * @param handleOut   Receives the opened file handle for the new entry.
  * @return int Returns 0 on success, -1 on failure. Returns EEXIST if name already exists.
  */
 extern int vafs_directory_create_file(
     struct VaFsDirectoryHandle* handle,
     const char*                 name,
-    uint32_t                    permissions,
+    const struct VaFsMetadata*  metadata,
     struct VaFsFileHandle**     handleOut);
+
+/**
+ * @brief Creates a special file entry while building an image.
+ *
+ * Character devices, block devices, and FIFOs are persisted as dedicated
+ * descriptor entries so their type and device metadata round-trip cleanly.
+ *
+ * @param handle   Parent directory handle opened in write mode.
+ * @param name     Name of the special-file entry.
+ * @param metadata Metadata to store for the entry.
+ * @return int Returns 0 on success, -1 on failure.
+ */
+extern int vafs_directory_create_special(
+    struct VaFsDirectoryHandle* handle,
+    const char*                 name,
+    const struct VaFsMetadata*  metadata);
+
+/**
+ * @brief Creates a hardlink entry while building an image.
+ *
+ * @param handle   Parent directory handle opened in write mode.
+ * @param name     Name of the hardlink entry.
+ * @param objectId Stable object identifier of the link target.
+ * @return int Returns 0 on success, -1 on failure.
+ */
+extern int vafs_directory_create_hardlink(
+    struct VaFsDirectoryHandle* handle,
+    const char*                 name,
+    uint64_t                    objectId);
 
 #endif //!__VAFS_DIRECTORY_H__

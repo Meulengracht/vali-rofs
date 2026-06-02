@@ -23,6 +23,9 @@ static struct VaFsGuid g_filterGuid = VA_FS_FEATURE_FILTER;
 static struct VaFsGuid g_filterOpsGuid = VA_FS_FEATURE_FILTER_OPS;
 static int g_descriptor_encode_calls = 0;
 static int g_data_encode_calls = 0;
+static int g_custom_descriptor_decode_calls = 0;
+
+#define TEST_CUSTOM_DESCRIPTOR_FILTER_TYPE 0x56414653u
 
 struct ReadAtOnlyBuffer {
     const uint8_t* Data;
@@ -68,6 +71,17 @@ static int g_test_failed = 0;
         g_test_passed++; \
         return 0; \
     } while (0)
+
+static struct VaFsMetadata metadata_for_mode(
+    enum VaFsEntryType type,
+    uint32_t           mode)
+{
+    struct VaFsMetadata metadata;
+
+    vafs_metadata_initialize(&metadata);
+    vafs_metadata_set_mode(&metadata, type, mode);
+    return metadata;
+}
 
 static void fill_pattern(char* buffer, size_t length)
 {
@@ -154,6 +168,149 @@ static int install_split_runtime_filters(struct VaFs* vafs)
     filterOps.DescriptorDecode = fail_decode;
     filterOps.DataEncode = data_expanding_encode;
     filterOps.DataDecode = fail_decode;
+    return vafs_feature_add(vafs, &filterOps.Header);
+}
+
+static int custom_descriptor_encode(void* input, uint32_t inputLength, void** output, uint32_t* outputLength)
+{
+    uint8_t* encoded;
+    uint32_t readOffset = 0;
+    uint32_t writeOffset = 0;
+
+    // This simple zero-run codec is intentionally custom to the test: it is
+    // good enough to shrink descriptor blocks that contain many zero-filled
+    // metadata fields, but libvafs must not know anything about how it works.
+    encoded = malloc((inputLength * 2u) + 2u);
+    if (encoded == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    while (readOffset < inputLength) {
+        uint32_t zeroRun = 0;
+
+        while ((readOffset + zeroRun) < inputLength &&
+               ((const uint8_t*)input)[readOffset + zeroRun] == 0 &&
+               zeroRun < 255u) {
+            zeroRun++;
+        }
+
+        if (zeroRun >= 4u) {
+            encoded[writeOffset++] = 0;
+            encoded[writeOffset++] = (uint8_t)zeroRun;
+            readOffset += zeroRun;
+            continue;
+        }
+
+        uint32_t literalStart = readOffset;
+        uint32_t literalLength = 0;
+
+        while (readOffset < inputLength && literalLength < 255u) {
+            zeroRun = 0;
+            while ((readOffset + zeroRun) < inputLength &&
+                   ((const uint8_t*)input)[readOffset + zeroRun] == 0 &&
+                   zeroRun < 4u) {
+                zeroRun++;
+            }
+
+            if (zeroRun >= 4u) {
+                break;
+            }
+
+            readOffset++;
+            literalLength++;
+        }
+
+        encoded[writeOffset++] = 1;
+        encoded[writeOffset++] = (uint8_t)literalLength;
+        memcpy(encoded + writeOffset, ((const uint8_t*)input) + literalStart, literalLength);
+        writeOffset += literalLength;
+    }
+
+    *output = encoded;
+    *outputLength = writeOffset;
+    return 0;
+}
+
+static int custom_descriptor_decode(void* input, uint32_t inputLength, void* output, uint32_t* outputLength)
+{
+    uint32_t readOffset = 0;
+    uint32_t writeOffset = 0;
+
+    g_custom_descriptor_decode_calls++;
+
+    while (readOffset < inputLength) {
+        uint8_t tag;
+        uint8_t length;
+
+        if ((inputLength - readOffset) < 2u) {
+            errno = EINVAL;
+            return -1;
+        }
+
+        tag = ((uint8_t*)input)[readOffset++];
+        length = ((uint8_t*)input)[readOffset++];
+
+        if ((uint32_t)length > (*outputLength - writeOffset)) {
+            errno = ENOSPC;
+            return -1;
+        }
+
+        if (tag == 0) {
+            memset(((uint8_t*)output) + writeOffset, 0, length);
+            writeOffset += length;
+            continue;
+        }
+
+        if (tag != 1 || (inputLength - readOffset) < length) {
+            errno = EINVAL;
+            return -1;
+        }
+
+        memcpy(((uint8_t*)output) + writeOffset, ((uint8_t*)input) + readOffset, length);
+        readOffset += length;
+        writeOffset += length;
+    }
+
+    *outputLength = writeOffset;
+    return 0;
+}
+
+static int install_custom_descriptor_filter(struct VaFs* vafs)
+{
+    struct VaFsFeatureFilter filter;
+    struct VaFsFeatureFilterOps filterOps;
+    int status;
+
+    memcpy(&filter.Header.Guid, &g_filterGuid, sizeof(struct VaFsGuid));
+    filter.Header.Length = sizeof(struct VaFsFeatureFilter);
+    filter.DescriptorType = TEST_CUSTOM_DESCRIPTOR_FILTER_TYPE;
+    filter.DataType = VaFsFilterType_None;
+
+    status = vafs_feature_add(vafs, &filter.Header);
+    if (status != 0) {
+        return status;
+    }
+
+    memcpy(&filterOps.Header.Guid, &g_filterOpsGuid, sizeof(struct VaFsGuid));
+    filterOps.Header.Length = sizeof(struct VaFsFeatureFilterOps);
+    filterOps.DescriptorEncode = custom_descriptor_encode;
+    filterOps.DescriptorDecode = custom_descriptor_decode;
+    filterOps.DataEncode = NULL;
+    filterOps.DataDecode = NULL;
+    return vafs_feature_add(vafs, &filterOps.Header);
+}
+
+static int install_custom_descriptor_filter_ops(struct VaFs* vafs)
+{
+    struct VaFsFeatureFilterOps filterOps;
+
+    memcpy(&filterOps.Header.Guid, &g_filterOpsGuid, sizeof(struct VaFsGuid));
+    filterOps.Header.Length = sizeof(struct VaFsFeatureFilterOps);
+    filterOps.DescriptorEncode = custom_descriptor_encode;
+    filterOps.DescriptorDecode = custom_descriptor_decode;
+    filterOps.DataEncode = NULL;
+    filterOps.DataDecode = NULL;
     return vafs_feature_add(vafs, &filterOps.Header);
 }
 
@@ -342,6 +499,7 @@ static int test_sequential_reads_advance_position(void)
     char* firstChunk = NULL;
     char secondChunk[TEST_TAIL_SIZE] = { 0 };
     size_t expectedLength = TEST_BLOCK_SIZE + TEST_TAIL_SIZE;
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     size_t read;
     int status;
 
@@ -355,7 +513,7 @@ static int test_sequential_reads_advance_position(void)
     fill_pattern(expected, expectedLength);
 
     vafs_config_initialize(&config);
-    vafs_config_set_block_size(&config, TEST_BLOCK_SIZE);
+    vafs_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
     status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create test image");
@@ -363,7 +521,7 @@ static int test_sequential_reads_advance_position(void)
     status = vafs_directory_open(vafs, "/", &root);
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
-    status = vafs_directory_create_file(root, "payload", 0644, &file);
+    status = vafs_directory_create_file(root, "payload", &fileMetadata, &file);
     TEST_ASSERT(status == 0, "Failed to create test file");
 
     read = vafs_file_write(file, expected, expectedLength);
@@ -407,6 +565,7 @@ static int test_stored_blocks_skip_runtime_decode(void)
     struct VaFsFileHandle* file = NULL;
     const char payload[] = "stored block payload";
     char buffer[sizeof(payload)] = { 0 };
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     size_t read;
     int status;
 
@@ -414,7 +573,7 @@ static int test_stored_blocks_skip_runtime_decode(void)
     // reopen without runtime filter ops to verify that decode is skipped.
 
     vafs_config_initialize(&config);
-    vafs_config_set_block_size(&config, TEST_BLOCK_SIZE);
+    vafs_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
     status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create filtered test image");
@@ -425,7 +584,7 @@ static int test_stored_blocks_skip_runtime_decode(void)
     status = vafs_directory_open(vafs, "/", &root);
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
-    status = vafs_directory_create_file(root, "stored", 0644, &file);
+    status = vafs_directory_create_file(root, "stored", &fileMetadata, &file);
     TEST_ASSERT(status == 0, "Failed to create filtered test file");
 
     read = vafs_file_write(file, (void*)payload, sizeof(payload) - 1);
@@ -462,6 +621,7 @@ static int test_descriptor_and_data_streams_can_diverge(void)
     uint32_t descriptorBlockSize;
     uint32_t dataBlockSize;
     const char payload[] = "separate stream policies";
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     int status;
 
     // Configure distinct block sizes and runtime callbacks, then verify both
@@ -483,7 +643,7 @@ static int test_descriptor_and_data_streams_can_diverge(void)
     status = vafs_directory_open(vafs, "/", &root);
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
-    status = vafs_directory_create_file(root, "split", 0644, &file);
+    status = vafs_directory_create_file(root, "split", &fileMetadata, &file);
     TEST_ASSERT(status == 0, "Failed to create split test file");
 
     TEST_ASSERT(vafs_file_write(file, (void*)payload, sizeof(payload) - 1) == 0, "Failed to write split test payload");
@@ -507,6 +667,72 @@ static int test_descriptor_and_data_streams_can_diverge(void)
     TEST_PASS("Descriptor and data streams can use different block sizes and filter callbacks");
 }
 
+static int test_root_open_waits_for_custom_filter_ops(void)
+{
+    struct VaFs* vafs = NULL;
+    struct VaFsConfiguration config;
+    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsDirectoryHandle* reopenedRoot = NULL;
+    struct VaFsFileHandle* file = NULL;
+    struct VaFsFeatureFilter* filter = NULL;
+    char name[32];
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
+    int status;
+
+    // Read-mode open must succeed before custom filter callbacks are present,
+    // otherwise descriptor-filtered images would be impossible to reopen with
+    // application-defined codecs.
+
+    vafs_config_initialize(&config);
+    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    TEST_ASSERT(status == 0, "Failed to create custom-filter test image");
+
+    status = install_custom_descriptor_filter(vafs);
+    TEST_ASSERT(status == 0, "Failed to install custom descriptor filter");
+
+    status = vafs_directory_open(vafs, "/", &root);
+    TEST_ASSERT(status == 0, "Failed to open root directory for custom-filter image");
+
+    for (int i = 0; i < 64; ++i) {
+        snprintf(name, sizeof(name), "entry-%02d", i);
+        status = vafs_directory_create_file(root, name, &fileMetadata, &file);
+        TEST_ASSERT(status == 0, "Failed to create custom-filter descriptor entry");
+        vafs_file_close(file);
+        file = NULL;
+    }
+
+    vafs_directory_close(root);
+    root = NULL;
+    vafs_close(vafs);
+    vafs = NULL;
+
+    g_custom_descriptor_decode_calls = 0;
+
+    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    TEST_ASSERT(status == 0, "Open should succeed before custom filter ops are installed");
+
+    status = vafs_feature_query(vafs, &g_filterGuid, (struct VaFsFeatureHeader**)&filter);
+    TEST_ASSERT(status == 0, "Failed to query persisted custom filter feature");
+    TEST_ASSERT(filter->DescriptorType == TEST_CUSTOM_DESCRIPTOR_FILTER_TYPE,
+        "Persisted descriptor filter type mismatch");
+
+    errno = 0;
+    status = vafs_directory_open(vafs, "/", &reopenedRoot);
+    TEST_ASSERT(status != 0 && errno == ENOTSUP,
+        "Root open should fail with ENOTSUP before custom filter ops are installed");
+
+    status = install_custom_descriptor_filter_ops(vafs);
+    TEST_ASSERT(status == 0, "Failed to install custom descriptor filter ops after open");
+
+    status = vafs_directory_open(vafs, "/", &reopenedRoot);
+    TEST_ASSERT(status == 0, "Failed to open root directory after installing custom filter ops");
+    TEST_ASSERT(g_custom_descriptor_decode_calls > 0,
+        "Expected custom descriptor decode to run during lazy root open");
+
+    cleanup_image(vafs, reopenedRoot, NULL);
+    TEST_PASS("Read-mode root initialization waits for caller-supplied custom filter ops");
+}
+
 static int test_open_ops_accepts_read_at_only_backend(void)
 {
     struct VaFs* vafs = NULL;
@@ -517,6 +743,7 @@ static int test_open_ops_accepts_read_at_only_backend(void)
     struct ReadAtOnlyBuffer image = { 0 };
     const char payload[] = "read-at backend";
     char buffer[sizeof(payload)] = { 0 };
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     size_t read;
     int status;
 
@@ -524,7 +751,7 @@ static int test_open_ops_accepts_read_at_only_backend(void)
     // reopening an image through a backend that only implements readAt.
 
     vafs_config_initialize(&config);
-    vafs_config_set_block_size(&config, TEST_BLOCK_SIZE);
+    vafs_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
     status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create readAt-only test image");
@@ -532,7 +759,7 @@ static int test_open_ops_accepts_read_at_only_backend(void)
     status = vafs_directory_open(vafs, "/", &root);
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
-    status = vafs_directory_create_file(root, "ops", 0644, &file);
+    status = vafs_directory_create_file(root, "ops", &fileMetadata, &file);
     TEST_ASSERT(status == 0, "Failed to create readAt-only test file");
 
     TEST_ASSERT(vafs_file_write(file, (void*)payload, sizeof(payload) - 1) == 0, "Failed to write readAt-only payload");
@@ -577,6 +804,7 @@ static int test_boundary_read_does_not_prefetch_next_stream_block(void)
     char* payload = NULL;
     char* buffer = NULL;
     const char tailPayload[] = "tail";
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     size_t read;
     int status;
 
@@ -591,7 +819,7 @@ static int test_boundary_read_does_not_prefetch_next_stream_block(void)
     fill_pattern(payload, TEST_BLOCK_SIZE);
 
     vafs_config_initialize(&config);
-    vafs_config_set_block_size(&config, TEST_BLOCK_SIZE);
+    vafs_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
     status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create boundary-read test image");
@@ -599,13 +827,13 @@ static int test_boundary_read_does_not_prefetch_next_stream_block(void)
     status = vafs_directory_open(vafs, "/", &root);
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
-    status = vafs_directory_create_file(root, "first", 0644, &first);
+    status = vafs_directory_create_file(root, "first", &fileMetadata, &first);
     TEST_ASSERT(status == 0, "Failed to create first boundary-read file");
     TEST_ASSERT(vafs_file_write(first, payload, TEST_BLOCK_SIZE) == 0, "Failed to write first boundary-read payload");
     vafs_file_close(first);
     first = NULL;
 
-    status = vafs_directory_create_file(root, "second", 0644, &second);
+    status = vafs_directory_create_file(root, "second", &fileMetadata, &second);
     TEST_ASSERT(status == 0, "Failed to create second boundary-read file");
     TEST_ASSERT(vafs_file_write(second, (void*)tailPayload, sizeof(tailPayload) - 1) == 0,
         "Failed to write second boundary-read payload");
@@ -659,6 +887,7 @@ static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
     HANDLE threadB = NULL;
     HANDLE waitHandles[2];
     DWORD waitStatus;
+    struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     int status;
 
     // Hold the first backend read inside readAt, then start a second file
@@ -669,7 +898,7 @@ static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
     memcpy(expected, payload, sizeof(expected));
 
     vafs_config_initialize(&config);
-    vafs_config_set_block_size(&config, TEST_BLOCK_SIZE);
+    vafs_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
     status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create concurrent-read test image");
@@ -677,7 +906,7 @@ static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
     status = vafs_directory_open(vafs, "/", &root);
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
-    status = vafs_directory_create_file(root, "parallel", 0644, &writer);
+    status = vafs_directory_create_file(root, "parallel", &fileMetadata, &writer);
     TEST_ASSERT(status == 0, "Failed to create concurrent-read test file");
     TEST_ASSERT(vafs_file_write(writer, payload, sizeof(payload)) == 0, "Failed to write concurrent-read payload");
 
@@ -770,6 +999,10 @@ int main(void)
 
     if (status == 0) {
         status = test_descriptor_and_data_streams_can_diverge();
+    }
+
+    if (status == 0) {
+        status = test_root_open_waits_for_custom_filter_ops();
     }
 
     if (status == 0) {

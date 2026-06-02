@@ -273,6 +273,16 @@ static int __load_block_headers(
         return -1;
     }
 
+    if (stream->Header.BlockHeadersCount == 0) {
+        // Metadata-only streams legitimately have no payload blocks, so an
+        // empty block-header table is a valid terminal state rather than an
+        // I/O failure.
+        stream->BlockHeaders.Count = 0;
+        stream->BlockHeaders.Capacity = 0;
+        stream->BlockHeaders.Headers = NULL;
+        return 0;
+    }
+
     // allocate the block headers
     stream->BlockHeaders.Count    = stream->Header.BlockHeadersCount;
     stream->BlockHeaders.Capacity = stream->Header.BlockHeadersCount;
@@ -938,6 +948,13 @@ static int __write_block_headers(
 
     // Append the accumulated block table at the device tail, then patch the
     // stream header to point at that final serialized index.
+
+    if (stream->BlockHeaders.Count == 0) {
+        offset = vafs_streamdevice_seek(stream->Device, 0, SEEK_CUR);
+        stream->Header.BlockHeadersOffset = offset - stream->DeviceOffset;
+        stream->Header.BlockHeadersCount  = 0;
+        return 0;
+    }
 
     // get current offset
     offset = vafs_streamdevice_seek(stream->Device, 0, SEEK_CUR);
