@@ -549,6 +549,13 @@ static int __load_blockbuffer(
         blockSize = blockBufferSize;
     }
     else {
+        if (blockHeader->LengthOnDisk > stream->Header.BlockSize) {
+            VAFS_ERROR("__load_blockbuffer: stored block size %u exceeds stream block size %u\n",
+                blockHeader->LengthOnDisk, stream->Header.BlockSize);
+            free(blockData);
+            errno = EINVAL;
+            return -1;
+        }
         // Stored blocks and unfiltered streams already contain the final bytes.
         memcpy(reader->BlockBuffer, blockData, blockSize);
     }

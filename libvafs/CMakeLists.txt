@@ -4,6 +4,7 @@ add_subdirectory(cache)
 
 # add primary library target
 add_library(vafs STATIC
+    builder.c
     config.c
     crc.c
     directory_descriptor.c
