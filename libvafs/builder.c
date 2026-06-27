@@ -111,8 +111,7 @@ static int __initialize_imagestream(
 
     VAFS_DEBUG("__initialize_imagestream()\n");
 
-    // Either read and validate the existing outer image header plus feature
-    // list, or seed a fresh header for image creation.
+    // seed a fresh header for image creation.
     vafs->ImageDevice = imageDevice;
     __initialize_header(vafs, configuration);
     return status;
@@ -135,10 +134,8 @@ static int __new_vafs(
         return -1;
     }
 
-    if (!g_initialized) {
-        // CRC state is process-global, so initialize it lazily once.
-        vafs_init();
-    }
+    // ensure the library is initialized before any reader instance is created
+    vafs_init();
 
     vafs = (struct VaFs*)malloc(sizeof(struct VaFs));
     if (!vafs) {
@@ -174,31 +171,11 @@ static int __new_vafs(
     vafs_stream_set_filter(vafs->DescriptorStream, ops.DescriptorEncode, ops.DescriptorDecode);
     vafs_stream_set_filter(vafs->DataStream, ops.DataEncode, ops.DataDecode);
     
-    if (vafs->Mode == VaFsMode_Read) {
-        // Root descriptor offsets depend on the descriptor stream header, so
-        // validate them only after the descriptor stream has been opened.
-        status = __verify_root_descriptor(vafs);
-        if (status) {
-            VAFS_ERROR("__new_vafs: failed to validate root descriptor: %i\n", status);
-            vafs_destroy(vafs);
-            return -1;
-        }
-
-        // Apply persisted stream policy before touching the root descriptor so
-        // filtered descriptor blocks can be materialized during root open.
-        status = __parse_known_features(vafs);
-        if (status) {
-            VAFS_ERROR("__new_vafs: failed to parse known features: %i\n", status);
-            vafs_destroy(vafs);
-            return status;
-        }
-    } else {
-        status = __initialize_root(vafs);
-        if (status) {
-            VAFS_ERROR("__new_vafs: failed to initialize root directory: %i\n", status);
-            vafs_destroy(vafs);
-            return -1;
-        }
+    status = vafs_directory_create_root(vafs, &vafs->RootDirectory);
+    if (status) {
+        VAFS_ERROR("__new_vafs: failed to initialize root directory: %i\n", status);
+        vafs_destroy(vafs);
+        return -1;
     }
 
     *vafsOut = vafs;
@@ -239,10 +216,194 @@ int vafs_builder_new(
     return 0;
 }
 
+static int __write_vafs_features(
+    struct VaFs* vafs)
+{
+    size_t written;
+    int    status;
+    int    i;
+    VAFS_DEBUG("__write_vafs_features: count=%i\n", vafs->FeatureCount);
+
+    for (i = 0; i < vafs->FeatureCount; i++) {
+        VAFS_INFO("__write_vafs_features: writing feature: %i\n", i);
+        status = vafs_streamdevice_write(
+            vafs->ImageDevice,
+            vafs->Features[i],
+            vafs->Features[i]->Length,
+            &written
+        );
+        if (status) {
+            VAFS_ERROR("__write_vafs_features: failed to write feature header: %i\n", status);
+            return status;
+        }
+    }
+
+    return 0;
+}
+
+static int __write_vafs_header(
+    struct VaFs* vafs)
+{
+    size_t written;
+    long   descriptorBlockSize;
+    long   descriptorBlockOffset;
+    int    i;
+    VAFS_INFO("__write_vafs_header: writing header\n");
+
+    descriptorBlockSize = vafs_streamdevice_seek(vafs->DescriptorDevice, 0, SEEK_CUR);
+    if (descriptorBlockSize < 0) {
+        VAFS_ERROR("__write_vafs_header: failed to seek to current position: %i\n", descriptorBlockSize);
+        return -1;
+    }
+
+    vafs->Header.FeatureCount = (uint16_t)vafs->FeatureCount;
+
+    // calculate the data block offsets
+    descriptorBlockOffset = sizeof(VaFsHeader_t);
+    for (i = 0; i < vafs->FeatureCount; i++) {
+        descriptorBlockOffset += vafs->Features[i]->Length;
+    }
+
+    vafs->Header.DescriptorBlockOffset = descriptorBlockOffset;
+    vafs->Header.DataBlockOffset = descriptorBlockOffset + (uint32_t)descriptorBlockSize;
+    VAFS_DEBUG("__write_vafs_header: descriptor block offset: %i\n", vafs->Header.DescriptorBlockOffset);
+    VAFS_DEBUG("__write_vafs_header: data block offset: %i\n", vafs->Header.DataBlockOffset);
+
+    vafs->Header.RootDescriptor.Index = vafs->RootDirectory->DescriptorPosition.Index;
+    vafs->Header.RootDescriptor.Offset = vafs->RootDirectory->DescriptorPosition.Offset;
+    VAFS_DEBUG("__write_vafs_header: root descriptor index: %i\n", vafs->Header.RootDescriptor.Index);
+    VAFS_DEBUG("__write_vafs_header: root descriptor offset: %i\n", vafs->Header.RootDescriptor.Offset);
+
+    return vafs_streamdevice_write(vafs->ImageDevice, &vafs->Header, sizeof(VaFsHeader_t), &written);
+}
+
+static int __create_image(
+    struct VaFs* vafs)
+{
+    int status;
+
+    // Hot descriptors only store xattr indices, so the writer has to assign the
+    // final deduplicated section order before any directory payload is flushed.
+    status = __vafs_xattr_prepare_write(vafs);
+    if (status) {
+        VAFS_ERROR("Failed to prepare xattr section: %i\n", status);
+        return -1;
+    }
+
+    // flush files
+    VAFS_DEBUG("__create_image: flushing files\n");
+    status = vafs_directory_flush(vafs->RootDirectory);
+    if (status) {
+        VAFS_ERROR("Failed to flush files: %i\n", status);
+        return -1;
+    }
+
+    // Root metadata is written after the child list because only then does the
+    // root descriptor know the final location of that list, and before the cold
+    // xattr section so every hot descriptor stays in one contiguous descriptor region.
+    status = vafs_directory_write_root_descriptor(vafs->RootDirectory);
+    if (status) {
+        VAFS_ERROR("Failed to write root descriptor: %i\n", status);
+        return -1;
+    }
+
+    // Xattr sets live outside the hot directory payloads so directory readers
+    // never pay to walk them during ordinary lookup or stat traversal.
+    status = __vafs_xattr_write_section(vafs);
+    if (status) {
+        VAFS_ERROR("Failed to write xattr section: %i\n", status);
+        return -1;
+    }
+
+    // flush streams
+    VAFS_DEBUG("__create_image: flushing streams\n");
+    status = vafs_stream_finish(vafs->DescriptorStream);
+    if (status) {
+        VAFS_ERROR("Failed to flush descriptor stream: %i\n", status);
+        return -1;
+    }
+    
+    status = vafs_stream_finish(vafs->DataStream);
+    if (status) {
+        VAFS_ERROR("Failed to flush data stream: %i\n", status);
+        return -1;
+    }
+
+    // install the overview
+    VAFS_DEBUG("__create_image: writing overview\n");
+    status = vafs_feature_add(vafs, &vafs->Overview.Header);
+    if (status) {
+        return -1;
+    }
+
+    // write the header
+    VAFS_DEBUG("__create_image: writing header\n");
+    status = __write_vafs_header(vafs);
+    if (status) {
+        return -1;
+    }
+
+    // write the features
+    VAFS_DEBUG("__create_image: writing features\n");
+    status = __write_vafs_features(vafs);
+    if (status) {
+        return -1;
+    }
+
+    // write the descriptor stream
+    VAFS_DEBUG("__create_image: writing descriptor stream\n");
+    status = vafs_streamdevice_copy(vafs->ImageDevice, vafs->DescriptorDevice);
+    if (status) {
+        return -1;
+    }
+
+    // write the data stream
+    VAFS_DEBUG("__create_image: writing data stream\n");
+    return vafs_streamdevice_copy(vafs->ImageDevice, vafs->DataDevice);
+}
+
+static void vafs_destroy(
+    struct VaFs* vafs)
+{
+    VAFS_INFO("vafs_close: cleaning up\n");
+
+    // close all open streams
+    vafs_stream_close(vafs->DescriptorStream);
+    vafs_stream_close(vafs->DataStream);
+
+    // close all the stream devices active
+    vafs_streamdevice_close(vafs->DescriptorDevice);
+    vafs_streamdevice_close(vafs->DataDevice);
+    vafs_streamdevice_close(vafs->ImageDevice);
+
+    // cleanup features
+    for (int i = 0; i < vafs->FeatureCount; i++) {
+        free(vafs->Features[i]);
+    }
+    free(vafs->Features);
+
+    // cleanup directory instances
+    vafs_directory_destroy(vafs->RootDirectory);
+    __vafs_xattr_store_destroy(vafs);
+    
+    // cleanup the base instance
+    free(vafs);
+}
+
 int vafs_builder_close(
     struct VaFs* vafs)
 {
+    int status;
 
+    if (vafs == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    VAFS_INFO("vafs_close: building image file\n");
+    status = __create_image(vafs);
+    vafs_destroy(vafs);
+    return status;
 }
 
 int vafs_builder_add_feature(

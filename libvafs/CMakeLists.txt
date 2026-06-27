@@ -12,6 +12,7 @@ add_library(vafs STATIC
     directory.c
     file.c
     log.c
+    reader.c
     stream.c
     streamdevice.c
     symlink.c

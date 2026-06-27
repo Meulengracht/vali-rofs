@@ -342,6 +342,15 @@ struct VaFs {
     struct VaFsXattrStore  XattrStore;
 };
 
+// Static guids used for feature discovery and validation.
+extern const struct VaFsGuid g_overviewGuid;
+extern const struct VaFsGuid g_filterGuid;
+
+/**
+ * @brief Initializes the VaFS library.
+ */
+extern void vafs_init(void);
+
 /**
  * @brief Completes the canonical metadata fields required for one entry.
  *
