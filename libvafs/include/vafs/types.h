@@ -118,21 +118,12 @@ struct VaFsEntry {
 };
 
 /**
- * @brief Built-in filter identifiers stored in persisted filter policy features.
+ * @brief Persisted encoding policy for descriptor and data streams.
  */
-enum VaFsFilterType {
-    VaFsFilterType_None = 0,
-    VaFsFilterType_APLIB,
-    VaFsFilterType_BRIEFLZ,
-};
-
-/**
- * @brief Persisted filter policy for descriptor and data streams.
- */
-VAFS_ONDISK_STRUCT(VaFsFeatureFilter, {
+VAFS_ONDISK_STRUCT(VaFsFeatureEncoding, {
     struct VaFsFeatureHeader Header;
-    uint32_t                 DescriptorType;
-    uint32_t                 DataType;
+    char                     DescriptorEncoding[8];
+    char                     DataEncoding[8];
 });
 
 #endif //!__VAFS_TYPES_H__

@@ -32,14 +32,15 @@
  * @brief Configuration used when creating a new filesystem image.
  */
 struct VaFsReaderConfiguration {
-    struct VaFsCodec* Codecs;
-    int               CodecCount;
+    // The different supported encodings of the filesystem image.
+    // When decoding the image, the library will find a matching supported
+    // codec from this list.
+    struct VaFsCodec* SupportedCodecs;
+    int               SupportedCodecCount;
 };
 
 /**
  * @brief Initializes a configuration structure with library defaults.
- *
- * The default architecture is VaFsArchitecture_UNKNOWN and the block size is the library default.
  * Passing NULL is a no-op.
  *
  * @param configuration Configuration structure to initialize.
@@ -47,16 +48,15 @@ struct VaFsReaderConfiguration {
 extern void vafs_reader_config_initialize(struct VaFsReaderConfiguration* configuration);
 
 /**
- * @brief Registers a codec in a configuration.
+ * @brief Registers the supported codecs for the image reader.
  * 
  * Passing NULL is a no-op.
  * 
  * @param configuration Configuration structure to update.
- * @param codec         Codec descriptor to register.
- * @param index         Index of the codec in the configuration. Must be 0 or 1.
- *                      0 is the metadata codec, 1 is the data codec.
+ * @param codecs        Array of codec descriptors to register.
+ * @param count         Number of codecs in the array.
  */
-extern void vafs_reader_config_set_codec(struct VaFsReaderConfiguration* configuration, struct VaFsCodec* codec, int index);
+extern void vafs_reader_config_set_codecs(struct VaFsReaderConfiguration* configuration, struct VaFsCodec* codecs, int count);
 
 /**
  * @brief Opens an existing filesystem image. The image handle only permits operations that read

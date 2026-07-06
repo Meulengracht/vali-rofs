@@ -183,15 +183,15 @@ static int __brieflz_decode(void* source, uint32_t sourceLength, void* output, u
 
 static int __set_filter_ops(
     struct VaFs*              vafs,
-    struct VaFsFeatureFilter* filter)
+    struct VaFsFeatureEncoding* filter)
 {
-    struct VaFsFeatureFilterOps filterOps;
+    struct VaFsFeatureEncodingOps filterOps;
 
     // Resolve descriptor and data filters independently so metadata can keep a
     // cheaper policy without forcing the same codec on file data.
 
     memcpy(&filterOps.Header.Guid, &g_filterOpsGuid, sizeof(struct VaFsGuid));
-    filterOps.Header.Length = sizeof(struct VaFsFeatureFilterOps);
+    filterOps.Header.Length = sizeof(struct VaFsFeatureEncodingOps);
 
     filterOps.DescriptorEncode = NULL;
     filterOps.DescriptorDecode = NULL;
@@ -245,7 +245,7 @@ static int __set_filter_ops(
 int __handle_filter(
     struct VaFs* vafs)
 {
-    struct VaFsFeatureFilter* filter;
+    struct VaFsFeatureEncoding* filter;
     int                       status;
 
     // Opening an image only installs runtime callbacks when persisted filter
@@ -257,7 +257,7 @@ int __handle_filter(
         return 0;
     }
 
-    if (filter->Header.Length < sizeof(struct VaFsFeatureFilter)) {
+    if (filter->Header.Length < sizeof(struct VaFsFeatureEncoding)) {
         // Reject truncated metadata before reading descriptor/data type fields.
         errno = EINVAL;
         return -1;
@@ -298,14 +298,14 @@ int __install_filters(
     const char*  descriptorFilterName,
     const char*  dataFilterName)
 {
-    struct VaFsFeatureFilter filter;
+    struct VaFsFeatureEncoding filter;
     int                      status;
 
     // Resolve both stream policies up front so persisted metadata and runtime
     // callbacks stay aligned.
 
     memcpy(&filter.Header.Guid, &g_filterGuid, sizeof(struct VaFsGuid));
-    filter.Header.Length = sizeof(struct VaFsFeatureFilter);
+    filter.Header.Length = sizeof(struct VaFsFeatureEncoding);
 
     status = __get_filter_from_name(descriptorFilterName, &filter.DescriptorType);
     if (status != 0) {

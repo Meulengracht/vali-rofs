@@ -31,15 +31,21 @@ static inline int __compare_guids(
     return memcmp(lh, rh, sizeof(struct VaFsGuid));
 }
 
-
 void vafs_reader_config_initialize(struct VaFsReaderConfiguration* configuration)
 {
-
+    if (configuration == NULL) {
+        return;
+    }
+    memset(configuration, 0, sizeof(struct VaFsReaderConfiguration));
 }
 
-void vafs_reader_config_set_codec(struct VaFsReaderConfiguration* configuration, struct VaFsCodec* codec, int index)
+void vafs_reader_config_set_codecs(struct VaFsReaderConfiguration* configuration, struct VaFsCodec* codecs, int count)
 {
-
+    if (configuration == NULL) {
+        return;
+    }
+    configuration->SupportedCodecs = codecs;
+    configuration->SupportedCodecCount = count;
 }
 
 static struct VaFsFeatureHeader* __load_feature(
@@ -236,6 +242,9 @@ static int __initialize_imagestream(
     }
 
     status = __load_features(vafs);
+    if (status) {
+        VAFS_ERROR("__initialize_imagestream: failed to load features: %i\n", status);
+    }
     return status;
 }
 
@@ -286,32 +295,56 @@ static int __default_fail_decode(void* Input, uint32_t InputLength, void* Output
     return -1;
 }
 
-static int __parse_known_features(
-    struct VaFs* vafs)
+static struct VaFsCodec* __find_codec(
+    struct VaFsReaderConfiguration* configuration,
+    const char*                     id)
 {
-    // Persisted filter ids tell the reader which streams require runtime decode
-    // support. Read-mode open leaves the root lazy so callers can replace
-    // these placeholders with custom filter ops before the first root access.
+    if (configuration == NULL || id == NULL) {
+        return NULL;
+    }
+
+    for (int i = 0; i < configuration->SupportedCodecCount; i++) {
+        if (strcmp(configuration->SupportedCodecs[i].ID, id) == 0) {
+            return &configuration->SupportedCodecs[i];
+        }
+    }
+    return NULL;
+}
+
+static int __install_encoding_handlers(
+    struct VaFs*                    vafs,
+    struct VaFsReaderConfiguration* configuration)
+{
     for (int i = 0; i < vafs->Header.FeatureCount; i++) {
         if (!__compare_guids(&vafs->Features[i]->Guid, &g_filterGuid)) {
-            struct VaFsFeatureFilter* filter = (struct VaFsFeatureFilter*)vafs->Features[i];
+            struct VaFsFeatureEncoding* filter = (struct VaFsFeatureEncoding*)vafs->Features[i];
+            struct VaFsCodec*           codec;
 
-            if (filter->Header.Length < sizeof(struct VaFsFeatureFilter)) {
-                // Images now require the current split descriptor/data filter
-                // payload, so undersized records are malformed instead of legacy-compatible.
-                VAFS_ERROR("__parse_known_features: filter feature length %u smaller than expected %zu\n",
-                    filter->Header.Length, sizeof(struct VaFsFeatureFilter));
+            if (filter->Header.Length < sizeof(struct VaFsFeatureEncoding)) {
+                VAFS_ERROR("__install_encoding_handlers: filter feature length %u smaller than expected %zu\n",
+                    filter->Header.Length, sizeof(struct VaFsFeatureEncoding));
                 errno = EINVAL;
                 return -1;
             }
 
-            if (filter->DescriptorType != VaFsFilterType_None) {
-                vafs_stream_set_filter(vafs->DescriptorStream, __default_fail_encode, __default_fail_decode);
+            if (filter->DescriptorEncoding[0] != '\0') {
+                codec = __find_codec(configuration, &filter->DescriptorEncoding[0]);
+                if (codec == NULL) {
+                    VAFS_ERROR("__install_encoding_handlers: no codec found for filter id '%s'\n", &filter->DescriptorEncoding[0]);
+                    errno = ENOTSUP;
+                    return -1;
+                }
+                vafs_stream_set_filter(vafs->DescriptorStream, codec->Encode, codec->Decode);
             }
-            if (filter->DataType != VaFsFilterType_None) {
-                // Apply the same placeholder independently to file-data blocks
-                // because descriptor and data streams can use different filters.
-                vafs_stream_set_filter(vafs->DataStream, __default_fail_encode, __default_fail_decode);
+
+            if (filter->DataEncoding[0] != '\0') {
+                codec = __find_codec(configuration, &filter->DataEncoding[0]);
+                if (codec == NULL) {
+                    VAFS_ERROR("__install_encoding_handlers: no codec found for filter id '%s'\n", &filter->DataEncoding[0]);
+                    errno = ENOTSUP;
+                    return -1;
+                }
+                vafs_stream_set_filter(vafs->DataStream, codec->Encode, codec->Decode);
             }
         }
     }
@@ -329,7 +362,7 @@ static int __open_vafs(
 
     // Construction happens in phases: outer image header/features, inner
     // streams, then root-directory state and any runtime feature handling.
-
+    
     if (imageDevice == NULL || vafsOut == NULL) {
         errno = EINVAL;
         return -1;
@@ -355,13 +388,14 @@ static int __open_vafs(
     }
 
     // try to create the output file, otherwise do not continue
-    status = __initialize_imagestream(vafs, imageDevice, configuration);
+    status = __initialize_imagestream(vafs, imageDevice);
     if (status) {
         VAFS_ERROR("__open_vafs: failed to initialize image stream: %i\n", status);
         vafs_destroy(vafs);
         return -1;
     }
 
+    // open the desc/data streams valid
     status = __initialize_fsstreams_read(vafs);
     if (status) {
         VAFS_ERROR("__open_vafs: failed to initialize filesystem streams: %i\n", status);
@@ -369,9 +403,14 @@ static int __open_vafs(
         return -1;
     }
 
-    vafs_stream_set_filter(vafs->DescriptorStream, ops.DescriptorEncode, ops.DescriptorDecode);
-    vafs_stream_set_filter(vafs->DataStream, ops.DataEncode, ops.DataDecode);
-    
+    // install the required encoding handlers
+    status = __install_encoding_handlers(vafs, configuration);
+    if (status) {
+        VAFS_ERROR("__open_vafs: failed to parse known features: %i\n", status);
+        vafs_destroy(vafs);
+        return status;
+    }
+
     // Root descriptor offsets depend on the descriptor stream header, so
     // validate them only after the descriptor stream has been opened.
     status = __verify_root_descriptor(vafs);
@@ -379,15 +418,6 @@ static int __open_vafs(
         VAFS_ERROR("__open_vafs: failed to validate root descriptor: %i\n", status);
         vafs_destroy(vafs);
         return -1;
-    }
-
-    // Apply persisted stream policy before touching the root descriptor so
-    // filtered descriptor blocks can be materialized during root open.
-    status = __parse_known_features(vafs);
-    if (status) {
-        VAFS_ERROR("__open_vafs: failed to parse known features: %i\n", status);
-        vafs_destroy(vafs);
-        return status;
     }
 
     *vafsOut = vafs;

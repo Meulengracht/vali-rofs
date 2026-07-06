@@ -129,15 +129,15 @@ static int data_expanding_encode(void* input, uint32_t inputLength, void** outpu
 
 static int install_expanding_filter(struct VaFs* vafs)
 {
-    struct VaFsFeatureFilter filter;
-    struct VaFsFeatureFilterOps filterOps;
+    struct VaFsFeatureEncoding filter;
+    struct VaFsFeatureEncodingOps filterOps;
     int status;
 
     // Install a filter that always expands data so the writer must fall back to
     // BLOCK_FLAG_STORED instead of persisting filtered bytes.
 
     memcpy(&filter.Header.Guid, &g_filterGuid, sizeof(struct VaFsGuid));
-    filter.Header.Length = sizeof(struct VaFsFeatureFilter);
+    filter.Header.Length = sizeof(struct VaFsFeatureEncoding);
     filter.DescriptorType = VaFsFilterType_BRIEFLZ;
     filter.DataType = VaFsFilterType_BRIEFLZ;
 
@@ -147,7 +147,7 @@ static int install_expanding_filter(struct VaFs* vafs)
     }
 
     memcpy(&filterOps.Header.Guid, &g_filterOpsGuid, sizeof(struct VaFsGuid));
-    filterOps.Header.Length = sizeof(struct VaFsFeatureFilterOps);
+    filterOps.Header.Length = sizeof(struct VaFsFeatureEncodingOps);
     filterOps.DescriptorEncode = expanding_encode;
     filterOps.DescriptorDecode = fail_decode;
     filterOps.DataEncode = expanding_encode;
@@ -157,13 +157,13 @@ static int install_expanding_filter(struct VaFs* vafs)
 
 static int install_split_runtime_filters(struct VaFs* vafs)
 {
-    struct VaFsFeatureFilterOps filterOps;
+    struct VaFsFeatureEncodingOps filterOps;
 
     // Give each stream its own encode hook so the test can prove descriptor and
     // data writes dispatch independently.
 
     memcpy(&filterOps.Header.Guid, &g_filterOpsGuid, sizeof(struct VaFsGuid));
-    filterOps.Header.Length = sizeof(struct VaFsFeatureFilterOps);
+    filterOps.Header.Length = sizeof(struct VaFsFeatureEncodingOps);
     filterOps.DescriptorEncode = descriptor_expanding_encode;
     filterOps.DescriptorDecode = fail_decode;
     filterOps.DataEncode = data_expanding_encode;
@@ -278,12 +278,12 @@ static int custom_descriptor_decode(void* input, uint32_t inputLength, void* out
 
 static int install_custom_descriptor_filter(struct VaFs* vafs)
 {
-    struct VaFsFeatureFilter filter;
-    struct VaFsFeatureFilterOps filterOps;
+    struct VaFsFeatureEncoding filter;
+    struct VaFsFeatureEncodingOps filterOps;
     int status;
 
     memcpy(&filter.Header.Guid, &g_filterGuid, sizeof(struct VaFsGuid));
-    filter.Header.Length = sizeof(struct VaFsFeatureFilter);
+    filter.Header.Length = sizeof(struct VaFsFeatureEncoding);
     filter.DescriptorType = TEST_CUSTOM_DESCRIPTOR_FILTER_TYPE;
     filter.DataType = VaFsFilterType_None;
 
@@ -293,7 +293,7 @@ static int install_custom_descriptor_filter(struct VaFs* vafs)
     }
 
     memcpy(&filterOps.Header.Guid, &g_filterOpsGuid, sizeof(struct VaFsGuid));
-    filterOps.Header.Length = sizeof(struct VaFsFeatureFilterOps);
+    filterOps.Header.Length = sizeof(struct VaFsFeatureEncodingOps);
     filterOps.DescriptorEncode = custom_descriptor_encode;
     filterOps.DescriptorDecode = custom_descriptor_decode;
     filterOps.DataEncode = NULL;
@@ -303,10 +303,10 @@ static int install_custom_descriptor_filter(struct VaFs* vafs)
 
 static int install_custom_descriptor_filter_ops(struct VaFs* vafs)
 {
-    struct VaFsFeatureFilterOps filterOps;
+    struct VaFsFeatureEncodingOps filterOps;
 
     memcpy(&filterOps.Header.Guid, &g_filterOpsGuid, sizeof(struct VaFsGuid));
-    filterOps.Header.Length = sizeof(struct VaFsFeatureFilterOps);
+    filterOps.Header.Length = sizeof(struct VaFsFeatureEncodingOps);
     filterOps.DescriptorEncode = custom_descriptor_encode;
     filterOps.DescriptorDecode = custom_descriptor_decode;
     filterOps.DataEncode = NULL;
@@ -674,7 +674,7 @@ static int test_root_open_waits_for_custom_filter_ops(void)
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsDirectoryHandle* reopenedRoot = NULL;
     struct VaFsFileHandle* file = NULL;
-    struct VaFsFeatureFilter* filter = NULL;
+    struct VaFsFeatureEncoding* filter = NULL;
     char name[32];
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     int status;

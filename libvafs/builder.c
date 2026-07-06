@@ -32,16 +32,44 @@ static inline int __compare_guids(
 
 void vafs_builder_config_initialize(struct VaFsBuilderConfiguration* configuration)
 {
-
+    if (configuration == NULL) {
+        return;
+    }
+    memset(configuration, 0, sizeof(struct VaFsBuilderConfiguration));
+    configuration->Architecture = VaFsArchitecture_ALL;
 }
 
-void vafs_builder_config_set_architecture(struct VaFsBuilderConfiguration* configuration, enum VaFsArchitecture architecture);
+void vafs_builder_config_set_architecture(struct VaFsBuilderConfiguration* configuration, enum VaFsArchitecture architecture)
+{
+    if (configuration == NULL) {
+        return;
+    }
+    configuration->Architecture = architecture;
+}
 
-void vafs_builder_config_set_codec(struct VaFsBuilderConfiguration* configuration, struct VaFsCodec* codec, int index);
+void vafs_builder_config_set_codec(struct VaFsBuilderConfiguration* configuration, struct VaFsCodec* codec, int index)
+{
+    if (configuration == NULL || codec == NULL || index < 0 || index > 1) {
+        return;
+    }
+    configuration->Codecs[index] = *codec;
+}
 
-void vafs_builder_config_set_descriptor_block_size(struct VaFsBuilderConfiguration* configuration, uint32_t blockSize);
+void vafs_builder_config_set_descriptor_block_size(struct VaFsBuilderConfiguration* configuration, uint32_t blockSize)
+{
+    if (configuration == NULL) {
+        return;
+    }
+    configuration->DescriptorBlockSize = blockSize;
+}
 
-void vafs_builder_config_set_data_block_size(struct VaFsBuilderConfiguration* configuration, uint32_t blockSize);
+void vafs_builder_config_set_data_block_size(struct VaFsBuilderConfiguration* configuration, uint32_t blockSize)
+{
+    if (configuration == NULL) {
+        return;
+    }
+    configuration->DataBlockSize = blockSize;
+}
 
 static int __initialize_fsstreams_write(
     struct VaFs*                     vafs,

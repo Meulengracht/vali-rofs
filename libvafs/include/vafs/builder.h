@@ -35,6 +35,11 @@ struct VaFsBuilderConfiguration {
     // Allow the filesystem to be valid only for a specific
     // architecture
     enum VaFsArchitecture Architecture;
+
+    // Index 0 - The codec to use for the descriptor stream,
+    //           this is the metadata stream that contains the filesystem descriptors.
+    // Index 1 - The codec to use for the data stream,
+    //           this is the stream that contains the file payloads.
     struct VaFsCodec      Codecs[2];
 
     // The descriptor stream block size. Metadata streams are often smaller and more random-access
