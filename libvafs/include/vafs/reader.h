@@ -28,6 +28,10 @@
 #include <vafs/codec.h>
 #include <vafs/types.h>
 
+// include readers
+#include <reader/directory.h>
+#include <reader/object.h>
+
 /**
  * @brief Configuration used when creating a new filesystem image.
  */

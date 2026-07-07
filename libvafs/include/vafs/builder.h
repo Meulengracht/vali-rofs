@@ -28,6 +28,10 @@
 #include <vafs/codec.h>
 #include <vafs/types.h>
 
+// include builder headers
+#include <builder/directory.h>
+#include <builder/object.h>
+
 /**
  * @brief Configuration used when creating a new filesystem image.
  */

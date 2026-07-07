@@ -61,6 +61,14 @@ enum VaFsArchitecture {
 };
 
 /**
+ * @brief Path-resolution flags accepted by lookup-style APIs.
+ */
+enum VaFsLookupFlags {
+    VaFsLookup_None     = 0,
+    VaFsLookup_NoFollow = 1u << 0,
+};
+
+/**
  * @brief Identifies a filesystem feature.
  */
 VAFS_ONDISK_STRUCT(VaFsGuid, {
