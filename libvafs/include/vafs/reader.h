@@ -29,8 +29,8 @@
 #include <vafs/types.h>
 
 // include readers
-#include <reader/directory.h>
-#include <reader/object.h>
+#include <vafs/reader/directory.h>
+#include <vafs/reader/object.h>
 
 /**
  * @brief Configuration used when creating a new filesystem image.

@@ -29,8 +29,8 @@
 #include <vafs/types.h>
 
 // include builder headers
-#include <builder/directory.h>
-#include <builder/object.h>
+#include <vafs/builder/directory.h>
+#include <vafs/builder/object.h>
 
 /**
  * @brief Configuration used when creating a new filesystem image.
