@@ -28,6 +28,9 @@
 #include <vafs/codec.h>
 #include <vafs/types.h>
 
+// Forward declaration
+struct VaFs;
+
 // include builder headers
 #include <vafs/builder/directory.h>
 #include <vafs/builder/object.h>

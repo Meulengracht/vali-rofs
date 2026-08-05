@@ -28,6 +28,9 @@
 #include <vafs/codec.h>
 #include <vafs/types.h>
 
+// Forward declaration
+struct VaFs;
+
 // include readers
 #include <vafs/reader/directory.h>
 #include <vafs/reader/object.h>
