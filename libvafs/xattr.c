@@ -20,11 +20,15 @@
  */
 
 #include <errno.h>
-#include "private.h"
 #include <stdlib.h>
 #include <string.h>
 
-#include <vafs/types.h>
+// Both reader and builder code is in this file, so we include
+// both here.
+#include <vafs/reader.h>
+#include <vafs/builder.h>
+
+#include "private.h"
 
 static struct VaFsGuid g_xattrGuid = VA_FS_FEATURE_XATTRS;
 
@@ -632,7 +636,7 @@ int __vafs_xattr_write_section(
     feature.DescriptorIndex = vafs->XattrStore.Start.Index;
     feature.DescriptorOffset = vafs->XattrStore.Start.Offset;
     feature.Count = vafs->XattrStore.Count;
-    return vafs_feature_add(vafs, &feature.Header);
+    return vafs_builder_add_feature(vafs, &feature.Header);
 }
 
 static int __ensure_xattr_feature(
@@ -646,7 +650,7 @@ static int __ensure_xattr_feature(
         return 0;
     }
 
-    status = vafs_feature_query(vafs, &g_xattrGuid, &feature);
+    status = vafs_reader_query_feature(vafs, &g_xattrGuid, &feature);
     if (status != 0) {
         // Images that predate the feature simply have no persisted xattrs.
         if (errno == ENOENT) {
