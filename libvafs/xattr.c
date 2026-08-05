@@ -23,7 +23,8 @@
 #include "private.h"
 #include <stdlib.h>
 #include <string.h>
-#include <vafs/xattr.h>
+
+#include <vafs/types.h>
 
 static struct VaFsGuid g_xattrGuid = VA_FS_FEATURE_XATTRS;
 

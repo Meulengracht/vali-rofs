@@ -26,7 +26,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "cache/hashtable.h"
+
 #include <vafs.h>
+#include <vafs/backend.h>
 #include <vafs/stat.h>
 
 struct VaFsStream;
@@ -450,10 +452,14 @@ extern int vafs_streamdevice_open_memory(
  * @param[Out] deviceOut  Receives the opened stream device on success.
  * @return 0 on success, otherwise -1 with `errno` set.
  */
-extern int vafs_streamdevice_open_ops(
-    struct VaFsOperations*    operations,
-    void*                     userData,
-    struct VaFsStreamDevice** deviceOut);
+extern int vafs_streamdevice_reader_new(
+    struct VaFsReaderBackendOps* backend,
+    void*                        userData,
+    struct VaFsStreamDevice**    deviceOut);
+extern int vafs_streamdevice_writer_new(
+    struct VaFsBuilderBackendOps* backend,
+    void*                         userData,
+    struct VaFsStreamDevice**     deviceOut);
 
 /**
  * @brief Creates a writable file-backed stream device.
@@ -498,21 +504,6 @@ extern long vafs_streamdevice_seek(
     struct VaFsStreamDevice* device,
     long                     offset,
     int                      whence);
-
-/**
- * @brief Reads bytes directly from a stream device.
- *
- * @param[In]  device    The stream device to read from.
- * @param[Out] buffer    Destination buffer for the bytes read.
- * @param[In]  length    Number of bytes requested.
- * @param[Out] bytesRead Receives the number of bytes actually read.
- * @return 0 on success, otherwise -1 with `errno` set.
- */
-extern int vafs_streamdevice_read(
-    struct VaFsStreamDevice* device,
-    void*                    buffer,
-    size_t                   length,
-    size_t*                  bytesRead);
 
 /**
  * @brief Reads bytes from a stream device at an absolute offset.

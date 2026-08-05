@@ -23,7 +23,6 @@
 
 #include "private.h"
 
-
 static inline int __compare_guids(
     struct VaFsGuid* lh,
     struct VaFsGuid* rh)
@@ -469,7 +468,7 @@ int vafs_reader_open_ops(
     int                      status;
     VAFS_INFO("vafs_open_ops: parsing image buffer\n");
 
-    status = vafs_streamdevice_open_ops(operations, userData, &imageDevice);
+    status = vafs_streamdevice_reader_new(operations, userData, &imageDevice);
     if (status) {
         VAFS_ERROR("vafs_open_ops: failed to parse image buffer: %i\n", status);
         return status;

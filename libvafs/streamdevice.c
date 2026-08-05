@@ -20,10 +20,10 @@
  */
 
 #include <errno.h>
-#include "private.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
 #if defined(_WIN32) || defined(_WIN64)
 #include <io.h>
 #include <windows.h>
@@ -31,40 +31,50 @@
 #include <unistd.h>
 #endif
 
+#include "private.h"
+
 #define __TRANSFER_BUFFER_SIZE 1024*1024
 
 static long __file_seek(void*, long, int);
-static int  __file_read(void*, void*, size_t, size_t*);
+static int  __file_get_size(void*, void*, size_t, size_t*);
 static int  __file_read_at(void*, long, void*, size_t, size_t*);
 static int  __file_write(void*, const void*, size_t, size_t*);
+static int  __file_flush(void*);
 static int  __file_close(void*);
 
+static struct VaFsReaderBackendOps g_fileReaderBackendOps = {
+    .readAt  = __file_read_at,
+    .getSize = __file_get_size,
+    .close   = __file_close
+};
+
+static struct VaFsBuilderBackendOps g_fileWriterBackendOps = {
+    .write = __file_write,
+    .flush = __file_flush,
+    .close = __file_close
+};
+
 static long __memory_seek(void*, long, int);
-static int  __memory_read(void*, void*, size_t, size_t*);
+static int  __memory_get_size(void*, void*, size_t, size_t*);
 static int  __memory_read_at(void*, long, void*, size_t, size_t*);
 static int  __memory_write(void*, const void*, size_t, size_t*);
 static int  __memory_close(void*);
 
-static struct VaFsOperations g_fileOperations = {
-    .seek = __file_seek,
-    .read = __file_read,
-    .readAt = __file_read_at,
-    .write = __file_write,
-    .close = __file_close
+static struct VaFsReaderBackendOps g_memReaderBackendOps = {
+    .readAt  = __memory_read_at,
+    .getSize = __memory_get_size,
+    .close   = __memory_close
 };
-static struct VaFsOperations g_memoryOperations = {
-    .seek = __memory_seek,
-    .read = __memory_read,
-    .readAt = __memory_read_at,
+
+static struct VaFsBuilderBackendOps g_memWriterBackendOps = {
     .write = __memory_write,
     .close = __memory_close
 };
 
 struct VaFsStreamDevice {
-    int                   ReadOnly;
-    mtx_t                 Lock;
-    struct VaFsOperations Operations;
-    void*                 UserData;
+    int   ReadOnly;
+    mtx_t Lock;
+    void* UserData;
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -90,57 +100,79 @@ struct VaFsStreamDevice {
 #endif
 };
 
-static int __validate_ops(
-    struct VaFsOperations* operations,
-    int                    readOnly)
-{
-    if (readOnly) {
-        if (operations->readAt == NULL && (operations->read == NULL || operations->seek == NULL)) {
-            errno = EINVAL;
-            return -1;
-        }
-    }
-    else if (operations->read == NULL || operations->seek == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-    if (!readOnly && operations->write == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-    return 0;
-}
+struct VaFsStreamDeviceReader {
+    struct VaFsStreamDevice     StreamDevice;
+    struct VaFsReaderBackendOps Backend;
+};
 
-static int __new_streamdevice(
-    int                       readOnly,
-    void*                     userData,
-    struct VaFsOperations*    operations,
-    struct VaFsStreamDevice** deviceOut)
+struct VaFsStreamDeviceWriter {
+    struct VaFsStreamDevice      StreamDevice;
+    struct VaFsBuilderBackendOps Backend;
+};
+
+static int __new_streamdevice_reader(
+    struct VaFsReaderBackendOps* backend,
+    void*                        userData,
+    struct VaFsStreamDevice**    deviceOut)
 {
-    struct VaFsStreamDevice* device;
+    struct VaFsStreamDeviceReader* device;
 
     // Validate the operations provided, based on the read-only status
     // of the vafs image, there must be some of the operations set. The
     // minimum is seek/read, but if it's not read-only, then write must
     // also be provided. Close is always optional.
-    if (__validate_ops(operations, readOnly)) {
+    if (backend->readAt == NULL) {
+        errno = EINVAL;
         return -1;
     }
     
-    device = (struct VaFsStreamDevice*)malloc(sizeof(struct VaFsStreamDevice));
+    device = (struct VaFsStreamDeviceReader*)malloc(sizeof(struct VaFsStreamDeviceReader));
     if (!device) {
         errno = ENOMEM;
         return -1;
     }
 
-    memset(device, 0, sizeof(struct VaFsStreamDevice));
-    memcpy(&device->Operations, operations, sizeof(struct VaFsOperations));
+    memset(device, 0, sizeof(struct VaFsStreamDeviceReader));
+    memcpy(&device->Backend, backend, sizeof(struct VaFsReaderBackendOps));
 
-    mtx_init(&device->Lock, mtx_plain);
-    device->ReadOnly = readOnly;
-    device->UserData = userData;
+    mtx_init(&device->StreamDevice.Lock, mtx_plain);
+    device->StreamDevice.ReadOnly = 1;
+    device->StreamDevice.UserData = userData;
 
-    *deviceOut = device;
+    *deviceOut = &device->StreamDevice;
+    return 0;
+}
+
+static int __new_streamdevice_writer(
+    struct VaFsBuilderBackendOps* backend,
+    void*                        userData,
+    struct VaFsStreamDevice**    deviceOut)
+{
+    struct VaFsStreamDeviceWriter* device;
+
+    // Validate the operations provided, based on the read-only status
+    // of the vafs image, there must be some of the operations set. The
+    // minimum is seek/read, but if it's not read-only, then write must
+    // also be provided. Close is always optional.
+    if (backend->write == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    device = (struct VaFsStreamDeviceWriter*)malloc(sizeof(struct VaFsStreamDeviceWriter));
+    if (!device) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    memset(device, 0, sizeof(struct VaFsStreamDeviceWriter));
+    memcpy(&device->Backend, backend, sizeof(struct VaFsBuilderBackendOps));
+
+    mtx_init(&device->StreamDevice.Lock, mtx_plain);
+    device->StreamDevice.ReadOnly = 0;
+    device->StreamDevice.UserData = userData;
+
+    *deviceOut = &device->StreamDevice;
     return 0;
 }
 
@@ -162,7 +194,7 @@ int vafs_streamdevice_open_file(
         return -1;
     }
 
-    status = __new_streamdevice(1, NULL, &g_fileOperations, &device);
+    status = __new_streamdevice_reader(&g_fileReaderBackendOps, NULL, &device);
     if (status) {
         fclose(handle);
         return -1;
@@ -188,7 +220,7 @@ int vafs_streamdevice_open_memory(
         return -1;
     }
 
-    status = __new_streamdevice(1, NULL, &g_memoryOperations, &device);
+    status = __new_streamdevice_reader(&g_memReaderBackendOps, NULL, &device);
     if (status) {
         return -1;
     }
@@ -204,20 +236,42 @@ int vafs_streamdevice_open_memory(
     return 0;
 }
 
-int vafs_streamdevice_open_ops(
-    struct VaFsOperations*    operations,
-    void*                     userData,
-    struct VaFsStreamDevice** deviceOut)
+int vafs_streamdevice_reader_new(
+    struct VaFsReaderBackendOps* backend,
+    void*                        userData,
+    struct VaFsStreamDevice**    deviceOut)
 {
     struct VaFsStreamDevice* device;
     int                      status;
 
-    if (operations == NULL || deviceOut == NULL) {
+    if (backend == NULL || deviceOut == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    status = __new_streamdevice(1, userData, operations, &device);
+    status = __new_streamdevice_reader(backend, userData, &device);
+    if (status) {
+        return -1;
+    }
+
+    *deviceOut = device;
+    return 0;
+}
+
+int vafs_streamdevice_writer_new(
+    struct VaFsBuilderBackendOps* backend,
+    void*                        userData,
+    struct VaFsStreamDevice**    deviceOut)
+{
+    struct VaFsStreamDevice* device;
+    int                      status;
+
+    if (backend == NULL || deviceOut == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    status = __new_streamdevice_writer(backend, userData, &device);
     if (status) {
         return -1;
     }
@@ -244,7 +298,7 @@ int vafs_streamdevice_create_file(
         return -1;
     }
 
-    status = __new_streamdevice(0, NULL, &g_fileOperations, &device);
+    status = __new_streamdevice_writer(&g_fileWriterBackendOps, NULL, &device);
     if (status) {
         fclose(handle);
         return -1;
@@ -276,7 +330,7 @@ int vafs_streamdevice_create_memory(
         return -1;
     }
 
-    status = __new_streamdevice(0, NULL, &g_memoryOperations, &device);
+    status = __new_streamdevice_writer(&g_memWriterBackendOps, NULL, &device);
     if (status) {
         free(buffer);
         return -1;
@@ -301,8 +355,8 @@ int vafs_streamdevice_close(
         return -1;
     }
 
-    if (device->Operations.close) {
-        device->Operations.close(device->UserData);
+    if (device->Backend.close) {
+        device->Backend.close(device->UserData);
     }
 
     mtx_destroy(&device->Lock);
@@ -320,20 +374,7 @@ long vafs_streamdevice_seek(
         errno = EINVAL;
         return -1;
     }
-    return device->Operations.seek(device->UserData, offset, whence);
-}
-
-int vafs_streamdevice_read(
-    struct VaFsStreamDevice* device,
-    void*                    buffer,
-    size_t                   length,
-    size_t*                  bytesRead)
-{
-    if (device == NULL || buffer == NULL || length == 0 || bytesRead == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-    return device->Operations.read(device->UserData, buffer, length, bytesRead);
+    return device->Backend.seek(device->UserData, offset, whence);
 }
 
 int vafs_streamdevice_read_at(
@@ -354,14 +395,13 @@ int vafs_streamdevice_read_at(
     // Prefer a native positioned read whenever the backend exposes one. That
     // path never touches shared cursor state and is the fast path for read-only
     // images opened through files, memory, or custom readAt backends.
-
-    if (device->Operations.readAt != NULL) {
-        return device->Operations.readAt(device->UserData, offset, buffer, length, bytesRead);
+    if (device->Backend.readAt != NULL) {
+        return device->Backend.readAt(device->UserData, offset, buffer, length, bytesRead);
     }
 
     // Legacy backends can still satisfy positioned reads by temporarily
     // borrowing the seek+read API under the device lock.
-    if (device->Operations.read == NULL || device->Operations.seek == NULL) {
+    if (device->Backend.read == NULL || device->Backend.seek == NULL) {
         errno = ENOTSUP;
         return -1;
     }
@@ -373,19 +413,19 @@ int vafs_streamdevice_read_at(
 
     // Save and later restore the legacy cursor because the compatibility path
     // is intentionally invisible to higher-level read-only callers.
-    original = device->Operations.seek(device->UserData, 0, SEEK_CUR);
+    original = device->Backend.seek(device->UserData, 0, SEEK_CUR);
     if (original < 0) {
         mtx_unlock(&device->Lock);
         return -1;
     }
 
-    if (device->Operations.seek(device->UserData, offset, SEEK_SET) < 0) {
+    if (device->Backend.seek(device->UserData, offset, SEEK_SET) < 0) {
         mtx_unlock(&device->Lock);
         return -1;
     }
 
-    status = device->Operations.read(device->UserData, buffer, length, bytesRead);
-    if (device->Operations.seek(device->UserData, original, SEEK_SET) < 0 && status == 0) {
+    status = device->Backend.read(device->UserData, buffer, length, bytesRead);
+    if (device->Backend.seek(device->UserData, original, SEEK_SET) < 0 && status == 0) {
         // A failed restore leaves the legacy cursor in an unknown state, so
         // treat the whole positioned read as failed even if the bytes arrived.
         status = -1;
@@ -414,7 +454,7 @@ int vafs_streamdevice_write(
         errno = EACCES;
         return -1;
     }
-    return device->Operations.write(device->UserData, buffer, length, bytesWritten);
+    return device->Backend.write(device->UserData, buffer, length, bytesWritten);
 }
 
 int vafs_streamdevice_copy(
@@ -442,7 +482,7 @@ int vafs_streamdevice_copy(
     }
 
     // seek source back to start
-    status = source->Operations.seek(source->UserData, 0, SEEK_SET);
+    status = source->Backend.seek(source->UserData, 0, SEEK_SET);
     if (status) {
         VAFS_ERROR("vafs_streamdevice_copy failed to seek source back to beginning\n");
         return -1;
@@ -453,13 +493,13 @@ int vafs_streamdevice_copy(
     do {
         size_t bytesWritten;
 
-        status = source->Operations.read(source->UserData, transferBuffer, __TRANSFER_BUFFER_SIZE, &bytesRead);
+        status = source->Backend.read(source->UserData, transferBuffer, __TRANSFER_BUFFER_SIZE, &bytesRead);
         VAFS_DEBUG("vafs_streamdevice_copy read %zu bytes\n", bytesRead);
         if (status || bytesRead == 0) {
             break;
         }
 
-        status = destination->Operations.write(destination->UserData, transferBuffer, bytesRead, &bytesWritten);
+        status = destination->Backend.write(destination->UserData, transferBuffer, bytesRead, &bytesWritten);
         VAFS_DEBUG("vafs_streamdevice_copy wrote %zu bytes\n", bytesWritten);
         if (status || bytesWritten != bytesRead) {
             break;

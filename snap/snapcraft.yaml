@@ -1,0 +1,29 @@
+name: vafs
+version: '2.0.0'
+summary: Vali Read Only Filesystem
+description: |
+  VaFS is a read-only filesystem format and C library originally built for Vali/MollenOS initrd images. The project packages directory trees into compact `.vafs` images, and ships command-line tools for building, extracting, mounting, and benchmarking images.
+
+base: core24
+grade: stable
+confinement: strict
+assumes: [snap-uid-envvars]
+
+apps:
+  mkvafs:
+    command: usr/bin/mkvafs
+  unmkvafs:
+    command: usr/bin/unmkvafs
+
+parts:
+  chef-src:
+    plugin: cmake
+    source: .
+    cmake-parameters:
+      - -DCMAKE_INSTALL_PREFIX=/usr
+      - -DVAFS_BUILD_TESTS=OFF
+      - -DVAFS_BUILD_BENCHMARKS=OFF
+    build-packages:
+      - libfuse3-dev
+    stage-packages:
+      - libfuse3-3

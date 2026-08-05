@@ -196,9 +196,21 @@ static int __new_vafs(
         return -1;
     }
 
-    vafs_stream_set_filter(vafs->DescriptorStream, ops.DescriptorEncode, ops.DescriptorDecode);
-    vafs_stream_set_filter(vafs->DataStream, ops.DataEncode, ops.DataDecode);
-    
+    if (configuration->Codecs[0].ID != NULL) {
+        vafs_stream_set_filter(
+            vafs->DescriptorStream,
+            configuration->Codecs[0].Encode,
+            configuration->Codecs[0].Decode
+        );
+    }
+    if (configuration->Codecs[1].ID != NULL) {
+        vafs_stream_set_filter(
+            vafs->DataStream,
+            configuration->Codecs[1].Encode,
+            configuration->Codecs[1].Decode
+        );
+    }
+
     status = vafs_directory_create_root(vafs, &vafs->RootDirectory);
     if (status) {
         VAFS_ERROR("__new_vafs: failed to initialize root directory: %i\n", status);
