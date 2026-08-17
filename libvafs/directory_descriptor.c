@@ -46,6 +46,10 @@ void __finalize_entry_metadata(
     enum VaFsEntryType   type,
     uint64_t             size)
 {
+    // Metadata is normalized in one place so every concrete entry type ends up
+    // with the same canonical shape before it is serialized or compared. This is
+    // the common "last mile" where the descriptor carries type/size while
+    // preserving any caller-provided richer fields.
     metadata->Type = type;
     metadata->Size = size;
     metadata->Mask |= VaFsMetadataMask_Type | VaFsMetadataMask_Size;
@@ -62,6 +66,9 @@ static void __descriptor_metadata_initialize(
     VaFsDescriptorMetadata_t*   descriptorMetadata,
     const struct VaFsMetadata*  metadata)
 {
+    // Descriptor metadata is the on-disk form of the in-memory metadata. We
+    // deliberately copy the bits we persist and zero any fields that are derived
+    // later from the directory structure or the runtime cache.
     memset(descriptorMetadata, 0, sizeof(VaFsDescriptorMetadata_t));
     if (metadata == NULL) {
         return;
@@ -92,6 +99,10 @@ static void __materialize_descriptor_metadata(
     uint64_t                        size,
     struct VaFsMetadata*            metadata)
 {
+    // Rehydrating metadata from a serialized descriptor is the bridge between
+    // the cold image format and the hot in-memory object state. We reset the
+    // cached metadata first so stale bits from a previous file or directory are
+    // not accidentally retained.
     vafs_metadata_initialize(metadata);
     if (descriptorMetadata != NULL) {
         metadata->Mask = descriptorMetadata->Mask;

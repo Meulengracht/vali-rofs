@@ -94,6 +94,11 @@ int __vafs_file_open_internal(
         return -1;
     }
 
+    // Path resolution walks one directory boundary at a time. Each iteration
+    // resolves a single token, then either descends, follows a symlink, or
+    // terminates on the final file object. Keeping these phases explicit makes
+    // the hardlink/symlink semantics easier to review than a single monolithic
+    // block of nested conditionals.
     currentDirectory = vafs->RootDirectory;
     do {
         const char* previousPath = remainingPath;

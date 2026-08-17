@@ -113,6 +113,9 @@ static int __verify_header(
 
     // Validate only the outer-image invariants here; checks that depend on the
     // descriptor stream's own header run later in __verify_root_descriptor().
+    // This split keeps the outer header checks focused on image layout and the
+    // nested descriptor validation focused on the metadata stream's actual
+    // runtime constraints.
 
     // Validate magic number
     if (vafs->Header.Magic != VA_FS_MAGIC) {
@@ -238,8 +241,10 @@ static int __initialize_imagestream(
 
     VAFS_DEBUG("__initialize_imagestream()\n");
 
-    // Read and validate the existing outer image header plus feature
-    // list, or seed a fresh header for image creation.
+    // Read and validate the existing outer image header plus feature list.
+    // The same entry point is used for both opening images and creating a new
+    // one, but the read path must reject any malformed outer header before we
+    // proceed to descriptor-stream initialization or root traversal.
     vafs->ImageDevice = imageDevice;
 
     status = vafs_streamdevice_read_at(vafs->ImageDevice, 0, &vafs->Header, sizeof(VaFsHeader_t), &read);

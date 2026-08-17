@@ -68,6 +68,10 @@ int vafs_symlink_open(
         return -1;
     }
 
+    // Symlink opening uses the same token-by-token walk as file open, but the
+    // only valid terminal object here is a symlink node. The branch structure is
+    // intentionally narrow so a malformed path fails before we return a handle
+    // for the wrong entry type.
     currentDirectory = vafs->RootDirectory;
     do {
         int charsConsumed = __vafs_pathtoken(remainingPath, token, sizeof(token));

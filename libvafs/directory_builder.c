@@ -371,6 +371,10 @@ static int __create_file_entry(
     struct VaFsFile* entry;
     int              status;
 
+    // File creation is intentionally structured as a two-step publish: build a
+    // fully initialized object first, then attach it to the directory. This
+    // keeps half-formed nodes from being discoverable if an allocation fails.
+
     entry = (struct VaFsFile*)calloc(1, sizeof(struct VaFsFile));
     if (!entry) {
         return -1;

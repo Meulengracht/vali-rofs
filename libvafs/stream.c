@@ -159,9 +159,11 @@ int vafs_stream_create(
         return -1;
     }
 
-    // Creation records the current append position as the stream data base.
-    // No placeholder bytes are emitted; finish() appends the index and returns
-    // the completed layout to the outer image header.
+    // Creation records the current append position as the stream's data base.
+    // We intentionally do not reserve any placeholder bytes here: the caller is
+    // responsible for appending actual logical blocks and then finalizing the
+    // layout once the index has been written. This keeps the stream lifetime
+    // aligned with the image writer's "build then commit" flow.
     status = __new_stream(device, deviceSize, &stream);
     if (status != 0) {
         return -1;
@@ -244,7 +246,9 @@ static int __load_block_headers(
     VAFS_DEBUG("__load_block_headers()\n");
 
     // Validate the table shape before allocating memory or seeking based on
-    // untrusted metadata from disk.
+    // untrusted metadata from disk. The stream index is treated as a trusted
+    // boundary only after the header count, size, and offset relationships are
+    // proven valid, otherwise reads could walk past the end of the block table.
 
     // Validate block headers count is reasonable
     #define MAX_BLOCK_HEADERS 1000000

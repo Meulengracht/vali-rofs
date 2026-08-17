@@ -159,8 +159,10 @@ static int __new_vafs(
     struct VaFs* vafs;
     int          status;
 
-    // Construction happens in phases: outer image header/features, inner
-    // streams, then root-directory state and any runtime feature handling.
+    // Construction happens in phases: the outer image header is set up first,
+    // then the descriptor/data streams are created, and only after that do we
+    // attach the root directory. Keeping the initialization order fixed makes it
+    // much easier to reason about which state is valid at each stage.
 
     if (imageDevice == NULL || vafsOut == NULL) {
         errno = EINVAL;

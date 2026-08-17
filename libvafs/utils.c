@@ -241,6 +241,10 @@ int __vafs_path_stat_internal(
         );
     }
 
+    // The stat path follows the same three-phase walk as file open: peel one
+    // token, resolve it in the active directory, then either descend, resolve a
+    // symlink, or return metadata from the terminal object. Keeping that order
+    // stable avoids subtle inconsistencies between open() and stat() behavior.
     currentDirectory = vafs->RootDirectory;
     do {
         const char* previousPath = remainingPath;
