@@ -235,6 +235,10 @@ static int __resolve_xattr_entry_internal(
         return -1;
     }
 
+    // xattr resolution follows the same tree walk as regular file access, but
+    // it has one extra rule: a symlink can be treated as the link object itself
+    // when callers request non-following semantics. That distinction is why the
+    // traversal here keeps the final "terminal object" decision explicit.
     currentDirectory = vafs->RootDirectory;
     do {
         const char* previousPath = remainingPath;

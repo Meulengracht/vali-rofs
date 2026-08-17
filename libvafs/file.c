@@ -110,6 +110,12 @@ int __vafs_file_open_internal(
         }
         remainingPath += charsConsumed;
 
+        // Flow for each path component:
+        //   1. Look up the name in the current directory.
+        //   2. Normalize hardlink aliases to their canonical object.
+        //   3. If we are descending, advance the directory pointer.
+        //   4. If we hit a symlink, rebuild the remaining path and recurse.
+        //   5. If the remaining path is exhausted, the object must be the file.
         entry = __vafs_directory_find_entry(currentDirectory, token);
         if (entry == NULL) {
             // Path resolution stops on the first missing component.
