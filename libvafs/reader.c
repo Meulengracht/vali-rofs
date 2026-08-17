@@ -19,16 +19,21 @@
  */
 
 #include <errno.h>
+#include <stdlib.h>
+#include <string.h>
 #include <vafs/reader.h>
 
 #include "private.h"
 
 static inline int __compare_guids(
-    struct VaFsGuid* lh,
-    struct VaFsGuid* rh)
+    const struct VaFsGuid* lh,
+    const struct VaFsGuid* rh)
 {
     return memcmp(lh, rh, sizeof(struct VaFsGuid));
 }
+
+static void vafs_destroy(
+    struct VaFs* vafs);
 
 void vafs_reader_config_initialize(struct VaFsReaderConfiguration* configuration)
 {
@@ -104,8 +109,7 @@ static int __load_features(
 static int __verify_header(
     struct VaFs* vafs)
 {
-    uint32_t minDescriptorOffset;
-    uint32_t maxDescriptorOffset;
+    uint32_t minStreamOffset;
 
     // Validate only the outer-image invariants here; checks that depend on the
     // descriptor stream's own header run later in __verify_root_descriptor().
@@ -140,32 +144,42 @@ static int __verify_header(
         return -1;
     }
 
-    // Validate descriptor block offset
-    // Must be after header (minimum offset)
-    minDescriptorOffset = sizeof(VaFsHeader_t);
-    if (vafs->Header.DescriptorBlockOffset < minDescriptorOffset) {
-        VAFS_ERROR("__verify_header: descriptor block offset %u is before end of header (min %u)\n",
-                   vafs->Header.DescriptorBlockOffset, minDescriptorOffset);
+    // Validate stream placement. The outer header owns stream layouts, so the
+    // descriptor stream must start after the header and feature records, and
+    // the data stream must follow the descriptor stream region.
+    minStreamOffset = sizeof(VaFsHeader_t);
+    if (vafs->Header.DescriptorStream.DataOffset < minStreamOffset) {
+        VAFS_ERROR("__verify_header: descriptor stream offset %u is before end of header (min %u)\n",
+                   vafs->Header.DescriptorStream.DataOffset, minStreamOffset);
         errno = EINVAL;
         return -1;
     }
 
-    // Validate data block offset
-    // Must be after descriptor block offset
-    if (vafs->Header.DataBlockOffset <= vafs->Header.DescriptorBlockOffset) {
-        VAFS_ERROR("__verify_header: data block offset %u must be after descriptor block offset %u\n",
-                   vafs->Header.DataBlockOffset, vafs->Header.DescriptorBlockOffset);
+    if (vafs->Header.DescriptorStream.IndexOffset < vafs->Header.DescriptorStream.DataOffset ||
+        vafs->Header.DataStream.IndexOffset < vafs->Header.DataStream.DataOffset) {
+        VAFS_ERROR("__verify_header: stream index offsets must not precede stream data offsets\n");
         errno = EINVAL;
         return -1;
     }
 
-    // Bound the descriptor stream placement using only values known from the
-    // outer header. The minimum legal data block size is the tightest safe
-    // lower bound before the data stream header and first block payload.
-    maxDescriptorOffset = vafs->Header.DataBlockOffset - 16 - VA_FS_DATA_MIN_BLOCKSIZE;
-    if (vafs->Header.DescriptorBlockOffset > maxDescriptorOffset) {
-        VAFS_ERROR("__verify_header: descriptor block offset %u too large, max allowed %u\n",
-                   vafs->Header.DescriptorBlockOffset, maxDescriptorOffset);
+    if (vafs->Header.DataStream.DataOffset <= vafs->Header.DescriptorStream.DataOffset) {
+        VAFS_ERROR("__verify_header: data stream offset %u must be after descriptor stream offset %u\n",
+                   vafs->Header.DataStream.DataOffset, vafs->Header.DescriptorStream.DataOffset);
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (vafs->Header.DescriptorStream.BlockSize < VA_FS_DATA_MIN_BLOCKSIZE ||
+        vafs->Header.DescriptorStream.BlockSize > VA_FS_DATA_MAX_BLOCKSIZE ||
+        vafs->Header.DataStream.BlockSize < VA_FS_DATA_MIN_BLOCKSIZE ||
+        vafs->Header.DataStream.BlockSize > VA_FS_DATA_MAX_BLOCKSIZE) {
+        VAFS_ERROR("__verify_header: stream block size out of supported range\n");
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (vafs->Header.DescriptorStream.Reserved != 0 || vafs->Header.DataStream.Reserved != 0) {
+        VAFS_ERROR("__verify_header: stream layout reserved fields must be zero\n");
         errno = EINVAL;
         return -1;
     }
@@ -256,7 +270,7 @@ static int __initialize_fsstreams_read(struct VaFs* vafs)
     // whether either stream needs runtime filter callbacks.
     status = vafs_stream_open(
         vafs->ImageDevice, 
-        vafs->Header.DescriptorBlockOffset,
+        &vafs->Header.DescriptorStream,
         &vafs->DescriptorStream
     );
     if (status) {
@@ -266,13 +280,13 @@ static int __initialize_fsstreams_read(struct VaFs* vafs)
 
     status = vafs_stream_open(
         vafs->ImageDevice, 
-        vafs->Header.DataBlockOffset,
+        &vafs->Header.DataStream,
         &vafs->DataStream
     );
     return status;
 }
 
-static int __default_fail_encode(void* Input, uint32_t InputLength, void** Output, uint32_t* OutputLength)
+static int __default_fail_encode(const void* Input, size_t InputLength, void** Output, size_t* OutputLength)
 {
     (void)Input;
     (void)InputLength;
@@ -283,12 +297,13 @@ static int __default_fail_encode(void* Input, uint32_t InputLength, void** Outpu
     return -1;
 }
 
-static int __default_fail_decode(void* Input, uint32_t InputLength, void* Output, uint32_t* OutputLength)
+static int __default_fail_decode(const void* Input, size_t InputLength, void* Output, size_t OutputLength, size_t* BytesWrittenOut)
 {
     (void)Input;
     (void)InputLength;
     (void)Output;
     (void)OutputLength;
+    (void)BytesWrittenOut;
     VAFS_ERROR("__default_fail_decode: decode handler not installed\n");
     errno = ENOTSUP;
     return -1;
@@ -430,11 +445,11 @@ int vafs_reader_open_file(
 {
     struct VaFsStreamDevice* imageDevice;
     int                      status;
-    VAFS_INFO("vafs_open_file: opening existing image file\n");
+    VAFS_INFO("vafs_reader_open_file: opening existing image file\n");
 
     status = vafs_streamdevice_open_file(path, &imageDevice);
     if (status) {
-        VAFS_ERROR("vafs_open_file: failed to open image file: %i\n", status);
+        VAFS_ERROR("vafs_reader_open_file: failed to open image file: %i\n", status);
         return status;
     }
     return __open_vafs(imageDevice, configuration, vafsOut);
@@ -466,11 +481,11 @@ int vafs_reader_open_ops(
 {
     struct VaFsStreamDevice* imageDevice;
     int                      status;
-    VAFS_INFO("vafs_open_ops: parsing image buffer\n");
+    VAFS_INFO("vafs_reader_open_ops: parsing image buffer\n");
 
     status = vafs_streamdevice_reader_new(operations, userData, &imageDevice);
     if (status) {
-        VAFS_ERROR("vafs_open_ops: failed to parse image buffer: %i\n", status);
+        VAFS_ERROR("vafs_reader_open_ops: failed to parse image buffer: %i\n", status);
         return status;
     }
     return __open_vafs(imageDevice, configuration, vafsOut);
@@ -479,7 +494,7 @@ int vafs_reader_open_ops(
 static void vafs_destroy(
     struct VaFs* vafs)
 {
-    VAFS_INFO("vafs_close: cleaning up\n");
+    VAFS_INFO("vafs_reader_close: cleaning up\n");
 
     // close all open streams
     vafs_stream_close(vafs->DescriptorStream);

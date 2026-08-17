@@ -24,6 +24,9 @@
 
 #include <vafs/vafs.h>
 
+// Forward declarations
+struct VaFsObjectBuilder;
+
 /**
  * @brief Sets or replaces one extended attribute on an in-progress object.
  *

@@ -41,6 +41,19 @@ void vafs_init(void)
     g_initialized = 1;
 }
 
+static int __initialize_root(
+    struct VaFs* vafs)
+{
+    // Read mode reopens the persisted root descriptor, while write mode starts
+    // from an empty in-memory root that will later be serialized.
+    if (vafs->Mode == VaFsMode_Read) {
+        return vafs_directory_open_root(vafs, &vafs->Header.RootDescriptor, &vafs->RootDirectory);
+    }
+    else {
+        return vafs_directory_create_root(vafs, &vafs->RootDirectory);
+    }
+}
+
 int __vafs_ensure_root_open(
     struct VaFs* vafs)
 {
@@ -52,9 +65,5 @@ int __vafs_ensure_root_open(
     if (vafs->RootDirectory != NULL) {
         return 0;
     }
-
-    // Read-mode images postpone root materialization so callers can install
-    // custom runtime filter callbacks immediately after open and before the
-    // first descriptor block is decoded.
     return __initialize_root(vafs);
 }

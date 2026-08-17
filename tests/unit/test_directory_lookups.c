@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <vafs/vafs.h>
+#include <vafs/reader.h>
+#include <vafs/builder.h>
 #include <vafs/directory.h>
 #include <vafs/file.h>
 #include <vafs/stat.h>
@@ -167,7 +169,7 @@ static int xattr_list_contains(
 static int test_metadata_roundtrip(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsDirectoryHandle* meta = NULL;
     struct VaFsDirectoryHandle* reopened = NULL;
@@ -223,8 +225,8 @@ static int test_metadata_roundtrip(void)
         VaFsMetadataMask_ObjectId |
         VaFsMetadataMask_MTime;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create metadata roundtrip image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -248,10 +250,10 @@ static int test_metadata_roundtrip(void)
     meta = NULL;
     vafs_directory_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen metadata test image");
 
     status = vafs_path_stat(vafs, "/meta", 1, &statbuf);
@@ -304,7 +306,7 @@ static int test_metadata_roundtrip(void)
 
     vafs_directory_close(reopened);
     reopened = NULL;
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Metadata survives descriptor-stream round-trip");
@@ -313,7 +315,7 @@ static int test_metadata_roundtrip(void)
 static int test_special_roundtrip(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsDirectoryHandle* specials = NULL;
     struct VaFsDirectoryHandle* reopened = NULL;
@@ -357,8 +359,8 @@ static int test_special_roundtrip(void)
     fifoMetadata.Mask |= VaFsMetadataMask_ObjectId |
         VaFsMetadataMask_MTime;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create special-file test image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -383,10 +385,10 @@ static int test_special_roundtrip(void)
     specials = NULL;
     vafs_directory_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen special-file test image");
 
     status = vafs_path_stat(vafs, "/specials/null", 1, &statbuf);
@@ -439,7 +441,7 @@ static int test_special_roundtrip(void)
 
     vafs_directory_close(reopened);
     reopened = NULL;
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Special files survive descriptor-stream round-trip");
@@ -448,7 +450,7 @@ static int test_special_roundtrip(void)
 static int test_hardlink_roundtrip(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsDirectoryHandle* links = NULL;
     struct VaFsDirectoryHandle* reopened = NULL;
@@ -467,8 +469,8 @@ static int test_hardlink_roundtrip(void)
     fileMetadata.ObjectId = 0x70010002ULL;
     fileMetadata.Mask |= VaFsMetadataMask_ObjectId;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create hardlink test image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -492,10 +494,10 @@ static int test_hardlink_roundtrip(void)
     links = NULL;
     vafs_directory_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen hardlink test image");
 
     status = vafs_path_stat(vafs, "/links/payload", 1, &statbuf);
@@ -543,7 +545,7 @@ static int test_hardlink_roundtrip(void)
 
     vafs_directory_close(reopened);
     reopened = NULL;
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Hardlinks resolve shared metadata while preserving alias entry type");
@@ -552,7 +554,7 @@ static int test_hardlink_roundtrip(void)
 static int test_xattr_roundtrip(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsDirectoryHandle* meta = NULL;
     struct VaFsFileHandle* file_handle = NULL;
@@ -572,8 +574,8 @@ static int test_xattr_roundtrip(void)
     peerMetadata.ObjectId = 0x73000012ULL;
     peerMetadata.Mask |= VaFsMetadataMask_ObjectId;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create xattr test image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -614,13 +616,13 @@ static int test_xattr_roundtrip(void)
     meta = NULL;
     vafs_directory_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen xattr test image");
 
-    status = vafs_feature_query(vafs, &xattrGuid, &feature);
+    status = vafs_reader_query_feature(vafs, &xattrGuid, &feature);
     TEST_ASSERT(status == 0, "Failed to query xattr feature");
     TEST_ASSERT(((VaFsFeatureXattrs_t*)feature)->Count == 2, "Expected deduplicated xattr set count");
 
@@ -665,7 +667,7 @@ static int test_xattr_roundtrip(void)
     TEST_ASSERT(bytesWritten == strlen("meta"), "Directory xattr size did not round-trip");
     TEST_ASSERT(memcmp(valueBuffer, "meta", bytesWritten) == 0, "Directory xattr value did not round-trip");
 
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Xattrs survive descriptor-stream sidecar round-trip");
@@ -674,7 +676,7 @@ static int test_xattr_roundtrip(void)
 static int test_root_xattr_roundtrip(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsFileHandle* file_handle = NULL;
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
@@ -686,8 +688,8 @@ static int test_root_xattr_roundtrip(void)
     size_t bytesWritten = 0;
     int status;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create root xattr test image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -709,13 +711,13 @@ static int test_root_xattr_roundtrip(void)
 
     vafs_directory_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen root xattr test image");
 
-    status = vafs_feature_query(vafs, &xattrGuid, &feature);
+    status = vafs_reader_query_feature(vafs, &xattrGuid, &feature);
     TEST_ASSERT(status == 0, "Failed to query root xattr feature");
     TEST_ASSERT(((VaFsFeatureXattrs_t*)feature)->Count == 1, "Expected one root xattr set in feature table");
 
@@ -746,7 +748,7 @@ static int test_root_xattr_roundtrip(void)
 
     vafs_directory_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Root xattrs survive a real persisted root descriptor");
@@ -755,7 +757,7 @@ static int test_root_xattr_roundtrip(void)
 static int test_symlink_xattr_nofollow_roundtrip(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsDirectoryHandle* meta = NULL;
     struct VaFsFileHandle* file_handle = NULL;
@@ -768,8 +770,8 @@ static int test_symlink_xattr_nofollow_roundtrip(void)
     size_t bytesWritten = 0;
     int status;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create symlink xattr test image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -798,10 +800,10 @@ static int test_symlink_xattr_nofollow_roundtrip(void)
     meta = NULL;
     vafs_directory_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen symlink xattr test image");
 
     status = vafs_path_stat(vafs, "/meta/link", 0, &statbuf);
@@ -827,7 +829,7 @@ static int test_symlink_xattr_nofollow_roundtrip(void)
     TEST_ASSERT(bytesWritten == strlen("symlink"), "Nofollow symlink xattr size did not round-trip");
     TEST_ASSERT(memcmp(valueBuffer, "symlink", bytesWritten) == 0, "Nofollow symlink xattr value did not round-trip");
 
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Symlink-object xattrs stay distinct from target xattrs in nofollow mode");
@@ -836,7 +838,7 @@ static int test_symlink_xattr_nofollow_roundtrip(void)
 static int test_wide_directory_lookup(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsDirectoryHandle* small_dir = NULL;
     struct VaFsDirectoryHandle* large_dir = NULL;
@@ -862,8 +864,8 @@ static int test_wide_directory_lookup(void)
     int status;
     int i;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create test image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -923,10 +925,10 @@ static int test_wide_directory_lookup(void)
     nested = NULL;
     vafs_directory_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen test image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -1075,7 +1077,7 @@ static int test_wide_directory_lookup(void)
     vafs_directory_close(large_dir);
     large_dir = NULL;
     vafs_directory_close(root);
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Directory lookup handles both threshold fallback paths correctly");

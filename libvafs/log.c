@@ -25,7 +25,7 @@
 
 static enum VaFsLogLevel g_loglevel = VaFsLogLevel_Warning;
 
-void vafs_log_initalize(
+void vafs_log_initialize(
     enum VaFsLogLevel level)
 {
     g_loglevel = level;

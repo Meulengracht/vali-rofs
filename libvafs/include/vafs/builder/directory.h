@@ -23,8 +23,10 @@
 #define __VAFS_DIRECTORY_BUILDER_H__
 
 #include <vafs/vafs.h>
+#include <vafs/stat.h>
 
 struct VaFsDirectoryBuilder;
+struct VaFsFileBuilder;
 struct VaFsObjectBuilder;
 
 /**
@@ -103,8 +105,8 @@ extern int vafs_directory_builder_create_symlink(
 /**
  * @brief Creates a child special file.
  *
- * `type` must be one of VaFsNodeType_CharacterDevice, VaFsNodeType_BlockDevice, or
- * VaFsNodeType_Fifo. `objectOut` receives a borrowed object handle for the created special object
+ * `type` must be one of VaFsEntryType_CharacterDevice, VaFsEntryType_BlockDevice, or
+ * VaFsEntryType_Fifo. `objectOut` receives a borrowed object handle for the created special object
  * when non-NULL.
  *
  * @param handle      Parent directory builder handle.
@@ -118,7 +120,7 @@ extern int vafs_directory_builder_create_symlink(
 extern int vafs_directory_builder_create_special(
     struct VaFsDirectoryBuilder*   handle,
     const char*                    name,
-    enum VaFsNodeType              type,
+    enum VaFsEntryType             type,
     const struct VaFsMetadata*     metadata,
     const struct VaFsDeviceNumber* device,
     struct VaFsObjectBuilder**     objectOut);

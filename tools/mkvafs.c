@@ -30,6 +30,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <vafs/vafs.h>
+#include <vafs/reader.h>
+#include <vafs/builder.h>
 #include <vafs/directory.h>
 #include <vafs/file.h>
 #include "utils/utils.h"
@@ -47,6 +49,7 @@ struct progress_context {
     int specials_total;
 };
 
+extern int __configure_filters(struct VaFsBuilderConfiguration* configuration, const char* descriptorFilterName, const char* dataFilterName);
 extern int __install_filters(struct VaFs* vafs, const char* descriptorFilterName, const char* dataFilterName);
 
 static struct VaFsMetadata __metadata_for_mode(
@@ -792,8 +795,8 @@ static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, con
     char        temp[4096] = { 0 };
     char        full[4096] = { 0 };
     char        image[4096] = { 0 };
-    char*       last;
-    char*       st;
+    const char* last;
+    const char* st;
     const char* token = relative;
 
     if (vafs_directory_open(vafs, "/", &handle)) {
@@ -878,7 +881,7 @@ static int __platform_filetype_is_special(
 static int __create_image(struct __options* opts)
 {
     struct VaFs*             vafsHandle;
-    struct VaFsConfiguration configuration;
+    struct VaFsBuilderConfiguration configuration;
     struct list              hardlinkObjects = LIST_INIT;
     int                      status;
     struct list_item*        it;
@@ -912,18 +915,23 @@ static int __create_image(struct __options* opts)
         return -1;
     }
 
-    vafs_config_initialize(&configuration);
-    vafs_config_set_architecture(&configuration, __get_vafs_arch(opts->arch));
+    vafs_builder_config_initialize(&configuration);
+    vafs_builder_config_set_architecture(&configuration, __get_vafs_arch(opts->arch));
     if (opts->descriptor_block_size != 0) {
         // Only override the descriptor default when the caller asked for it.
-        vafs_config_set_descriptor_block_size(&configuration, opts->descriptor_block_size);
+        vafs_builder_config_set_descriptor_block_size(&configuration, opts->descriptor_block_size);
     }
     if (opts->data_block_size != 0) {
         // Keep the data stream default unless the caller explicitly changes it.
-        vafs_config_set_data_block_size(&configuration, opts->data_block_size);
+        vafs_builder_config_set_data_block_size(&configuration, opts->data_block_size);
+    }
+    status = __configure_filters(&configuration, opts->descriptor_compression, opts->data_compression);
+    if (status) {
+        fprintf(stderr, "mkvafs: cannot configure stream compression\n");
+        return status;
     }
 
-    status = vafs_create(opts->image_path, &configuration, &vafsHandle);
+    status = vafs_builder_new(opts->image_path, &configuration, &vafsHandle);
     if (status) {
         fprintf(stderr, "mkvafs: cannot create vafs output file: %s\n", opts->image_path);
         return status;
@@ -937,7 +945,7 @@ static int __create_image(struct __options* opts)
         // Multi-root archives intentionally skip root xattr import because no
         // host path has a principled claim to win for '/'.
         if (rootPath == NULL) {
-            vafs_close(vafsHandle);
+            vafs_builder_close(vafsHandle);
             return -1;
         }
 
@@ -946,7 +954,7 @@ static int __create_image(struct __options* opts)
             status = __try_import_xattrs(vafsHandle, "/", rootPath, 1);
             free(rootPath);
             if (status != 0) {
-                vafs_close(vafsHandle);
+                vafs_builder_close(vafsHandle);
                 return status;
             }
         } else {
@@ -960,7 +968,7 @@ static int __create_image(struct __options* opts)
         status = __install_filters(vafsHandle, opts->descriptor_compression, opts->data_compression);
         if (status) {
             fprintf(stderr, "mkvafs: cannot set stream compression\n");
-            vafs_close(vafsHandle);
+            vafs_builder_close(vafsHandle);
             return status;
         }
     }
@@ -1073,7 +1081,7 @@ static int __create_image(struct __options* opts)
         printf("\n");
     }
 
-    if (vafs_close(vafsHandle)) {
+    if (vafs_builder_close(vafsHandle)) {
         fprintf(stderr, "mkvafs: failed to finalize image\n");
     }
     __destroy_hardlink_objects(&hardlinkObjects);
@@ -1154,7 +1162,7 @@ int main(int argc, char *argv[])
         __show_help();
         return -1;
     }
-    vafs_log_initalize(opts.level);
+    vafs_log_initialize(opts.level);
 
 #if defined(_WIN32) || defined(_WIN64)
     status = symlink_utils_init();

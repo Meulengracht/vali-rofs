@@ -27,8 +27,6 @@
 #include <string.h>
 #include <stdio.h>
 
-#define STREAM_MAGIC       0x314D5356 // VSM1
-
 #define STREAM_TYPE_FILE   0
 #define STREAM_TYPE_MEMORY 1
 
@@ -53,20 +51,12 @@ struct VaFsStreamBlockHeaders {
     struct BlockHeader* Headers;
 };
 
-VAFS_ONDISK_STRUCT(VaFsStreamHeader, {
-    uint32_t Magic;
-    uint32_t BlockSize;
-    uint32_t BlockHeadersOffset;
-    uint32_t BlockHeadersCount;
-});
-
 struct VaFsStream {
-    struct VaFsStreamHeader       Header;
+    VaFsStreamLayout_t            Layout;
     struct VaFsStreamDevice*      Device;
-    long                          DeviceOffset;
     mtx_t                         Lock;
-    VaFsFilterEncodeFunc          Encode;
-    VaFsFilterDecodeFunc          Decode;
+    VaFsCodecEncodeFunc           Encode;
+    VaFsCodecDecodeFunc           Decode;
     struct VaFsBlockCache*        BlockCache;
     struct VaFsStreamBlockHeaders BlockHeaders;
 
@@ -88,12 +78,12 @@ struct VaFsStreamReader {
 
 static int __new_stream(
     struct VaFsStreamDevice* device,
-    long                     deviceOffset,
+    uint64_t                 dataOffset,
     struct VaFsStream**      streamOut)
 {
     struct VaFsStream* stream;
 
-    VAFS_DEBUG("__new_stream(offset=%lu)\n", deviceOffset);
+    VAFS_DEBUG("__new_stream(dataOffset=%llu)\n", (unsigned long long)dataOffset);
     // Build the shared stream shell first. Read mode attaches private cursors
     // later, while write mode keeps its staging buffer directly on the stream.
     
@@ -105,8 +95,8 @@ static int __new_stream(
 
     memset(stream, 0, sizeof(struct VaFsStream));
 
-    stream->Device       = device;
-    stream->DeviceOffset = deviceOffset;
+    stream->Device            = device;
+    stream->Layout.DataOffset = (uint32_t)dataOffset;
     mtx_init(&stream->Lock, mtx_plain);
     
     *streamOut = stream;
@@ -118,7 +108,7 @@ static int __allocate_blockbuffer(
 {
     VAFS_DEBUG("__allocate_blockbuffer()\n");
     
-    stream->BlockBuffer = malloc(stream->Header.BlockSize);
+    stream->BlockBuffer = malloc(stream->Layout.BlockSize);
     if (!stream->BlockBuffer) {
         errno = ENOMEM;
         return -1;
@@ -131,7 +121,7 @@ static int __allocate_reader_blockbuffer(
 {
     // Readers stage logical bytes privately so concurrent callers do not share
     // offsets or block contents.
-    reader->BlockBuffer = malloc(reader->Stream->Header.BlockSize);
+    reader->BlockBuffer = malloc(reader->Stream->Layout.BlockSize);
     if (!reader->BlockBuffer) {
         errno = ENOMEM;
         return -1;
@@ -141,37 +131,42 @@ static int __allocate_reader_blockbuffer(
 
 int vafs_stream_create(
     struct VaFsStreamDevice* device,
-    long                     deviceOffset,
     uint32_t                 blockSize,
     struct VaFsStream**      streamOut)
 {
     struct VaFsStream* stream;
     int                status;
-    size_t             written;
+    uint64_t           deviceSize;
 
     if (device == NULL || streamOut == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    // Creation is front-loaded: initialize the stream header on disk now, then
-    // keep later writes in memory until finish() serializes the trailing index.
-    status = __new_stream(device, deviceOffset, &stream);
+    if (blockSize < VA_FS_DATA_MIN_BLOCKSIZE || blockSize > VA_FS_DATA_MAX_BLOCKSIZE) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    status = vafs_streamdevice_size(device, &deviceSize);
+    if (status) {
+        return status;
+    }
+
+    if (deviceSize > UINT32_MAX) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+
+    // Creation records the current append position as the stream data base.
+    // No placeholder bytes are emitted; finish() appends the index and returns
+    // the completed layout to the outer image header.
+    status = __new_stream(device, deviceSize, &stream);
     if (status != 0) {
         return -1;
     }
 
-    // initialize the stream header to initial values
-    stream->Header.Magic     = STREAM_MAGIC;
-    stream->Header.BlockSize = blockSize;
-
-    // write the initial stream header
-    status = vafs_streamdevice_write(device, &stream->Header, sizeof(struct VaFsStreamHeader), &written);
-    if (status != 0) {
-        VAFS_DEBUG("vafs_stream_create: failed to write stream header\n");
-        vafs_stream_close(stream);
-        return -1;
-    }
+    stream->Layout.BlockSize = blockSize;
 
     // allocate the block buffer
     status = __allocate_blockbuffer(stream);
@@ -185,22 +180,10 @@ int vafs_stream_create(
     return 0;
 }
 
-static long  __get_header_offset(
-    struct VaFsStream* stream)
-{
-    return stream->DeviceOffset;
-}
-
-static long __get_data_offset(
-    struct VaFsStream* stream)
-{
-    return stream->DeviceOffset + sizeof(struct VaFsStreamHeader);
-}
-
 static long __get_block_headers_offset(
     struct VaFsStream* stream)
 {
-    return stream->DeviceOffset + stream->Header.BlockHeadersOffset;
+    return stream->Layout.IndexOffset;
 }
 
 static struct BlockHeader* __get_block_header(
@@ -213,24 +196,38 @@ static struct BlockHeader* __get_block_header(
     return &stream->BlockHeaders.Headers[block];
 }
 
-static int __verify_header(
-    struct VaFsStreamHeader* header)
+static int __verify_layout(
+    const VaFsStreamLayout_t* layout)
 {
-    // Validate every size-bearing field before the stream header can drive
-    // later allocations or seeks.
-    if (header->Magic != STREAM_MAGIC) {
-        VAFS_ERROR("__verify_header: invalid stream magic\n");
+    if (layout == NULL) {
+        errno = EINVAL;
         return -1;
     }
 
-    if (header->BlockSize < VA_FS_DATA_MIN_BLOCKSIZE || header->BlockSize > VA_FS_DATA_MAX_BLOCKSIZE) {
-        VAFS_ERROR("__verify_header: invalid block size: %u\n", header->BlockSize);
+    // The outer image header is the source of truth for stream placement.
+    // Validate every field before it can drive block-buffer allocations or
+    // positioned reads.
+    if (layout->BlockSize < VA_FS_DATA_MIN_BLOCKSIZE || layout->BlockSize > VA_FS_DATA_MAX_BLOCKSIZE) {
+        VAFS_ERROR("__verify_layout: invalid block size: %u\n", layout->BlockSize);
         return -1;
     }
 
-    VAFS_DEBUG("__verify_header: block size: %u\n", header->BlockSize);
-    VAFS_DEBUG("__verify_header: block headers offset: %u\n", header->BlockHeadersOffset);
-    VAFS_DEBUG("__verify_header: block headers count: %u\n", header->BlockHeadersCount);
+    if (layout->IndexOffset < layout->DataOffset) {
+        VAFS_ERROR("__verify_layout: index offset %u precedes data offset %u\n",
+            layout->IndexOffset, layout->DataOffset);
+        return -1;
+    }
+
+    if (layout->Reserved != 0) {
+        VAFS_ERROR("__verify_layout: reserved field must be zero\n");
+        return -1;
+    }
+
+    VAFS_DEBUG("__verify_layout: block size: %u\n", layout->BlockSize);
+    VAFS_DEBUG("__verify_layout: data offset: %u\n", layout->DataOffset);
+    VAFS_DEBUG("__verify_layout: data length: %u\n", layout->DataLength);
+    VAFS_DEBUG("__verify_layout: index offset: %u\n", layout->IndexOffset);
+    VAFS_DEBUG("__verify_layout: index count: %u\n", layout->IndexCount);
 
     return 0;
 }
@@ -250,30 +247,24 @@ static int __load_block_headers(
 
     // Validate block headers count is reasonable
     #define MAX_BLOCK_HEADERS 1000000
-    if (stream->Header.BlockHeadersCount > MAX_BLOCK_HEADERS) {
+    if (stream->Layout.IndexCount > MAX_BLOCK_HEADERS) {
         VAFS_ERROR("__load_block_headers: block headers count %u exceeds maximum %d\n",
-            stream->Header.BlockHeadersCount, MAX_BLOCK_HEADERS);
+            stream->Layout.IndexCount, MAX_BLOCK_HEADERS);
         errno = EINVAL;
         return -1;
     }
 
     // Check for integer overflow in total header size calculation
-    totalHeaderSize = (size_t)stream->Header.BlockHeadersCount * sizeof(struct BlockHeader);
-    if (stream->Header.BlockHeadersCount > 0 && totalHeaderSize / stream->Header.BlockHeadersCount != sizeof(struct BlockHeader)) {
+    totalHeaderSize = (size_t)stream->Layout.IndexCount * sizeof(struct BlockHeader);
+    if (stream->Layout.IndexCount > 0 && totalHeaderSize / stream->Layout.IndexCount != sizeof(struct BlockHeader)) {
         VAFS_ERROR("__load_block_headers: integer overflow in header size calculation\n");
         errno = EINVAL;
         return -1;
     }
 
-    // Validate block headers offset doesn't overflow when added to device offset
     blockHeadersOffset = __get_block_headers_offset(stream);
-    if (blockHeadersOffset < stream->DeviceOffset) {
-        VAFS_ERROR("__load_block_headers: block headers offset overflow\n");
-        errno = EINVAL;
-        return -1;
-    }
 
-    if (stream->Header.BlockHeadersCount == 0) {
+    if (stream->Layout.IndexCount == 0) {
         // Metadata-only streams legitimately have no payload blocks, so an
         // empty block-header table is a valid terminal state rather than an
         // I/O failure.
@@ -284,8 +275,8 @@ static int __load_block_headers(
     }
 
     // allocate the block headers
-    stream->BlockHeaders.Count    = stream->Header.BlockHeadersCount;
-    stream->BlockHeaders.Capacity = stream->Header.BlockHeadersCount;
+    stream->BlockHeaders.Count    = stream->Layout.IndexCount;
+    stream->BlockHeaders.Capacity = stream->Layout.IndexCount;
     stream->BlockHeaders.Headers  = (struct BlockHeader*)malloc(totalHeaderSize);
     if (!stream->BlockHeaders.Headers) {
         errno = ENOMEM;
@@ -310,26 +301,13 @@ static int __load_block_headers(
 static int __load_metadata(
     struct VaFsStream* stream)
 {
-    size_t read;
     int    status;
 
     VAFS_DEBUG("__load_metadata()\n");
 
-    // Stream open is two-stage: load and validate the stream header first,
-    // then use it to locate and read the block header table.
-
-    status = vafs_streamdevice_read_at(
-        stream->Device,
-        __get_header_offset(stream),
-        &stream->Header,
-        sizeof(struct VaFsStreamHeader),
-        &read
-    );
-    if (status != 0 || read != sizeof(struct VaFsStreamHeader)) {
-        return -1;
-    }
-
-    status = __verify_header(&stream->Header);
+    // Stream open validates the outer-owned layout and then reads the block
+    // index it points to. The stream itself has no mutable on-disk header.
+    status = __verify_layout(&stream->Layout);
     if (status != 0) {
         return -1;
     }
@@ -338,24 +316,25 @@ static int __load_metadata(
 
 int vafs_stream_open(
     struct VaFsStreamDevice* device,
-    long                     deviceOffset,
+    const VaFsStreamLayout_t* layout,
     struct VaFsStream**      streamOut)
 {
     struct VaFsStream* stream;
     int                status;
-    VAFS_DEBUG("vafs_stream_open(offset=%lu)\n", deviceOffset);
+    VAFS_DEBUG("vafs_stream_open(dataOffset=%u)\n", layout ? layout->DataOffset : 0);
 
-    if (device == NULL || streamOut == NULL) {
+    if (device == NULL || layout == NULL || streamOut == NULL) {
         errno = EINVAL;
         return -1;
     }
 
     // Reconstruct metadata before creating the shared block cache. Individual
     // readers own their own staged blocks and logical positions.
-    status = __new_stream(device, deviceOffset, &stream);
+    status = __new_stream(device, layout->DataOffset, &stream);
     if (status != 0) {
         return -1;
     }
+    stream->Layout = *layout;
 
     status = __load_metadata(stream);
     if (status != 0) {
@@ -378,8 +357,8 @@ int vafs_stream_open(
 
 int vafs_stream_set_filter(
     struct VaFsStream*   stream,
-    VaFsFilterEncodeFunc encode,
-    VaFsFilterDecodeFunc decode)
+    VaFsCodecEncodeFunc  encode,
+    VaFsCodecDecodeFunc  decode)
 {
     if (stream == NULL) {
         errno = EINVAL;
@@ -455,7 +434,7 @@ uint32_t vafs_stream_block_size(
     if (stream == NULL) {
         return 0;
     }
-    return stream->Header.BlockSize;
+    return stream->Layout.BlockSize;
 }
 
 static uint32_t __get_buffer_crc(
@@ -491,7 +470,7 @@ static int __load_blockbuffer(
         stream->BlockCache,
         blockIndex,
         reader->BlockBuffer,
-        stream->Header.BlockSize,
+        stream->Layout.BlockSize,
         &blockSize
     );
     if (status == 0) {
@@ -520,7 +499,7 @@ static int __load_blockbuffer(
         return -1;
     }
 
-    status = vafs_streamdevice_read_at(stream->Device, stream->DeviceOffset + blockHeader->Offset, blockData, blockSize, &read);
+    status = vafs_streamdevice_read_at(stream->Device, stream->Layout.DataOffset + blockHeader->Offset, blockData, blockSize, &read);
     if (status || read != blockSize) {
         // Positioned reads must return the entire persisted block; partial
         // reads would make decode and CRC verification ambiguous.
@@ -532,26 +511,26 @@ static int __load_blockbuffer(
     // Only decode blocks that were actually written in filtered form. Blocks
     // marked BLOCK_FLAG_STORED were persisted raw specifically to skip decode.
     if ((blockHeader->Flags & BLOCK_FLAG_STORED) == 0 && stream->Decode) {
-        uint32_t blockBufferSize = stream->Header.BlockSize;
+        size_t bytesDecoded = 0;
 
         VAFS_DEBUG("__load_blockbuffer decoding buffer of size %zu\n", blockSize);
-        status = stream->Decode(blockData, (uint32_t)blockSize, reader->BlockBuffer, &blockBufferSize);
+        status = stream->Decode(blockData, blockSize, reader->BlockBuffer, stream->Layout.BlockSize, &bytesDecoded);
         if (status) {
             VAFS_ERROR("__load_blockbuffer: failed to decode block, %i\n", errno);
             free(blockData);
             return status;
         }
-        VAFS_DEBUG("__load_blockbuffer decoded buffer size %u\n", blockBufferSize);
+        VAFS_DEBUG("__load_blockbuffer decoded buffer size %zu\n", bytesDecoded);
 
         // TODO we should keep a current length of block
         // verify the length of the block is correct, the actual size
         // of the decoded data is now in blockSize
-        blockSize = blockBufferSize;
+        blockSize = bytesDecoded;
     }
     else {
-        if (blockHeader->LengthOnDisk > stream->Header.BlockSize) {
+        if (blockHeader->LengthOnDisk > stream->Layout.BlockSize) {
             VAFS_ERROR("__load_blockbuffer: stored block size %u exceeds stream block size %u\n",
-                blockHeader->LengthOnDisk, stream->Header.BlockSize);
+            blockHeader->LengthOnDisk, stream->Layout.BlockSize);
             free(blockData);
             errno = EINVAL;
             return -1;
@@ -628,12 +607,12 @@ int vafs_stream_reader_seek(
         // have we reached the target block, and does it contain our index?
         if (i == targetBlock) {
             // is the offset inside the current block?
-            if (targetOffset < stream->Header.BlockSize) {
+            if (targetOffset < stream->Layout.BlockSize) {
                 break; // yep, we are done here
             }
 
             // nope, reduce offset, switch to next block
-            targetOffset -= stream->Header.BlockSize;
+            targetOffset -= stream->Layout.BlockSize;
             targetBlock++;
 
             // Check for overflow: if targetBlock wrapped around, we have an overflow
@@ -686,15 +665,21 @@ static int __add_block_header(
     uint32_t           blockLength,
     uint16_t           blockFlags)
 {
-    long     offset;
+    uint64_t offset;
     uint32_t crc;
 
-    offset = vafs_streamdevice_seek(stream->Device, 0, SEEK_CUR);
+    if (vafs_streamdevice_size(stream->Device, &offset)) {
+        return -1;
+    }
+    if (offset < stream->Layout.DataOffset || offset - stream->Layout.DataOffset > UINT32_MAX) {
+        errno = EOVERFLOW;
+        return -1;
+    }
 
     // Record where the just-flushed logical block ended up on disk so readers
     // can map logical block numbers back to physical offsets later.
-    VAFS_DEBUG("__add_block_header: adding block mapping %u => %lu\n",
-        stream->BlockBufferIndex, offset);
+    VAFS_DEBUG("__add_block_header: adding block mapping %u => %llu\n",
+        stream->BlockBufferIndex, (unsigned long long)(offset - stream->Layout.DataOffset));
     VAFS_DEBUG("__add_block_header: block length %u\n", blockLength);
 
     // Persist CRC over the logical bytes so validation stays identical whether
@@ -729,7 +714,7 @@ static int __add_block_header(
     }
 
     stream->BlockHeaders.Headers[stream->BlockHeaders.Count].LengthOnDisk = blockLength;
-    stream->BlockHeaders.Headers[stream->BlockHeaders.Count].Offset       = (uint32_t)offset;
+    stream->BlockHeaders.Headers[stream->BlockHeaders.Count].Offset       = (uint32_t)(offset - stream->Layout.DataOffset);
     stream->BlockHeaders.Headers[stream->BlockHeaders.Count].Crc          = crc;
     stream->BlockHeaders.Headers[stream->BlockHeaders.Count].Flags        = blockFlags;
     stream->BlockHeaders.Count++;
@@ -758,7 +743,7 @@ static int __flush_block(
     // Per-stream filtering is optional. When enabled, avoid paying future
     // decode cost unless the filtered form actually shrinks the payload.
     if (stream->Encode) {
-        uint32_t compressedSize;
+        size_t compressedSize;
 
         status = stream->Encode(stream->BlockBuffer, stream->BlockBufferOffset, &compressedData, &compressedSize);
         if (status) {
@@ -775,8 +760,13 @@ static int __flush_block(
             // Smaller filtered output is worth keeping because it reduces the
             // on-disk bytes the read path has to fetch.
             blockData = compressedData;
-            blockLength = compressedSize;
-            VAFS_DEBUG("__flush_block compressed buffer size %u\n", compressedSize);
+            if (compressedSize > UINT32_MAX) {
+                free(compressedData);
+                errno = EOVERFLOW;
+                return -1;
+            }
+            blockLength = (uint32_t)compressedSize;
+            VAFS_DEBUG("__flush_block compressed buffer size %zu\n", compressedSize);
         } else {
             // Larger or equal filtered output would only force unnecessary
             // decode work, so persist the raw bytes and mark them stored.
@@ -832,7 +822,7 @@ int vafs_stream_write(
         size_t byteCount;
         size_t bytesLeftInBlock;
 
-        bytesLeftInBlock = stream->Header.BlockSize - (stream->BlockBufferOffset % stream->Header.BlockSize);
+        bytesLeftInBlock = stream->Layout.BlockSize - (stream->BlockBufferOffset % stream->Layout.BlockSize);
         byteCount        = MIN(bytesToWrite, bytesLeftInBlock);
 
         memcpy(stream->BlockBuffer + stream->BlockBufferOffset, data, byteCount);
@@ -841,7 +831,7 @@ int vafs_stream_write(
         data                      += byteCount;
         bytesToWrite              -= byteCount;
 
-        if (stream->BlockBufferOffset == stream->Header.BlockSize) {
+        if (stream->BlockBufferOffset == stream->Layout.BlockSize) {
             // Flush full blocks immediately so subsequent writes start with a
             // fresh staging buffer and the block index advances in order.
             if (__flush_block(stream)) {
@@ -948,23 +938,31 @@ int vafs_stream_reader_read(
 static int __write_block_headers(
     struct VaFsStream* stream)
 {
-    size_t written;
-    int    status;
-    long   offset;
+    size_t   written;
+    int      status;
+    uint64_t offset;
     VAFS_DEBUG("__write_index_mapping()\n");
 
-    // Append the accumulated block table at the device tail, then patch the
-    // stream header to point at that final serialized index.
+    // Append the accumulated block table at the device tail and record its
+    // final position in the outer-owned layout.
+
+    status = vafs_streamdevice_size(stream->Device, &offset);
+    if (status) {
+        return status;
+    }
+    if (offset < stream->Layout.DataOffset || offset > UINT32_MAX || offset - stream->Layout.DataOffset > UINT32_MAX) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+
+    stream->Layout.DataLength = (uint32_t)(offset - stream->Layout.DataOffset);
+    stream->Layout.IndexOffset = (uint32_t)offset;
+    stream->Layout.IndexCount = stream->BlockHeaders.Count;
 
     if (stream->BlockHeaders.Count == 0) {
-        offset = vafs_streamdevice_seek(stream->Device, 0, SEEK_CUR);
-        stream->Header.BlockHeadersOffset = offset - stream->DeviceOffset;
-        stream->Header.BlockHeadersCount  = 0;
         return 0;
     }
 
-    // get current offset
-    offset = vafs_streamdevice_seek(stream->Device, 0, SEEK_CUR);
     status = vafs_streamdevice_write(
         stream->Device,
         stream->BlockHeaders.Headers,
@@ -977,64 +975,25 @@ static int __write_block_headers(
     }
 
     VAFS_DEBUG("__write_index_mapping: written %u bytes\n", written);
-    VAFS_DEBUG("__write_index_mapping: BlockHeadersOffset %ld\n", offset - stream->DeviceOffset);
+    VAFS_DEBUG("__write_index_mapping: IndexOffset %u\n", stream->Layout.IndexOffset);
     VAFS_DEBUG("__write_index_mapping: BlockHeadersCount %i\n", stream->BlockHeaders.Count);
-
-    // update the header
-    stream->Header.BlockHeadersOffset = offset - stream->DeviceOffset;
-    stream->Header.BlockHeadersCount  = stream->BlockHeaders.Count;
-    return 0;
-}
-
-static int __update_stream_header(
-    struct VaFsStream* stream)
-{
-    size_t written;
-    int    status;
-    long   original;
-    long   position;
-    VAFS_DEBUG("__update_stream_header()\n");
-
-    // finish() streams data forward first, so patch the header in place only
-    // after everything else is written and then restore the caller's position.
-
-    original = vafs_streamdevice_seek(stream->Device, 0, SEEK_CUR);
-    position = (int)vafs_streamdevice_seek(stream->Device, stream->DeviceOffset, SEEK_SET);
-    if (position == -1) {
-        VAFS_ERROR("__update_stream_header: failed to seek to stream header\n");
-        return -1;
-    }
-
-    status = vafs_streamdevice_write(
-        stream->Device,
-        &stream->Header,
-        sizeof(struct VaFsStreamHeader),
-        &written
-    );
-    if (status) {
-        VAFS_ERROR("__update_stream_header: failed to write stream header\n");
-        return status;
-    }
-
-    VAFS_DEBUG("__update_stream_header: written %u bytes at %lu\n", written, position);
-
-    vafs_streamdevice_seek(stream->Device, original, SEEK_SET);
     return 0;
 }
 
 int vafs_stream_finish(
-    struct VaFsStream* stream)
+    struct VaFsStream* stream,
+    VaFsStreamLayout_t* layoutOut)
 {
     int status;
 
     VAFS_DEBUG("vafs_stream_finish()\n");
-    if (!stream) {
+    if (!stream || !layoutOut) {
         errno = EINVAL;
         return -1;
     }
 
-    // Finalization is ordered: flush the tail block, append the block table,
-    // then update the stream header once its final offsets are known.
+    // Finalization is append-only: flush the tail block, append the block
+    // table, then return the layout the outer image header will persist.
     status = __flush_block(stream);
     if (status) {
         VAFS_ERROR("vafs_stream_finish: failed to flush block\n");
@@ -1047,11 +1006,7 @@ int vafs_stream_finish(
         return status;
     }
 
-    status = __update_stream_header(stream);
-    if (status) {
-        VAFS_ERROR("vafs_stream_close: failed to update stream header\n");
-        return status;
-    }
+    *layoutOut = stream->Layout;
     return 0;
 }
 

@@ -19,9 +19,14 @@
  */
 
 #include <errno.h>
+#include <stdlib.h>
+#include <string.h>
 #include <vafs/builder.h>
 
 #include "private.h"
+
+static void vafs_destroy(
+    struct VaFs* vafs);
 
 static inline int __compare_guids(
     struct VaFsGuid* lh,
@@ -37,6 +42,8 @@ void vafs_builder_config_initialize(struct VaFsBuilderConfiguration* configurati
     }
     memset(configuration, 0, sizeof(struct VaFsBuilderConfiguration));
     configuration->Architecture = VaFsArchitecture_ALL;
+    configuration->DescriptorBlockSize = VA_FS_DATA_DEFAULT_BLOCKSIZE;
+    configuration->DataBlockSize = VA_FS_DATA_DEFAULT_BLOCKSIZE;
 }
 
 void vafs_builder_config_set_architecture(struct VaFsBuilderConfiguration* configuration, enum VaFsArchitecture architecture)
@@ -100,7 +107,6 @@ static int __initialize_fsstreams_write(
 
     status = vafs_stream_create(
         vafs->DescriptorDevice, 
-        0,
         configuration->DescriptorBlockSize,
         &vafs->DescriptorStream
     );
@@ -111,7 +117,6 @@ static int __initialize_fsstreams_write(
 
     status = vafs_stream_create(
         vafs->DataDevice, 
-        0,
         configuration->DataBlockSize,
         &vafs->DataStream
     );
@@ -238,17 +243,17 @@ int vafs_builder_new(
     struct VaFsStreamDevice* imageDevice;
     int                      status;
 
-    VAFS_INFO("vafs_create: creating new image file\n");
+    VAFS_INFO("vafs_builder_new: creating new image file\n");
 
     status = vafs_streamdevice_create_file(path, &imageDevice);
     if (status) {
-        VAFS_ERROR("vafs_create: failed to create image file: %i\n", status);
+        VAFS_ERROR("vafs_builder_new: failed to create image file: %i\n", status);
         return status;
     }
     
     status = __new_vafs(VaFsMode_Write, imageDevice, configuration, vafsOut);
     if (status) {
-        VAFS_ERROR("vafs_create: failed to create new vafs instance: %i\n", status);
+        VAFS_ERROR("vafs_builder_new: failed to create new vafs instance: %i\n", status);
         return status;
     }
 
@@ -281,33 +286,61 @@ static int __write_vafs_features(
     return 0;
 }
 
+static int __relocate_stream_layout(
+    VaFsStreamLayout_t* layout,
+    uint64_t            baseOffset)
+{
+    if (layout == NULL || baseOffset > UINT32_MAX) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    if ((uint64_t)layout->DataOffset + baseOffset > UINT32_MAX ||
+        (uint64_t)layout->IndexOffset + baseOffset > UINT32_MAX) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+
+    layout->DataOffset += (uint32_t)baseOffset;
+    layout->IndexOffset += (uint32_t)baseOffset;
+    return 0;
+}
+
 static int __write_vafs_header(
     struct VaFs* vafs)
 {
-    size_t written;
-    long   descriptorBlockSize;
-    long   descriptorBlockOffset;
-    int    i;
+    size_t   written;
+    uint64_t descriptorStreamSize;
+    uint64_t descriptorStreamOffset;
+    uint64_t dataStreamOffset;
+    int      i;
     VAFS_INFO("__write_vafs_header: writing header\n");
 
-    descriptorBlockSize = vafs_streamdevice_seek(vafs->DescriptorDevice, 0, SEEK_CUR);
-    if (descriptorBlockSize < 0) {
-        VAFS_ERROR("__write_vafs_header: failed to seek to current position: %i\n", descriptorBlockSize);
+    if (vafs_streamdevice_size(vafs->DescriptorDevice, &descriptorStreamSize)) {
+        VAFS_ERROR("__write_vafs_header: failed to get descriptor stream size\n");
         return -1;
     }
 
     vafs->Header.FeatureCount = (uint16_t)vafs->FeatureCount;
 
-    // calculate the data block offsets
-    descriptorBlockOffset = sizeof(VaFsHeader_t);
+    // Stream offsets are absolute in the final image. The streams themselves
+    // were built in temporary append-only devices, so relocate their finished
+    // layouts to the positions they will occupy after the header/features.
+    descriptorStreamOffset = sizeof(VaFsHeader_t);
     for (i = 0; i < vafs->FeatureCount; i++) {
-        descriptorBlockOffset += vafs->Features[i]->Length;
+        descriptorStreamOffset += vafs->Features[i]->Length;
+    }
+    dataStreamOffset = descriptorStreamOffset + descriptorStreamSize;
+
+    if (__relocate_stream_layout(&vafs->Header.DescriptorStream, descriptorStreamOffset) ||
+        __relocate_stream_layout(&vafs->Header.DataStream, dataStreamOffset)) {
+        VAFS_ERROR("__write_vafs_header: failed to relocate stream layouts\n");
+        return -1;
     }
 
-    vafs->Header.DescriptorBlockOffset = descriptorBlockOffset;
-    vafs->Header.DataBlockOffset = descriptorBlockOffset + (uint32_t)descriptorBlockSize;
-    VAFS_DEBUG("__write_vafs_header: descriptor block offset: %i\n", vafs->Header.DescriptorBlockOffset);
-    VAFS_DEBUG("__write_vafs_header: data block offset: %i\n", vafs->Header.DataBlockOffset);
+    VAFS_DEBUG("__write_vafs_header: descriptor data offset: %u\n", vafs->Header.DescriptorStream.DataOffset);
+    VAFS_DEBUG("__write_vafs_header: descriptor index offset: %u\n", vafs->Header.DescriptorStream.IndexOffset);
+    VAFS_DEBUG("__write_vafs_header: data data offset: %u\n", vafs->Header.DataStream.DataOffset);
+    VAFS_DEBUG("__write_vafs_header: data index offset: %u\n", vafs->Header.DataStream.IndexOffset);
 
     vafs->Header.RootDescriptor.Index = vafs->RootDirectory->DescriptorPosition.Index;
     vafs->Header.RootDescriptor.Offset = vafs->RootDirectory->DescriptorPosition.Offset;
@@ -357,13 +390,13 @@ static int __create_image(
 
     // flush streams
     VAFS_DEBUG("__create_image: flushing streams\n");
-    status = vafs_stream_finish(vafs->DescriptorStream);
+    status = vafs_stream_finish(vafs->DescriptorStream, &vafs->Header.DescriptorStream);
     if (status) {
         VAFS_ERROR("Failed to flush descriptor stream: %i\n", status);
         return -1;
     }
     
-    status = vafs_stream_finish(vafs->DataStream);
+    status = vafs_stream_finish(vafs->DataStream, &vafs->Header.DataStream);
     if (status) {
         VAFS_ERROR("Failed to flush data stream: %i\n", status);
         return -1;
@@ -371,7 +404,7 @@ static int __create_image(
 
     // install the overview
     VAFS_DEBUG("__create_image: writing overview\n");
-    status = vafs_feature_add(vafs, &vafs->Overview.Header);
+    status = vafs_builder_add_feature(vafs, &vafs->Overview.Header);
     if (status) {
         return -1;
     }
@@ -405,7 +438,7 @@ static int __create_image(
 static void vafs_destroy(
     struct VaFs* vafs)
 {
-    VAFS_INFO("vafs_close: cleaning up\n");
+    VAFS_INFO("vafs_builder_close: cleaning up\n");
 
     // close all open streams
     vafs_stream_close(vafs->DescriptorStream);
@@ -440,7 +473,7 @@ int vafs_builder_close(
         return -1;
     }
 
-    VAFS_INFO("vafs_close: building image file\n");
+    VAFS_INFO("vafs_builder_close: building image file\n");
     status = __create_image(vafs);
     vafs_destroy(vafs);
     return status;

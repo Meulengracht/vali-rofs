@@ -10,6 +10,8 @@
 #include <windows.h>
 #endif
 #include <vafs/vafs.h>
+#include <vafs/builder.h>
+#include <vafs/reader.h>
 #include <vafs/directory.h>
 #include <vafs/file.h>
 #include "test_common.h"
@@ -18,9 +20,12 @@
 #define TEST_BLOCK_SIZE 8192u
 #define TEST_DATA_BLOCK_SIZE (16u * 1024u)
 #define TEST_TAIL_SIZE  128u
+#define TEST_EXPANDING_CODEC_ID "expand"
+#define TEST_DESCRIPTOR_CODEC_ID "dexp"
+#define TEST_DATA_CODEC_ID "data"
+#define TEST_CUSTOM_DESCRIPTOR_CODEC_ID "cust"
 
 static struct VaFsGuid g_filterGuid = VA_FS_FEATURE_FILTER;
-static struct VaFsGuid g_filterOpsGuid = VA_FS_FEATURE_FILTER_OPS;
 static int g_descriptor_encode_calls = 0;
 static int g_data_encode_calls = 0;
 static int g_custom_descriptor_decode_calls = 0;
@@ -90,7 +95,7 @@ static void fill_pattern(char* buffer, size_t length)
     }
 }
 
-static int expanding_encode(void* input, uint32_t inputLength, void** output, uint32_t* outputLength)
+static int expanding_encode(const void* input, size_t inputLength, void** output, size_t* outputLength)
 {
     uint8_t* encoded = malloc(inputLength + 1);
     if (encoded == NULL) {
@@ -105,23 +110,24 @@ static int expanding_encode(void* input, uint32_t inputLength, void** output, ui
     return 0;
 }
 
-static int fail_decode(void* input, uint32_t inputLength, void* output, uint32_t* outputLength)
+static int fail_decode(const void* input, size_t inputLength, void* output, size_t outputLength, size_t* bytesWrittenOut)
 {
     (void)input;
     (void)inputLength;
     (void)output;
     (void)outputLength;
+    (void)bytesWrittenOut;
     errno = ENOTSUP;
     return -1;
 }
 
-static int descriptor_expanding_encode(void* input, uint32_t inputLength, void** output, uint32_t* outputLength)
+static int descriptor_expanding_encode(const void* input, size_t inputLength, void** output, size_t* outputLength)
 {
     g_descriptor_encode_calls++;
     return expanding_encode(input, inputLength, output, outputLength);
 }
 
-static int data_expanding_encode(void* input, uint32_t inputLength, void** output, uint32_t* outputLength)
+static int data_expanding_encode(const void* input, size_t inputLength, void** output, size_t* outputLength)
 {
     g_data_encode_calls++;
     return expanding_encode(input, inputLength, output, outputLength);
@@ -130,52 +136,41 @@ static int data_expanding_encode(void* input, uint32_t inputLength, void** outpu
 static int install_expanding_filter(struct VaFs* vafs)
 {
     struct VaFsFeatureEncoding filter;
-    struct VaFsFeatureEncodingOps filterOps;
-    int status;
 
     // Install a filter that always expands data so the writer must fall back to
     // BLOCK_FLAG_STORED instead of persisting filtered bytes.
 
+    memset(&filter, 0, sizeof(filter));
     memcpy(&filter.Header.Guid, &g_filterGuid, sizeof(struct VaFsGuid));
     filter.Header.Length = sizeof(struct VaFsFeatureEncoding);
-    filter.DescriptorType = VaFsFilterType_BRIEFLZ;
-    filter.DataType = VaFsFilterType_BRIEFLZ;
+    strncpy(filter.DescriptorEncoding, TEST_EXPANDING_CODEC_ID, sizeof(filter.DescriptorEncoding) - 1);
+    strncpy(filter.DataEncoding, TEST_EXPANDING_CODEC_ID, sizeof(filter.DataEncoding) - 1);
 
-    status = vafs_feature_add(vafs, &filter.Header);
-    if (status != 0) {
-        return status;
-    }
-
-    memcpy(&filterOps.Header.Guid, &g_filterOpsGuid, sizeof(struct VaFsGuid));
-    filterOps.Header.Length = sizeof(struct VaFsFeatureEncodingOps);
-    filterOps.DescriptorEncode = expanding_encode;
-    filterOps.DescriptorDecode = fail_decode;
-    filterOps.DataEncode = expanding_encode;
-    filterOps.DataDecode = fail_decode;
-    return vafs_feature_add(vafs, &filterOps.Header);
+    return vafs_builder_add_feature(vafs, &filter.Header);
 }
 
-static int install_split_runtime_filters(struct VaFs* vafs)
+static void configure_split_stream_codecs(struct VaFsBuilderConfiguration* configuration)
 {
-    struct VaFsFeatureEncodingOps filterOps;
-
     // Give each stream its own encode hook so the test can prove descriptor and
     // data writes dispatch independently.
 
-    memcpy(&filterOps.Header.Guid, &g_filterOpsGuid, sizeof(struct VaFsGuid));
-    filterOps.Header.Length = sizeof(struct VaFsFeatureEncodingOps);
-    filterOps.DescriptorEncode = descriptor_expanding_encode;
-    filterOps.DescriptorDecode = fail_decode;
-    filterOps.DataEncode = data_expanding_encode;
-    filterOps.DataDecode = fail_decode;
-    return vafs_feature_add(vafs, &filterOps.Header);
+    configuration->Codecs[0] = (struct VaFsCodec) {
+        .ID = TEST_DESCRIPTOR_CODEC_ID,
+        .Encode = descriptor_expanding_encode,
+        .Decode = fail_decode
+    };
+    configuration->Codecs[1] = (struct VaFsCodec) {
+        .ID = TEST_DATA_CODEC_ID,
+        .Encode = data_expanding_encode,
+        .Decode = fail_decode
+    };
 }
 
-static int custom_descriptor_encode(void* input, uint32_t inputLength, void** output, uint32_t* outputLength)
+static int custom_descriptor_encode(const void* input, size_t inputLength, void** output, size_t* outputLength)
 {
     uint8_t* encoded;
-    uint32_t readOffset = 0;
-    uint32_t writeOffset = 0;
+    size_t   readOffset = 0;
+    size_t   writeOffset = 0;
 
     // This simple zero-run codec is intentionally custom to the test: it is
     // good enough to shrink descriptor blocks that contain many zero-filled
@@ -187,7 +182,7 @@ static int custom_descriptor_encode(void* input, uint32_t inputLength, void** ou
     }
 
     while (readOffset < inputLength) {
-        uint32_t zeroRun = 0;
+        size_t zeroRun = 0;
 
         while ((readOffset + zeroRun) < inputLength &&
                ((const uint8_t*)input)[readOffset + zeroRun] == 0 &&
@@ -202,8 +197,8 @@ static int custom_descriptor_encode(void* input, uint32_t inputLength, void** ou
             continue;
         }
 
-        uint32_t literalStart = readOffset;
-        uint32_t literalLength = 0;
+        size_t literalStart = readOffset;
+        size_t literalLength = 0;
 
         while (readOffset < inputLength && literalLength < 255u) {
             zeroRun = 0;
@@ -232,10 +227,10 @@ static int custom_descriptor_encode(void* input, uint32_t inputLength, void** ou
     return 0;
 }
 
-static int custom_descriptor_decode(void* input, uint32_t inputLength, void* output, uint32_t* outputLength)
+static int custom_descriptor_decode(const void* input, size_t inputLength, void* output, size_t outputLength, size_t* bytesWrittenOut)
 {
-    uint32_t readOffset = 0;
-    uint32_t writeOffset = 0;
+    size_t readOffset = 0;
+    size_t writeOffset = 0;
 
     g_custom_descriptor_decode_calls++;
 
@@ -251,7 +246,7 @@ static int custom_descriptor_decode(void* input, uint32_t inputLength, void* out
         tag = ((uint8_t*)input)[readOffset++];
         length = ((uint8_t*)input)[readOffset++];
 
-        if ((uint32_t)length > (*outputLength - writeOffset)) {
+        if ((size_t)length > (outputLength - writeOffset)) {
             errno = ENOSPC;
             return -1;
         }
@@ -272,56 +267,39 @@ static int custom_descriptor_decode(void* input, uint32_t inputLength, void* out
         writeOffset += length;
     }
 
-    *outputLength = writeOffset;
+    *bytesWrittenOut = writeOffset;
     return 0;
 }
 
 static int install_custom_descriptor_filter(struct VaFs* vafs)
 {
     struct VaFsFeatureEncoding filter;
-    struct VaFsFeatureEncodingOps filterOps;
-    int status;
 
+    memset(&filter, 0, sizeof(filter));
     memcpy(&filter.Header.Guid, &g_filterGuid, sizeof(struct VaFsGuid));
     filter.Header.Length = sizeof(struct VaFsFeatureEncoding);
-    filter.DescriptorType = TEST_CUSTOM_DESCRIPTOR_FILTER_TYPE;
-    filter.DataType = VaFsFilterType_None;
+    strncpy(filter.DescriptorEncoding, TEST_CUSTOM_DESCRIPTOR_CODEC_ID, sizeof(filter.DescriptorEncoding) - 1);
 
-    status = vafs_feature_add(vafs, &filter.Header);
-    if (status != 0) {
-        return status;
-    }
-
-    memcpy(&filterOps.Header.Guid, &g_filterOpsGuid, sizeof(struct VaFsGuid));
-    filterOps.Header.Length = sizeof(struct VaFsFeatureEncodingOps);
-    filterOps.DescriptorEncode = custom_descriptor_encode;
-    filterOps.DescriptorDecode = custom_descriptor_decode;
-    filterOps.DataEncode = NULL;
-    filterOps.DataDecode = NULL;
-    return vafs_feature_add(vafs, &filterOps.Header);
+    return vafs_builder_add_feature(vafs, &filter.Header);
 }
 
-static int install_custom_descriptor_filter_ops(struct VaFs* vafs)
+static void configure_custom_descriptor_codec(struct VaFsBuilderConfiguration* configuration)
 {
-    struct VaFsFeatureEncodingOps filterOps;
-
-    memcpy(&filterOps.Header.Guid, &g_filterOpsGuid, sizeof(struct VaFsGuid));
-    filterOps.Header.Length = sizeof(struct VaFsFeatureEncodingOps);
-    filterOps.DescriptorEncode = custom_descriptor_encode;
-    filterOps.DescriptorDecode = custom_descriptor_decode;
-    filterOps.DataEncode = NULL;
-    filterOps.DataDecode = NULL;
-    return vafs_feature_add(vafs, &filterOps.Header);
+    configuration->Codecs[0] = (struct VaFsCodec) {
+        .ID = TEST_CUSTOM_DESCRIPTOR_CODEC_ID,
+        .Encode = custom_descriptor_encode,
+        .Decode = custom_descriptor_decode
+    };
 }
 
 static int read_stream_block_sizes(uint32_t* descriptorBlockSizeOut, uint32_t* dataBlockSizeOut)
 {
     FILE*             fp;
     VaFsHeader_t      header;
-    VaFsStreamHeader_t streamHeader;
 
-    // Read the raw image headers back directly so the test can verify that the
-    // descriptor and data block sizes were persisted independently.
+    // Stream layout metadata now lives in the outer image header, so the test
+    // can verify descriptor/data block sizes without seeking into stream-local
+    // headers.
 
     fp = fopen(TEST_IMAGE_PATH, "rb");
     if (fp == NULL) {
@@ -333,25 +311,8 @@ static int read_stream_block_sizes(uint32_t* descriptorBlockSizeOut, uint32_t* d
         return -1;
     }
 
-    if (fseek(fp, (long)header.DescriptorBlockOffset, SEEK_SET) != 0) {
-        fclose(fp);
-        return -1;
-    }
-    if (fread(&streamHeader, sizeof(streamHeader), 1, fp) != 1) {
-        fclose(fp);
-        return -1;
-    }
-    *descriptorBlockSizeOut = streamHeader.BlockSize;
-
-    if (fseek(fp, (long)header.DataBlockOffset, SEEK_SET) != 0) {
-        fclose(fp);
-        return -1;
-    }
-    if (fread(&streamHeader, sizeof(streamHeader), 1, fp) != 1) {
-        fclose(fp);
-        return -1;
-    }
-    *dataBlockSizeOut = streamHeader.BlockSize;
+    *descriptorBlockSizeOut = header.DescriptorStream.BlockSize;
+    *dataBlockSizeOut = header.DataStream.BlockSize;
 
     fclose(fp);
     return 0;
@@ -403,16 +364,16 @@ static int load_image_bytes(void** bufferOut, size_t* lengthOut)
     return 0;
 }
 
-static int read_at_only(void* userData, long offset, void* buffer, size_t length, size_t* bytesRead)
+static int read_at_only(void* userData, uint64_t offset, void* buffer, size_t length, size_t* bytesRead)
 {
     struct ReadAtOnlyBuffer* image = userData;
 
-    if (image == NULL || buffer == NULL || bytesRead == NULL || offset < 0) {
+    if (image == NULL || buffer == NULL || bytesRead == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    if ((size_t)offset > image->Length || length > image->Length - (size_t)offset) {
+    if (offset > image->Length || length > image->Length - (size_t)offset) {
         errno = EIO;
         return -1;
     }
@@ -423,17 +384,30 @@ static int read_at_only(void* userData, long offset, void* buffer, size_t length
     return 0;
 }
 
-#if defined(_WIN32) || defined(_WIN64)
-static int blocking_read_at(void* userData, long offset, void* buffer, size_t length, size_t* bytesRead)
+static int read_at_only_get_size(void* userData, uint64_t* sizeOut)
 {
-    struct BlockingReadAtBuffer* image = userData;
+    struct ReadAtOnlyBuffer* image = userData;
 
-    if (image == NULL || buffer == NULL || bytesRead == NULL || offset < 0) {
+    if (image == NULL || sizeOut == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    if ((size_t)offset > image->Length || length > image->Length - (size_t)offset) {
+    *sizeOut = image->Length;
+    return 0;
+}
+
+#if defined(_WIN32) || defined(_WIN64)
+static int blocking_read_at(void* userData, uint64_t offset, void* buffer, size_t length, size_t* bytesRead)
+{
+    struct BlockingReadAtBuffer* image = userData;
+
+    if (image == NULL || buffer == NULL || bytesRead == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (offset > image->Length || length > image->Length - (size_t)offset) {
         errno = EIO;
         return -1;
     }
@@ -484,7 +458,7 @@ static void cleanup_image(struct VaFs* vafs, struct VaFsDirectoryHandle* root, s
         vafs_directory_close(root);
     }
     if (vafs != NULL) {
-        vafs_close(vafs);
+        vafs_reader_close(vafs);
     }
     remove(TEST_IMAGE_PATH);
 }
@@ -492,7 +466,7 @@ static void cleanup_image(struct VaFs* vafs, struct VaFsDirectoryHandle* root, s
 static int test_sequential_reads_advance_position(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsFileHandle* file = NULL;
     char* expected = NULL;
@@ -512,10 +486,10 @@ static int test_sequential_reads_advance_position(void)
 
     fill_pattern(expected, expectedLength);
 
-    vafs_config_initialize(&config);
-    vafs_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
+    vafs_builder_config_initialize(&config);
+    vafs_builder_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create test image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -531,10 +505,10 @@ static int test_sequential_reads_advance_position(void)
     file = NULL;
     vafs_directory_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen test image");
 
     status = vafs_file_open(vafs, "/payload", &file);
@@ -560,7 +534,15 @@ static int test_sequential_reads_advance_position(void)
 static int test_stored_blocks_skip_runtime_decode(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
+    struct VaFsReaderConfiguration readerConfig;
+    struct VaFsCodec codecs[] = {
+        {
+            .ID = TEST_EXPANDING_CODEC_ID,
+            .Encode = expanding_encode,
+            .Decode = fail_decode
+        }
+    };
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsFileHandle* file = NULL;
     const char payload[] = "stored block payload";
@@ -569,13 +551,15 @@ static int test_stored_blocks_skip_runtime_decode(void)
     size_t read;
     int status;
 
-    // Use an expanding filter so the writer chooses BLOCK_FLAG_STORED, then
-    // reopen without runtime filter ops to verify that decode is skipped.
+    // Use an expanding codec so the writer chooses BLOCK_FLAG_STORED, then
+    // reopen with a decode hook that fails if stored blocks incorrectly decode.
 
-    vafs_config_initialize(&config);
-    vafs_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
+    vafs_builder_config_initialize(&config);
+    vafs_builder_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
+    config.Codecs[0] = codecs[0];
+    config.Codecs[1] = codecs[0];
 
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create filtered test image");
 
     status = install_expanding_filter(vafs);
@@ -594,14 +578,16 @@ static int test_stored_blocks_skip_runtime_decode(void)
     file = NULL;
     vafs_directory_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    vafs_reader_config_initialize(&readerConfig);
+    vafs_reader_config_set_codecs(&readerConfig, codecs, 1);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, &readerConfig, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen filtered test image");
 
     status = vafs_file_open(vafs, "/stored", &file);
-    TEST_ASSERT(status == 0, "Failed to open stored-block file without runtime filter ops");
+    TEST_ASSERT(status == 0, "Failed to open stored-block file with registered codec");
 
     read = vafs_file_read(file, buffer, sizeof(payload) - 1);
     TEST_ASSERT(read == sizeof(payload) - 1, "Stored-block read size mismatch");
@@ -609,13 +595,13 @@ static int test_stored_blocks_skip_runtime_decode(void)
         "Stored blocks should be readable without invoking runtime decode");
 
     cleanup_image(vafs, NULL, file);
-    TEST_PASS("Stored blocks bypass runtime decode when compression is not beneficial");
+    TEST_PASS("Stored blocks bypass decode when compression is not beneficial");
 }
 
 static int test_descriptor_and_data_streams_can_diverge(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsFileHandle* file = NULL;
     uint32_t descriptorBlockSize;
@@ -630,15 +616,13 @@ static int test_descriptor_and_data_streams_can_diverge(void)
     g_descriptor_encode_calls = 0;
     g_data_encode_calls = 0;
 
-    vafs_config_initialize(&config);
-    vafs_config_set_descriptor_block_size(&config, TEST_BLOCK_SIZE);
-    vafs_config_set_data_block_size(&config, TEST_DATA_BLOCK_SIZE);
+    vafs_builder_config_initialize(&config);
+    vafs_builder_config_set_descriptor_block_size(&config, TEST_BLOCK_SIZE);
+    vafs_builder_config_set_data_block_size(&config, TEST_DATA_BLOCK_SIZE);
+    configure_split_stream_codecs(&config);
 
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create split-policy test image");
-
-    status = install_split_runtime_filters(vafs);
-    TEST_ASSERT(status == 0, "Failed to install split runtime filters");
 
     status = vafs_directory_open(vafs, "/", &root);
     TEST_ASSERT(status == 0, "Failed to open root directory");
@@ -652,7 +636,7 @@ static int test_descriptor_and_data_streams_can_diverge(void)
     file = NULL;
     vafs_directory_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
     TEST_ASSERT(g_descriptor_encode_calls > 0, "Descriptor stream did not use its own encode callback");
@@ -670,7 +654,13 @@ static int test_descriptor_and_data_streams_can_diverge(void)
 static int test_root_open_waits_for_custom_filter_ops(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
+    struct VaFsReaderConfiguration readerConfig;
+    struct VaFsCodec customCodec = {
+        .ID = TEST_CUSTOM_DESCRIPTOR_CODEC_ID,
+        .Encode = custom_descriptor_encode,
+        .Decode = custom_descriptor_decode
+    };
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsDirectoryHandle* reopenedRoot = NULL;
     struct VaFsFileHandle* file = NULL;
@@ -679,12 +669,12 @@ static int test_root_open_waits_for_custom_filter_ops(void)
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     int status;
 
-    // Read-mode open must succeed before custom filter callbacks are present,
-    // otherwise descriptor-filtered images would be impossible to reopen with
-    // application-defined codecs.
+    // Custom descriptor codecs are persisted by ID and must be registered when
+    // the reader opens the image.
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    configure_custom_descriptor_codec(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create custom-filter test image");
 
     status = install_custom_descriptor_filter(vafs);
@@ -703,44 +693,43 @@ static int test_root_open_waits_for_custom_filter_ops(void)
 
     vafs_directory_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
     g_custom_descriptor_decode_calls = 0;
 
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
-    TEST_ASSERT(status == 0, "Open should succeed before custom filter ops are installed");
-
-    status = vafs_feature_query(vafs, &g_filterGuid, (struct VaFsFeatureHeader**)&filter);
-    TEST_ASSERT(status == 0, "Failed to query persisted custom filter feature");
-    TEST_ASSERT(filter->DescriptorType == TEST_CUSTOM_DESCRIPTOR_FILTER_TYPE,
-        "Persisted descriptor filter type mismatch");
-
     errno = 0;
-    status = vafs_directory_open(vafs, "/", &reopenedRoot);
-    TEST_ASSERT(status != 0 && errno == ENOTSUP,
-        "Root open should fail with ENOTSUP before custom filter ops are installed");
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
+    TEST_ASSERT(status != 0 && errno == ENOTSUP, "Open should fail before custom descriptor codec is registered");
 
-    status = install_custom_descriptor_filter_ops(vafs);
-    TEST_ASSERT(status == 0, "Failed to install custom descriptor filter ops after open");
+    vafs_reader_config_initialize(&readerConfig);
+    vafs_reader_config_set_codecs(&readerConfig, &customCodec, 1);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, &readerConfig, &vafs);
+    TEST_ASSERT(status == 0, "Open should succeed after custom descriptor codec is registered");
+
+    status = vafs_reader_query_feature(vafs, &g_filterGuid, (struct VaFsFeatureHeader**)&filter);
+    TEST_ASSERT(status == 0, "Failed to query persisted custom filter feature");
+    TEST_ASSERT(strcmp(filter->DescriptorEncoding, TEST_CUSTOM_DESCRIPTOR_CODEC_ID) == 0,
+        "Persisted descriptor codec id mismatch");
 
     status = vafs_directory_open(vafs, "/", &reopenedRoot);
-    TEST_ASSERT(status == 0, "Failed to open root directory after installing custom filter ops");
+    TEST_ASSERT(status == 0, "Failed to open root directory after registering custom descriptor codec");
     TEST_ASSERT(g_custom_descriptor_decode_calls > 0,
         "Expected custom descriptor decode to run during lazy root open");
 
     cleanup_image(vafs, reopenedRoot, NULL);
-    TEST_PASS("Read-mode root initialization waits for caller-supplied custom filter ops");
+    TEST_PASS("Custom descriptor codecs are supplied through reader configuration");
 }
 
 static int test_open_ops_accepts_read_at_only_backend(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsFileHandle* file = NULL;
-    struct VaFsOperations ops = { 0 };
+    struct VaFsReaderBackendOps ops = { 0 };
     struct ReadAtOnlyBuffer image = { 0 };
+    void* imageData = NULL;
     const char payload[] = "read-at backend";
     char buffer[sizeof(payload)] = { 0 };
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
@@ -750,10 +739,10 @@ static int test_open_ops_accepts_read_at_only_backend(void)
     // Prove that the read path no longer requires a mutable device cursor by
     // reopening an image through a backend that only implements readAt.
 
-    vafs_config_initialize(&config);
-    vafs_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
+    vafs_builder_config_initialize(&config);
+    vafs_builder_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create readAt-only test image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -768,15 +757,17 @@ static int test_open_ops_accepts_read_at_only_backend(void)
     file = NULL;
     vafs_directory_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = load_image_bytes((void**)&image.Data, &image.Length);
+    status = load_image_bytes(&imageData, &image.Length);
     TEST_ASSERT(status == 0, "Failed to load image into memory");
+    image.Data = imageData;
 
     ops.readAt = read_at_only;
+    ops.getSize = read_at_only_get_size;
 
-    status = vafs_open_ops(&ops, &image, &vafs);
+    status = vafs_reader_open_ops(&ops, &image, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to open image with readAt-only backend");
 
     status = vafs_file_open(vafs, "/ops", &file);
@@ -788,19 +779,20 @@ static int test_open_ops_accepts_read_at_only_backend(void)
     TEST_ASSERT(image.ReadAtCalls > 0, "Expected readAt callback to service the read path");
 
     cleanup_image(vafs, NULL, file);
-    free((void*)image.Data);
+    free(imageData);
     TEST_PASS("Read-only custom backends can rely on readAt without seek+read");
 }
 
 static int test_boundary_read_does_not_prefetch_next_stream_block(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsFileHandle* first = NULL;
     struct VaFsFileHandle* second = NULL;
-    struct VaFsOperations ops = { 0 };
+    struct VaFsReaderBackendOps ops = { 0 };
     struct ReadAtOnlyBuffer image = { 0 };
+    void* imageData = NULL;
     char* payload = NULL;
     char* buffer = NULL;
     const char tailPayload[] = "tail";
@@ -818,10 +810,10 @@ static int test_boundary_read_does_not_prefetch_next_stream_block(void)
 
     fill_pattern(payload, TEST_BLOCK_SIZE);
 
-    vafs_config_initialize(&config);
-    vafs_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
+    vafs_builder_config_initialize(&config);
+    vafs_builder_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create boundary-read test image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -842,14 +834,16 @@ static int test_boundary_read_does_not_prefetch_next_stream_block(void)
 
     vafs_directory_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = load_image_bytes((void**)&image.Data, &image.Length);
+    status = load_image_bytes(&imageData, &image.Length);
     TEST_ASSERT(status == 0, "Failed to load boundary-read image");
+    image.Data = imageData;
 
     ops.readAt = read_at_only;
-    status = vafs_open_ops(&ops, &image, &vafs);
+    ops.getSize = read_at_only_get_size;
+    status = vafs_reader_open_ops(&ops, &image, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen boundary-read image");
 
     status = vafs_file_open(vafs, "/first", &first);
@@ -862,7 +856,7 @@ static int test_boundary_read_does_not_prefetch_next_stream_block(void)
     TEST_ASSERT(image.ReadAtCalls == 1, "Boundary read should consume exactly one backend block read");
 
     cleanup_image(vafs, NULL, first);
-    free((void*)image.Data);
+    free(imageData);
     free(buffer);
     free(payload);
     TEST_PASS("Reads that finish on a block boundary do not prefetch the next stream block");
@@ -872,13 +866,14 @@ static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
 {
 #if defined(_WIN32) || defined(_WIN64)
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsFileHandle* writer = NULL;
     struct VaFsFileHandle* readerA = NULL;
     struct VaFsFileHandle* readerB = NULL;
-    struct VaFsOperations ops = { 0 };
+    struct VaFsReaderBackendOps ops = { 0 };
     struct BlockingReadAtBuffer image = { 0 };
+    void* imageData = NULL;
     struct ConcurrentReadWorker workerA = { 0 };
     struct ConcurrentReadWorker workerB = { 0 };
     char expected[64];
@@ -897,10 +892,10 @@ static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
     fill_pattern(payload, sizeof(payload));
     memcpy(expected, payload, sizeof(expected));
 
-    vafs_config_initialize(&config);
-    vafs_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
+    vafs_builder_config_initialize(&config);
+    vafs_builder_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create concurrent-read test image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -914,11 +909,12 @@ static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
     writer = NULL;
     vafs_directory_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = load_image_bytes((void**)&image.Data, &image.Length);
+    status = load_image_bytes(&imageData, &image.Length);
     TEST_ASSERT(status == 0, "Failed to load concurrent-read image");
+    image.Data = imageData;
 
     image.FirstReadEntered = CreateEvent(NULL, TRUE, FALSE, NULL);
     image.SecondReadEntered = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -927,7 +923,8 @@ static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
         "Failed to create concurrent-read events");
 
     ops.readAt = blocking_read_at;
-    status = vafs_open_ops(&ops, &image, &vafs);
+    ops.getSize = read_at_only_get_size;
+    status = vafs_reader_open_ops(&ops, &image, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen image with blocking readAt backend");
 
     status = vafs_file_open(vafs, "/parallel", &readerA);
@@ -978,7 +975,7 @@ static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
     free(workerB.Buffer);
     vafs_file_close(readerA);
     vafs_file_close(readerB);
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     free((void*)image.Data);
     remove(TEST_IMAGE_PATH);
     TEST_PASS("Concurrent file handles can overlap reads without sharing a stream lock");

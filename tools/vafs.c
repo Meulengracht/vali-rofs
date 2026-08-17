@@ -29,11 +29,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <vafs/vafs.h>
+#include <vafs/builder.h>
 #include <vafs/file.h>
-#include <vafs/symlink.h>
 #include <vafs/directory.h>
+#include <vafs/reader.h>
+#include <vafs/symlink.h>
 #include <vafs/stat.h>
 
+extern int __configure_reader_filters(struct VaFsReaderConfiguration* configuration);
 extern int __handle_filter(struct VaFs* vafs);
 
 /** Open a file
@@ -504,7 +507,9 @@ int main(int argc, char *argv[])
         goto run_main;
 	}
 
-    status = vafs_open_file(g_options.filename, &vafs);
+    struct VaFsReaderConfiguration readerConfiguration;
+    __configure_reader_filters(&readerConfiguration);
+    status = vafs_reader_open_file(g_options.filename, &readerConfiguration, &vafs);
     if (status != 0) {
         fprintf(stderr, "failed to open %s\n", g_options.filename);
 		__show_help(argv[0]);
@@ -520,7 +525,7 @@ int main(int argc, char *argv[])
 run_main:
 	status = fuse_main(args.argc, args.argv, &operations, vafs);
     if (vafs != NULL) {
-        vafs_close(vafs);
+        vafs_reader_close(vafs);
     }
     fuse_opt_free_args(&args);
     return status;

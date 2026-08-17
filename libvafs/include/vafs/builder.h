@@ -15,7 +15,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  *
  * Vali Initrd Filesystem
- * - Declares the draft backend contracts for the next-generation VaFS public API.
+ * - Declares the builder API used to create VaFS images.
  */
 
 #ifndef __VAFS_BUILDER_H__

@@ -19,6 +19,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <vafs/vafs.h>
+#include <vafs/reader.h>
+#include <vafs/builder.h>
 #include <vafs/directory.h>
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
@@ -58,7 +60,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
             vafs_directory_close(rootHandle);
         }
 
-        vafs_close(vafs);
+        vafs_reader_close(vafs);
     }
 
     return 0;

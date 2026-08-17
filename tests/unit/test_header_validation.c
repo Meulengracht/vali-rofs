@@ -10,48 +10,9 @@
 #include <string.h>
 #include <stdint.h>
 #include <vafs/vafs.h>
-
-// VaFS format structures (from private.h)
-#define VA_FS_MAGIC       0x3144524D
-#define VA_FS_VERSION     0x00010000
-#define STREAM_MAGIC      0x314D5356
-#define VA_FS_INVALID_BLOCK  0xFFFF
-#define VA_FS_INVALID_OFFSET 0xFFFFFFFF
-#define VA_FS_DESCRIPTOR_BLOCK_SIZE (8 * 1024)
-#define VA_FS_DATA_DEFAULT_BLOCKSIZE (128 * 1024)
-#define VA_FS_MAX_FEATURES 16
-
-typedef uint32_t vafsblock_t;
-
-#pragma pack(push, 1)
-typedef struct {
-    vafsblock_t Index;
-    uint32_t    Offset;
-} VaFsBlockPosition_t;
-
-typedef struct {
-    uint32_t            Magic;
-    uint32_t            Version;
-    uint32_t            Architecture;
-    uint16_t            FeatureCount;
-    uint16_t            Reserved;
-    uint32_t            Attributes;
-    uint32_t            DescriptorBlockOffset;
-    uint32_t            DataBlockOffset;
-    VaFsBlockPosition_t RootDescriptor;
-} VaFsHeader_t;
-
-typedef struct {
-    uint32_t Magic;
-    uint32_t BlockSize;
-    uint32_t BlockHeadersOffset;
-    uint32_t BlockHeadersCount;
-} VaFsStreamHeader_t;
-
-typedef struct {
-    uint32_t Count;
-} VaFsDirectoryHeader_t;
-#pragma pack(pop)
+#include <vafs/reader.h>
+#include <vafs/builder.h>
+#include "test_common.h"
 
 static void write_valid_header(FILE* fp) {
     VaFsHeader_t header = {0};
@@ -60,29 +21,14 @@ static void write_valid_header(FILE* fp) {
     header.Architecture = 0;
     header.FeatureCount = 0;
     header.Reserved = 0;
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
 }
 
-static void write_stream_header(FILE* fp, uint32_t blockSize) {
-    VaFsStreamHeader_t header = {0};
-    header.Magic = STREAM_MAGIC;
-    header.BlockSize = blockSize;
-    header.BlockHeadersOffset = blockSize + sizeof(VaFsStreamHeader_t);
-    header.BlockHeadersCount = 0;
-    fwrite(&header, sizeof(header), 1, fp);
-}
-
 static void write_minimal_descriptor_stream(FILE* fp) {
-    write_stream_header(fp, VA_FS_DESCRIPTOR_BLOCK_SIZE);
-    VaFsDirectoryHeader_t dirHeader = {0};
-    fwrite(&dirHeader, sizeof(dirHeader), 1, fp);
-    // Pad to block size
-    uint8_t pad[VA_FS_DESCRIPTOR_BLOCK_SIZE - sizeof(VaFsStreamHeader_t) - sizeof(VaFsDirectoryHeader_t)] = {0};
-    fwrite(pad, sizeof(pad), 1, fp);
+    test_write_minimal_descriptor_stream(fp);
 }
 
 // Test 1: Invalid magic number
@@ -95,8 +41,7 @@ static int test_invalid_magic(const char* filename) {
     header.Version = VA_FS_VERSION;
     header.FeatureCount = 0;
     header.Reserved = 0;
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -113,11 +58,10 @@ static int test_invalid_version(const char* filename) {
 
     VaFsHeader_t header = {0};
     header.Magic = VA_FS_MAGIC;
-    header.Version = 0x00020000; // Future version
+    header.Version = 0x00040000; // Unsupported future version
     header.FeatureCount = 0;
     header.Reserved = 0;
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -137,8 +81,7 @@ static int test_excessive_feature_count(const char* filename) {
     header.Version = VA_FS_VERSION;
     header.FeatureCount = VA_FS_MAX_FEATURES + 1; // TOO MANY!
     header.Reserved = 0;
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -158,8 +101,7 @@ static int test_nonzero_reserved(const char* filename) {
     header.Version = VA_FS_VERSION;
     header.FeatureCount = 0;
     header.Reserved = 0xABCD; // Should be zero!
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -179,8 +121,8 @@ static int test_descriptor_offset_too_small(const char* filename) {
     header.Version = VA_FS_VERSION;
     header.FeatureCount = 0;
     header.Reserved = 0;
-    header.DescriptorBlockOffset = 10; // Before end of header!
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
+    header.DescriptorStream.DataOffset = 10; // Before end of header!
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -200,8 +142,8 @@ static int test_data_offset_collision(const char* filename) {
     header.Version = VA_FS_VERSION;
     header.FeatureCount = 0;
     header.Reserved = 0;
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t); // Same as descriptor offset!
+    test_initialize_stream_layouts(&header);
+    header.DataStream.DataOffset = header.DescriptorStream.DataOffset; // Same as descriptor offset!
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -221,8 +163,8 @@ static int test_descriptor_offset_too_large(const char* filename) {
     header.Version = VA_FS_VERSION;
     header.FeatureCount = 0;
     header.Reserved = 0;
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
-    header.DescriptorBlockOffset = header.DataBlockOffset - 100; // Too close to data block
+    test_initialize_stream_layouts(&header);
+    header.DescriptorStream.IndexOffset = header.DescriptorStream.DataOffset - 1; // Index before data
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -242,8 +184,7 @@ static int test_invalid_root_block_index(const char* filename) {
     header.Version = VA_FS_VERSION;
     header.FeatureCount = 0;
     header.Reserved = 0;
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
     header.RootDescriptor.Index = VA_FS_INVALID_BLOCK; // Invalid!
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -263,8 +204,7 @@ static int test_invalid_root_offset(const char* filename) {
     header.Version = VA_FS_VERSION;
     header.FeatureCount = 0;
     header.Reserved = 0;
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = VA_FS_INVALID_OFFSET; // Invalid!
     fwrite(&header, sizeof(header), 1, fp);
@@ -284,8 +224,7 @@ static int test_root_offset_exceeds_block_size(const char* filename) {
     header.Version = VA_FS_VERSION;
     header.FeatureCount = 0;
     header.Reserved = 0;
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = VA_FS_DESCRIPTOR_BLOCK_SIZE + 100; // Too large!
     fwrite(&header, sizeof(header), 1, fp);
@@ -355,11 +294,11 @@ int main(int argc, char* argv[]) {
 
         // Try to open the image - it should fail
         struct VaFs* vafs = NULL;
-        int result = vafs_open_file(filename, &vafs);
+        int result = vafs_reader_open_file(filename, NULL, &vafs);
 
         if (result == 0) {
             printf("FAILED (image was accepted when it should be rejected)\n");
-            vafs_close(vafs);
+            vafs_reader_close(vafs);
             failed++;
         } else {
             printf("OK (rejected as expected)\n");

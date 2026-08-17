@@ -101,7 +101,7 @@ extern int vafs_reader_open_memory(
  * implementation to be used, like a raw device, or a loop-back interface. This could
  * also be any other file implementation. The caller is responsible for cleaning up after
  * the call to vafs_reader_close.
- * @param operations A pointer to the function table providing either readAt or the legacy seek+read pair.
+ * @param operations A pointer to the function table providing random-access reads.
  * @param userData   A pointer to user-supplied data which will be passed to operations.
  * @param vafsOut    A pointer where the handle of the filesystem instance will be stored.
  * @return int 0 on success, -1 on failure. See errno for more details

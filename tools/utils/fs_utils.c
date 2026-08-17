@@ -20,6 +20,7 @@
 
 #include <stddef.h>
 #include <errno.h>
+#include <stdlib.h>
 #include <vafs/stat.h>
 #include <vafs/xattr.h>
 
@@ -32,6 +33,7 @@
 #else
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #if defined(__linux__) || defined(__APPLE__)
 #include <sys/xattr.h>
 #endif

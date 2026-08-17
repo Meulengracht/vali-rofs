@@ -10,83 +10,9 @@
 #include <string.h>
 #include <stdint.h>
 #include <vafs/vafs.h>
-
-// VaFS format structures (from private.h)
-#define VA_FS_MAGIC       0x3144524D
-#define VA_FS_VERSION     0x00010000
-#define STREAM_MAGIC      0x314D5356
-#define VA_FS_INVALID_BLOCK  0xFFFF
-#define VA_FS_INVALID_OFFSET 0xFFFFFFFF
-#define VA_FS_DESCRIPTOR_BLOCK_SIZE (8 * 1024)
-#define VA_FS_DATA_DEFAULT_BLOCKSIZE (128 * 1024)
-
-#define VA_FS_DESCRIPTOR_TYPE_FILE      0x01
-#define VA_FS_DESCRIPTOR_TYPE_DIRECTORY 0x02
-#define VA_FS_DESCRIPTOR_TYPE_SYMLINK   0x03
-
-typedef uint32_t vafsblock_t;
-
-#pragma pack(push, 1)
-typedef struct {
-    vafsblock_t Index;
-    uint32_t    Offset;
-} VaFsBlockPosition_t;
-
-typedef struct {
-    uint32_t            Magic;
-    uint32_t            Version;
-    uint32_t            Architecture;
-    uint16_t            FeatureCount;
-    uint16_t            Reserved;
-    uint32_t            Attributes;
-    uint32_t            DescriptorBlockOffset;
-    uint32_t            DataBlockOffset;
-    VaFsBlockPosition_t RootDescriptor;
-} VaFsHeader_t;
-
-typedef struct {
-    uint16_t Type;
-    uint16_t Length;
-} VaFsDescriptor_t;
-
-typedef struct {
-    VaFsDescriptor_t    Base;
-    VaFsBlockPosition_t Data;
-    uint32_t            FileLength;
-    uint32_t            Permissions;
-} VaFsFileDescriptor_t;
-
-typedef struct {
-    VaFsDescriptor_t    Base;
-    VaFsBlockPosition_t Descriptor;
-    uint32_t            Permissions;
-} VaFsDirectoryDescriptor_t;
-
-typedef struct {
-    VaFsDescriptor_t Base;
-    uint16_t         NameLength;
-    uint16_t         TargetLength;
-} VaFsSymlinkDescriptor_t;
-
-typedef struct {
-    uint32_t Count;
-} VaFsDirectoryHeader_t;
-
-typedef struct {
-    uint32_t Magic;
-    uint32_t BlockSize;
-    uint32_t BlockHeadersOffset;
-    uint32_t BlockHeadersCount;
-} VaFsStreamHeader_t;
-
-typedef struct {
-    uint32_t LengthOnDisk;
-    uint32_t Offset;
-    uint32_t Crc;
-    uint16_t Flags;
-    uint16_t Reserved;
-} BlockHeader_t;
-#pragma pack(pop)
+#include <vafs/reader.h>
+#include <vafs/builder.h>
+#include "test_common.h"
 
 static void write_vafs_header(FILE* fp) {
     VaFsHeader_t header = {0};
@@ -94,20 +20,14 @@ static void write_vafs_header(FILE* fp) {
     header.Version = VA_FS_VERSION;
     header.Architecture = 0;
     header.FeatureCount = 0;
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
 }
 
 static void write_stream_header(FILE* fp, uint32_t blockSize) {
-    VaFsStreamHeader_t header = {0};
-    header.Magic = STREAM_MAGIC;
-    header.BlockSize = blockSize;
-    header.BlockHeadersOffset = blockSize + sizeof(VaFsStreamHeader_t);
-    header.BlockHeadersCount = 0;
-    fwrite(&header, sizeof(header), 1, fp);
+    test_write_stream_header(fp, blockSize);
 }
 
 // Test 1: Descriptor with length too short
@@ -132,6 +52,10 @@ static int test_descriptor_too_short(const char* filename) {
     fileDesc.Permissions = 0644;
     fwrite(&fileDesc, sizeof(fileDesc), 1, fp);
 
+    if (test_finish_descriptor_stream(fp) != 0) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return 0;
 }
@@ -157,6 +81,10 @@ static int test_descriptor_too_long(const char* filename) {
     fileDesc.Permissions = 0644;
     fwrite(&fileDesc, sizeof(fileDesc), 1, fp);
 
+    if (test_finish_descriptor_stream(fp) != 0) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return 0;
 }
@@ -173,6 +101,10 @@ static int test_directory_excessive_count(const char* filename) {
     VaFsDirectoryHeader_t dirHeader = {0xFFFFFFFF}; // Maximum uint32_t!
     fwrite(&dirHeader, sizeof(dirHeader), 1, fp);
 
+    if (test_finish_descriptor_stream(fp) != 0) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return 0;
 }
@@ -198,6 +130,10 @@ static int test_symlink_length_mismatch(const char* filename) {
     fwrite("link\0", 5, 1, fp);
     fwrite("targ\0", 5, 1, fp);
 
+    if (test_finish_descriptor_stream(fp) != 0) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return 0;
 }
@@ -221,6 +157,10 @@ static int test_symlink_zero_length(const char* filename) {
     symlinkDesc.TargetLength = 0; // Invalid!
     fwrite(&symlinkDesc, sizeof(symlinkDesc), 1, fp);
 
+    if (test_finish_descriptor_stream(fp) != 0) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return 0;
 }
@@ -246,6 +186,10 @@ static int test_file_no_name(const char* filename) {
     fileDesc.Permissions = 0644;
     fwrite(&fileDesc, sizeof(fileDesc), 1, fp);
 
+    if (test_finish_descriptor_stream(fp) != 0) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return 0;
 }
@@ -269,6 +213,10 @@ static int test_symlink_excessive_length(const char* filename) {
     symlinkDesc.Base.Length = sizeof(VaFsSymlinkDescriptor_t) + 10000 + 10;
     fwrite(&symlinkDesc, sizeof(symlinkDesc), 1, fp);
 
+    if (test_finish_descriptor_stream(fp) != 0) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return 0;
 }

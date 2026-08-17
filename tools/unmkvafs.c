@@ -30,6 +30,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <vafs/vafs.h>
+#include <vafs/builder.h>
+#include <vafs/reader.h>
 #include <vafs/directory.h>
 #include <vafs/file.h>
 #include "utils/utils.h"
@@ -70,6 +72,7 @@ struct pending_hardlink {
     char*            path;
 };
 
+extern int __configure_reader_filters(struct VaFsReaderConfiguration* configuration);
 extern int __handle_filter(struct VaFs* vafs);
 
 static struct VaFsGuid g_overviewGuid = VA_FS_FEATURE_OVERVIEW;
@@ -624,7 +627,7 @@ static int __handle_overview(struct VaFs* vafsHandle, struct progress_context* p
     struct VaFsFeatureOverview* overview;
     int                         status;
 
-    status = vafs_feature_query(vafsHandle, &g_overviewGuid, (struct VaFsFeatureHeader**)&overview);
+    status = vafs_reader_query_feature(vafsHandle, &g_overviewGuid, (struct VaFsFeatureHeader**)&overview);
     if (status) {
         fprintf(stderr, "unmkvafs: failed to query feature overview - %i\n", errno);
         return -1;
@@ -688,7 +691,9 @@ int main(int argc, char *argv[])
     list_init(&progressContext.extracted_objects);
     list_init(&progressContext.pending_hardlinks);
 
-    status = vafs_open_file(opts.image_path, &vafsHandle);
+    struct VaFsReaderConfiguration readerConfiguration;
+    __configure_reader_filters(&readerConfiguration);
+    status = vafs_reader_open_file(opts.image_path, &readerConfiguration, &vafsHandle);
     if (status) {
         fprintf(stderr, "unmkvafs: cannot open vafs image: %s\n", opts.image_path);
         return -1;
@@ -740,7 +745,7 @@ exit:
         }
     }
     __destroy_extraction_state(&progressContext);
-    status = vafs_close(vafsHandle);
+    status = vafs_reader_close(vafsHandle);
     if (status) {
         fprintf(stderr, "unmkvafs: failed to close image handle\n");
     }

@@ -29,11 +29,13 @@
 
 #include <vafs.h>
 #include <vafs/backend.h>
+#include <vafs/codec.h>
 #include <vafs/stat.h>
 
 struct VaFsStream;
 struct VaFsStreamReader;
 struct VaFsStreamDevice;
+struct VaFsDirectoryHandle;
 
 typedef uint32_t vafsblock_t;
 
@@ -43,7 +45,7 @@ typedef uint32_t vafsblock_t;
 // Descriptor bodies now persist full entry metadata, so older readers must
 // reject these images instead of interpreting the expanded fixed records as
 // variable-length name payloads.
-#define VA_FS_VERSION     0x00020000
+#define VA_FS_VERSION     0x00030000
 
 // Sentinel positions mark metadata that has not been assigned a final stream
 // coordinate yet, or optional sections that are absent from an image.
@@ -97,6 +99,18 @@ VAFS_ONDISK_STRUCT(VaFsBlockPosition, {
     uint32_t    Offset;
 });
 
+// Stream layouts are owned by the outer image header. A stream writes block
+// payloads first, appends its block index, and reports the final absolute
+// offsets here so the stream itself never needs to patch a forward pointer.
+VAFS_ONDISK_STRUCT(VaFsStreamLayout, {
+    uint32_t BlockSize;
+    uint32_t DataOffset;
+    uint32_t DataLength;
+    uint32_t IndexOffset;
+    uint32_t IndexCount;
+    uint32_t Reserved;
+});
+
 VAFS_ONDISK_STRUCT(VaFsHeader, {
     uint32_t            Magic;
     uint32_t            Version;
@@ -104,8 +118,8 @@ VAFS_ONDISK_STRUCT(VaFsHeader, {
     uint16_t            FeatureCount;
     uint16_t            Reserved;
     uint32_t            Attributes;
-    uint32_t            DescriptorBlockOffset;
-    uint32_t            DataBlockOffset;
+    VaFsStreamLayout_t  DescriptorStream;
+    VaFsStreamLayout_t  DataStream;
     VaFsBlockPosition_t RootDescriptor;
 });
 
@@ -354,6 +368,16 @@ extern const struct VaFsGuid g_filterGuid;
 extern void vafs_init(void);
 
 /**
+ * @brief Adds a feature record to a builder-owned image.
+ *
+ * Internal writer code uses this while assembling optional sections before the
+ * outer image header and feature list are emitted.
+ */
+extern int vafs_builder_add_feature(
+    struct VaFs*              vafs,
+    struct VaFsFeatureHeader* feature);
+
+/**
  * @brief Completes the canonical metadata fields required for one entry.
  *
  * Descriptor writers and create paths both run through this helper so entry
@@ -493,19 +517,6 @@ extern int vafs_streamdevice_close(
     struct VaFsStreamDevice* device);
 
 /**
- * @brief Repositions a stream device's current offset.
- *
- * @param[In] device The stream device to seek.
- * @param[In] offset Offset interpreted according to `whence`.
- * @param[In] whence Standard seek origin such as `SEEK_SET`, `SEEK_CUR`, or `SEEK_END`.
- * @return The resulting absolute position, or a negative value on failure.
- */
-extern long vafs_streamdevice_seek(
-    struct VaFsStreamDevice* device,
-    long                     offset,
-    int                      whence);
-
-/**
  * @brief Reads bytes from a stream device at an absolute offset.
  *
  * This is the read-only fast path used by stream and metadata loaders. Devices
@@ -537,9 +548,23 @@ extern int vafs_streamdevice_read_at(
  */
 extern int vafs_streamdevice_write(
     struct VaFsStreamDevice* device,
-    void*                    buffer,
+    const void*              buffer,
     size_t                   length,
     size_t*                  bytesWritten);
+
+/**
+ * @brief Reports the number of bytes currently held by a stream device.
+ *
+ * Writable devices use this as their append position. Readable devices report
+ * the backing image size when their backend supports it.
+ *
+ * @param[In]  device  The stream device to query.
+ * @param[Out] sizeOut Receives the device size in bytes.
+ * @return 0 on success, otherwise -1 with `errno` set.
+ */
+extern int vafs_streamdevice_size(
+    struct VaFsStreamDevice* device,
+    uint64_t*                sizeOut);
 
 /**
  * @brief Copies the complete contents of one stream device into another.
@@ -573,18 +598,16 @@ extern int vafs_streamdevice_unlock(
 /**
  * @brief Creates a writable block stream on top of a stream device.
  *
- * The created stream writes its header immediately and stages data into
- * fixed-size blocks until the stream is finished.
+ * The created stream appends block payloads directly to the device and stages
+ * only the in-memory block index until the stream is finished.
  *
  * @param[In]  device       Backing device used to store the stream contents.
- * @param[In]  deviceOffset Byte offset where the stream begins in the device.
  * @param[In]  blockSize    Block size used for staging and on-disk layout.
  * @param[Out] streamOut    Receives the created stream instance on success.
  * @return 0 on success, otherwise -1 with `errno` set.
  */
 extern int vafs_stream_create(
     struct VaFsStreamDevice* device,
-    long                     deviceOffset,
     uint32_t                 blockSize,
     struct VaFsStream**      streamOut);
 
@@ -592,13 +615,13 @@ extern int vafs_stream_create(
  * @brief Open a new stream for reading from the provided stream device.
  * 
  * @param[In]  device       The stream device to read from.
- * @param[In]  deviceOffset The offset in the device to start reading from.
+ * @param[In]  layout       Outer-image stream layout describing this stream.
  * @param[Out] streamOut    A pointer to where to store the handle of the stream.
  * @return int 0 if the stream was valid and successfully opened, otherwise -1.
  */
 extern int vafs_stream_open(
     struct VaFsStreamDevice* device,
-    long                     deviceOffset,
+     const VaFsStreamLayout_t* layout,
     struct VaFsStream**      streamOut);
 
 /**
@@ -614,8 +637,8 @@ extern int vafs_stream_open(
  */
 extern int vafs_stream_set_filter(
     struct VaFsStream*   stream,
-    VaFsFilterEncodeFunc encode,
-    VaFsFilterDecodeFunc decode);
+    VaFsCodecEncodeFunc  encode,
+    VaFsCodecDecodeFunc  decode);
 
 /**
  * @brief Retrieves the current logical write position inside a stream.
@@ -709,13 +732,15 @@ extern int vafs_stream_reader_read(
  * @brief Finalizes a writable stream and flushes its metadata.
  *
  * This writes any pending block data, serializes the block header table, and
- * updates the on-disk stream header.
+ * returns the final stream layout for the outer image header.
  *
- * @param[In] stream The stream to finish.
+ * @param[In]  stream    The stream to finish.
+ * @param[Out] layoutOut Receives the completed stream layout.
  * @return 0 on success, otherwise -1 with `errno` set.
  */
 extern int vafs_stream_finish(
-    struct VaFsStream* stream);
+     struct VaFsStream* stream,
+     VaFsStreamLayout_t* layoutOut);
 
 /**
  * @brief Closes a stream and frees its in-memory state.

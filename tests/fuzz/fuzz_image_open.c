@@ -14,6 +14,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <vafs/vafs.h>
+#include <vafs/reader.h>
+#include <vafs/builder.h>
 #include <vafs/directory.h>
 
 // LibFuzzer entry point
@@ -43,7 +45,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         }
 
         // Clean up
-        vafs_close(vafs);
+        vafs_reader_close(vafs);
     }
 
     return 0;

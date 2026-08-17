@@ -13,6 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <vafs/vafs.h>
+#include <vafs/reader.h>
+#include <vafs/builder.h>
 #include <vafs/directory.h>
 #include <vafs/file.h>
 
@@ -54,13 +56,13 @@ static struct VaFsMetadata metadata_for_mode(
 static int test_simple_cyclic_symlink(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsMetadata symlinkMetadata = metadata_for_mode(VaFsEntryType_Symlink, 0777);
     int status;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create test image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -74,17 +76,17 @@ static int test_simple_cyclic_symlink(void)
     TEST_ASSERT(status == 0, "Failed to create link_b");
 
     vafs_directory_close(root);
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
 
     // Now reopen and try to follow the cyclic symlinks
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to open test image");
 
     struct VaFsFileHandle* file = NULL;
     status = vafs_file_open(vafs, "/link_a", &file);
     TEST_ASSERT(status != 0 && errno == ELOOP, "Expected ELOOP for cyclic symlink");
 
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Cyclic symlinks properly detected and rejected");
@@ -96,7 +98,7 @@ static int test_simple_cyclic_symlink(void)
 static int test_deep_symlink_chain(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     struct VaFsMetadata symlinkMetadata = metadata_for_mode(VaFsEntryType_Symlink, 0777);
@@ -105,8 +107,8 @@ static int test_deep_symlink_chain(void)
     int status;
     int i;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create test image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -130,17 +132,17 @@ static int test_deep_symlink_chain(void)
     }
 
     vafs_directory_close(root);
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
 
     // Now reopen and try to follow the deep chain
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to open test image");
 
     struct VaFsFileHandle* file = NULL;
     status = vafs_file_open(vafs, "/link_1", &file);
     TEST_ASSERT(status != 0 && errno == ELOOP, "Expected ELOOP for deep symlink chain");
 
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Deep symlink chains properly limited");
@@ -152,13 +154,13 @@ static int test_deep_symlink_chain(void)
 static int test_malformed_empty_target(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsMetadata symlinkMetadata = metadata_for_mode(VaFsEntryType_Symlink, 0777);
     int status;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create test image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -169,17 +171,17 @@ static int test_malformed_empty_target(void)
     TEST_ASSERT(status == 0, "Failed to create symlink with empty target");
 
     vafs_directory_close(root);
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
 
     // Now reopen and try to follow the malformed symlink
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to open test image");
 
     struct VaFsFileHandle* file = NULL;
     status = vafs_file_open(vafs, "/empty_link", &file);
     TEST_ASSERT(status != 0 && errno == EINVAL, "Expected EINVAL for empty symlink target");
 
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Empty symlink targets properly rejected");
@@ -191,7 +193,7 @@ static int test_malformed_empty_target(void)
 static int test_malformed_long_target(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsMetadata symlinkMetadata = metadata_for_mode(VaFsEntryType_Symlink, 0777);
     char* long_path;
@@ -203,8 +205,8 @@ static int test_malformed_long_target(void)
     memset(long_path, 'a', 4999);
     long_path[4999] = '\0';
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create test image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -216,16 +218,16 @@ static int test_malformed_long_target(void)
     // but resolution should definitely fail
 
     vafs_directory_close(root);
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
 
     // Try to open and follow if it was created
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     if (status == 0) {
         struct VaFsFileHandle* file = NULL;
         status = vafs_file_open(vafs, "/long_link", &file);
         // Should fail with ENAMETOOLONG or EINVAL
         TEST_ASSERT(status != 0, "Expected failure for extremely long symlink target");
-        vafs_close(vafs);
+        vafs_reader_close(vafs);
     }
 
     free(long_path);
@@ -240,13 +242,13 @@ static int test_malformed_long_target(void)
 static int test_indirect_cyclic_symlink(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsMetadata symlinkMetadata = metadata_for_mode(VaFsEntryType_Symlink, 0777);
     int status;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create test image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -263,17 +265,17 @@ static int test_indirect_cyclic_symlink(void)
     TEST_ASSERT(status == 0, "Failed to create link_c");
 
     vafs_directory_close(root);
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
 
     // Now reopen and try to follow the cyclic symlinks
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to open test image");
 
     struct VaFsFileHandle* file = NULL;
     status = vafs_file_open(vafs, "/link_a", &file);
     TEST_ASSERT(status != 0 && errno == ELOOP, "Expected ELOOP for indirect cyclic symlink");
 
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Indirect cyclic symlinks properly detected and rejected");
@@ -285,7 +287,7 @@ static int test_indirect_cyclic_symlink(void)
 static int test_valid_symlink_chain(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
+    struct VaFsBuilderConfiguration config;
     struct VaFsDirectoryHandle* root = NULL;
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     struct VaFsMetadata symlinkMetadata = metadata_for_mode(VaFsEntryType_Symlink, 0777);
@@ -294,8 +296,8 @@ static int test_valid_symlink_chain(void)
     int status;
     int i;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
     TEST_ASSERT(status == 0, "Failed to create test image");
 
     status = vafs_directory_open(vafs, "/", &root);
@@ -320,10 +322,10 @@ static int test_valid_symlink_chain(void)
     }
 
     vafs_directory_close(root);
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
 
     // Now reopen and try to follow the valid chain
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to open test image");
 
     struct VaFsFileHandle* file = NULL;
@@ -342,7 +344,7 @@ static int test_valid_symlink_chain(void)
         vafs_file_close(file);
     }
 
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Valid symlink chains work correctly within depth limits");

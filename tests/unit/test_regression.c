@@ -14,6 +14,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <vafs/vafs.h>
+#include <vafs/reader.h>
+#include <vafs/builder.h>
+#include <vafs/directory.h>
+#include <vafs/stat.h>
 #include "test_common.h"
 
 // Test case structure
@@ -104,8 +108,8 @@ static int test_invalid_descriptor_offset_zero(const char* filename) {
     VaFsHeader_t header = {0};
     header.Magic = VA_FS_MAGIC;
     header.Version = VA_FS_VERSION;
-    header.DescriptorBlockOffset = 0; // INVALID - should be after header
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
+    header.DescriptorStream.DataOffset = 0; // INVALID - should be after header
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -122,8 +126,8 @@ static int test_invalid_descriptor_offset_before_header(const char* filename) {
     VaFsHeader_t header = {0};
     header.Magic = VA_FS_MAGIC;
     header.Version = VA_FS_VERSION;
-    header.DescriptorBlockOffset = 10; // INVALID - before end of header
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
+    header.DescriptorStream.DataOffset = 10; // INVALID - before end of header
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -140,8 +144,8 @@ static int test_invalid_data_offset_before_descriptor(const char* filename) {
     VaFsHeader_t header = {0};
     header.Magic = VA_FS_MAGIC;
     header.Version = VA_FS_VERSION;
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t); // INVALID - same as descriptor offset
+    test_initialize_stream_layouts(&header);
+    header.DataStream.DataOffset = header.DescriptorStream.DataOffset; // INVALID - same as descriptor offset
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -158,8 +162,9 @@ static int test_invalid_offset_overflow(const char* filename) {
     VaFsHeader_t header = {0};
     header.Magic = VA_FS_MAGIC;
     header.Version = VA_FS_VERSION;
-    header.DescriptorBlockOffset = 0xFFFFFFF0; // Very large - will overflow
-    header.DataBlockOffset = 0xFFFFFFFF;
+    test_initialize_stream_layouts(&header);
+    header.DescriptorStream.DataOffset = 0xFFFFFFF0; // Very large - will overflow
+    header.DataStream.DataOffset = 0xFFFFFFFF;
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -176,8 +181,7 @@ static int test_invalid_root_descriptor_offset_huge(const char* filename) {
     VaFsHeader_t header = {0};
     header.Magic = VA_FS_MAGIC;
     header.Version = VA_FS_VERSION;
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0xFFFFFFFF; // INVALID - way beyond block size
     fwrite(&header, sizeof(header), 1, fp);
@@ -192,7 +196,7 @@ static int test_invalid_root_descriptor_offset_huge(const char* filename) {
 // ============================================================================
 
 static int test_descriptor_length_too_small(const char* filename) {
-    FILE* fp = fopen(filename, "wb");
+    FILE* fp = fopen(filename, "wb+");
     if (!fp) return -1;
 
     test_write_vafs_header(fp);
@@ -208,12 +212,16 @@ static int test_descriptor_length_too_small(const char* filename) {
     fileDesc.Data.Index = VA_FS_INVALID_BLOCK;
     fileDesc.Data.Offset = VA_FS_INVALID_OFFSET;
     fwrite(&fileDesc, sizeof(fileDesc), 1, fp);
+    if (test_finish_descriptor_stream(fp) != 0) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return 0;
 }
 
 static int test_descriptor_length_zero(const char* filename) {
-    FILE* fp = fopen(filename, "wb");
+    FILE* fp = fopen(filename, "wb+");
     if (!fp) return -1;
 
     test_write_vafs_header(fp);
@@ -229,12 +237,16 @@ static int test_descriptor_length_zero(const char* filename) {
     fileDesc.Data.Index = VA_FS_INVALID_BLOCK;
     fileDesc.Data.Offset = VA_FS_INVALID_OFFSET;
     fwrite(&fileDesc, sizeof(fileDesc), 1, fp);
+    if (test_finish_descriptor_stream(fp) != 0) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return 0;
 }
 
 static int test_descriptor_length_exceeds_block(const char* filename) {
-    FILE* fp = fopen(filename, "wb");
+    FILE* fp = fopen(filename, "wb+");
     if (!fp) return -1;
 
     test_write_vafs_header(fp);
@@ -250,12 +262,16 @@ static int test_descriptor_length_exceeds_block(const char* filename) {
     fileDesc.Data.Index = VA_FS_INVALID_BLOCK;
     fileDesc.Data.Offset = VA_FS_INVALID_OFFSET;
     fwrite(&fileDesc, sizeof(fileDesc), 1, fp);
+    if (test_finish_descriptor_stream(fp) != 0) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return 0;
 }
 
 static int test_descriptor_length_mismatched_symlink(const char* filename) {
-    FILE* fp = fopen(filename, "wb");
+    FILE* fp = fopen(filename, "wb+");
     if (!fp) return -1;
 
     test_write_vafs_header(fp);
@@ -273,6 +289,10 @@ static int test_descriptor_length_mismatched_symlink(const char* filename) {
     fwrite(&symlinkDesc, sizeof(symlinkDesc), 1, fp);
     fwrite("link\0", 5, 1, fp);
     fwrite("targ\0", 5, 1, fp);
+    if (test_finish_descriptor_stream(fp) != 0) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return 0;
 }
@@ -290,8 +310,7 @@ static int test_feature_count_exceeds_max(const char* filename) {
     header.Version = VA_FS_VERSION;
     header.FeatureCount = VA_FS_MAX_FEATURES + 1; // INVALID - too many!
     header.Reserved = 0;
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -310,8 +329,7 @@ static int test_feature_count_max(const char* filename) {
     header.Version = VA_FS_VERSION;
     header.FeatureCount = 65535; // Maximum uint16_t
     header.Reserved = 0;
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -330,8 +348,7 @@ static int test_reserved_field_nonzero(const char* filename) {
     header.Version = VA_FS_VERSION;
     header.FeatureCount = 0;
     header.Reserved = 0xDEAD; // INVALID - should be zero
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -346,7 +363,7 @@ static int test_reserved_field_nonzero(const char* filename) {
 // ============================================================================
 
 static int test_symlink_self_reference(const char* filename) {
-    FILE* fp = fopen(filename, "wb");
+    FILE* fp = fopen(filename, "wb+");
     if (!fp) return -1;
 
     test_write_vafs_header(fp);
@@ -366,12 +383,16 @@ static int test_symlink_self_reference(const char* filename) {
     fwrite(&symlinkDesc, sizeof(symlinkDesc), 1, fp);
     fwrite(name, symlinkDesc.NameLength, 1, fp);
     fwrite(target, symlinkDesc.TargetLength, 1, fp);
+    if (test_finish_descriptor_stream(fp) != 0) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return 0;
 }
 
 static int test_symlink_zero_length_name(const char* filename) {
-    FILE* fp = fopen(filename, "wb");
+    FILE* fp = fopen(filename, "wb+");
     if (!fp) return -1;
 
     test_write_vafs_header(fp);
@@ -387,12 +408,16 @@ static int test_symlink_zero_length_name(const char* filename) {
     symlinkDesc.NameLength = 0; // INVALID!
     symlinkDesc.TargetLength = 0; // INVALID!
     fwrite(&symlinkDesc, sizeof(symlinkDesc), 1, fp);
+    if (test_finish_descriptor_stream(fp) != 0) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return 0;
 }
 
 static int test_symlink_excessive_name_length(const char* filename) {
-    FILE* fp = fopen(filename, "wb");
+    FILE* fp = fopen(filename, "wb+");
     if (!fp) return -1;
 
     test_write_vafs_header(fp);
@@ -408,6 +433,10 @@ static int test_symlink_excessive_name_length(const char* filename) {
     symlinkDesc.TargetLength = 10;
     symlinkDesc.Base.Length = sizeof(VaFsSymlinkDescriptor_t) + 10010;
     fwrite(&symlinkDesc, sizeof(symlinkDesc), 1, fp);
+    if (test_finish_descriptor_stream(fp) != 0) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return 0;
 }
@@ -417,7 +446,7 @@ static int test_symlink_excessive_name_length(const char* filename) {
 // ============================================================================
 
 static int test_directory_excessive_entry_count(const char* filename) {
-    FILE* fp = fopen(filename, "wb");
+    FILE* fp = fopen(filename, "wb+");
     if (!fp) return -1;
 
     test_write_vafs_header(fp);
@@ -426,12 +455,16 @@ static int test_directory_excessive_entry_count(const char* filename) {
     // Directory claiming to have maximum entries
     VaFsDirectoryHeader_t dirHeader = {0xFFFFFFFF};
     fwrite(&dirHeader, sizeof(dirHeader), 1, fp);
+    if (test_finish_descriptor_stream(fp) != 0) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return 0;
 }
 
 static int test_directory_entry_count_limit(const char* filename) {
-    FILE* fp = fopen(filename, "wb");
+    FILE* fp = fopen(filename, "wb+");
     if (!fp) return -1;
 
     test_write_vafs_header(fp);
@@ -440,6 +473,10 @@ static int test_directory_entry_count_limit(const char* filename) {
     // Directory with 1 million + 1 entries (exceeds VAFS_DIRECTORY_MAX_ENTRIES)
     VaFsDirectoryHeader_t dirHeader = {1000001};
     fwrite(&dirHeader, sizeof(dirHeader), 1, fp);
+    if (test_finish_descriptor_stream(fp) != 0) {
+        fclose(fp);
+        return -1;
+    }
     fclose(fp);
     return 0;
 }
@@ -455,8 +492,7 @@ static int test_invalid_magic(const char* filename) {
     VaFsHeader_t header = {0};
     header.Magic = 0xDEADBEEF; // INVALID!
     header.Version = VA_FS_VERSION;
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -472,9 +508,8 @@ static int test_invalid_version(const char* filename) {
 
     VaFsHeader_t header = {0};
     header.Magic = VA_FS_MAGIC;
-    header.Version = 0x00020000; // Future version
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    header.Version = 0x00040000; // Unsupported future version
+    test_initialize_stream_layouts(&header);
     header.RootDescriptor.Index = 0;
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -491,8 +526,7 @@ static int test_invalid_root_block_index(const char* filename) {
     VaFsHeader_t header = {0};
     header.Magic = VA_FS_MAGIC;
     header.Version = VA_FS_VERSION;
-    header.DescriptorBlockOffset = sizeof(VaFsHeader_t);
-    header.DataBlockOffset = sizeof(VaFsHeader_t) + sizeof(VaFsStreamHeader_t) + VA_FS_DESCRIPTOR_BLOCK_SIZE;
+    test_initialize_stream_layouts(&header);
     header.RootDescriptor.Index = VA_FS_INVALID_BLOCK; // INVALID!
     header.RootDescriptor.Offset = 0;
     fwrite(&header, sizeof(header), 1, fp);
@@ -579,14 +613,33 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
-        // Verify the image is rejected by the parser
+        // Verify the image is rejected by the parser. Reader open validates the
+        // outer container immediately, while descriptor parsing is lazy and is
+        // forced here by opening root and resolving the self-link path used by
+        // the symlink loop case.
         struct VaFs* vafs = NULL;
-        int result = vafs_open_file(filename, &vafs);
+        int result = vafs_reader_open_file(filename, NULL, &vafs);
 
         if (result == 0) {
-            printf("FAILED (accepted when should reject)\n");
-            vafs_close(vafs);
-            failed++;
+            struct VaFsDirectoryHandle* root = NULL;
+            struct VaFsMetadata metadata;
+
+            vafs_metadata_initialize(&metadata);
+            result = vafs_directory_open(vafs, "/", &root);
+            if (result == 0) {
+                vafs_directory_close(root);
+                result = vafs_path_stat(vafs, "/self", 1, &metadata);
+            }
+
+            if (result == 0) {
+                printf("FAILED (accepted when should reject)\n");
+                vafs_reader_close(vafs);
+                failed++;
+            } else {
+                printf("OK\n");
+                vafs_reader_close(vafs);
+                created++;
+            }
         } else {
             printf("OK\n");
             created++;
