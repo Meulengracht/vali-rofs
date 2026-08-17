@@ -15,8 +15,6 @@
 #include <vafs/vafs.h>
 #include <vafs/reader.h>
 #include <vafs/builder.h>
-#include 
-#include 
 
 #define TEST_IMAGE_PATH "test_symlinks.vafs"
 
@@ -57,33 +55,30 @@ static int test_simple_cyclic_symlink(void)
 {
     struct VaFs* vafs = NULL;
     struct VaFsBuilderConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsDirectoryBuilder* root = NULL;
     struct VaFsMetadata symlinkMetadata = metadata_for_mode(VaFsEntryType_Symlink, 0777);
     int status;
 
     vafs_builder_config_initialize(&config);
-    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory");
-
     // Create cyclic symlinks: link_a -> link_b, link_b -> link_a
-    status = vafs_directory_builder_create_symlink(root, "link_a", "/link_b", &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(root, "link_a", "/link_b", &symlinkMetadata, NULL);
     TEST_ASSERT(status == 0, "Failed to create link_a");
 
-    status = vafs_directory_builder_create_symlink(root, "link_b", "/link_a", &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(root, "link_b", "/link_a", &symlinkMetadata, NULL);
     TEST_ASSERT(status == 0, "Failed to create link_b");
 
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     vafs_builder_close(vafs);
 
     // Now reopen and try to follow the cyclic symlinks
     status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to open test image");
 
-    struct VaFsFileHandle* file = NULL;
-    status = vafs_file_open(vafs, "/link_a", &file);
+    struct VaFsObjectReader* file = NULL;
+    status = vafs_object_reader_open(vafs, "/link_a", VaFsLookup_None, &file);
     TEST_ASSERT(status != 0 && errno == ELOOP, "Expected ELOOP for cyclic symlink");
 
     vafs_reader_close(vafs);
@@ -99,47 +94,46 @@ static int test_deep_symlink_chain(void)
 {
     struct VaFs* vafs = NULL;
     struct VaFsBuilderConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsDirectoryBuilder* root = NULL;
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     struct VaFsMetadata symlinkMetadata = metadata_for_mode(VaFsEntryType_Symlink, 0777);
     char symlink_name[64];
     char symlink_target[64];
     int status;
     int i;
+    size_t bytesWritten;
 
     vafs_builder_config_initialize(&config);
-    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory");
-
     // Create a file at the end of the chain
-    struct VaFsFileHandle* file_handle = NULL;
-    status = vafs_directory_create_file(root, "target_file", &fileMetadata, &file_handle);
+    struct VaFsFileBuilder* file_handle = NULL;
+    status = vafs_directory_builder_create_file(root, "target_file", &fileMetadata, &file_handle, NULL);
     TEST_ASSERT(status == 0, "Failed to create target file");
     const char* content = "test";
-    vafs_file_write(file_handle, (void*)content, strlen(content));
-    vafs_file_close(file_handle);
+    status = vafs_file_builder_write(file_handle, content, strlen(content), &bytesWritten);
+    TEST_ASSERT(status == 0 && bytesWritten == strlen(content), "Failed to write target file");
+    vafs_file_builder_close(file_handle);
 
     // Create a chain of 50 symlinks (exceeds VAFS_SYMLINK_MAX_DEPTH of 40)
     strcpy(symlink_target, "/target_file");
     for (i = 50; i >= 1; i--) {
         snprintf(symlink_name, sizeof(symlink_name), "link_%d", i);
-        status = vafs_directory_builder_create_symlink(root, symlink_name, symlink_target, &symlinkMetadata);
+        status = vafs_directory_builder_create_symlink(root, symlink_name, symlink_target, &symlinkMetadata, NULL);
         TEST_ASSERT(status == 0, "Failed to create symlink in chain");
         snprintf(symlink_target, sizeof(symlink_target), "/link_%d", i);
     }
 
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     vafs_builder_close(vafs);
 
     // Now reopen and try to follow the deep chain
     status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to open test image");
 
-    struct VaFsFileHandle* file = NULL;
-    status = vafs_file_open(vafs, "/link_1", &file);
+    struct VaFsObjectReader* file = NULL;
+    status = vafs_object_reader_open(vafs, "/link_1", VaFsLookup_None, &file);
     TEST_ASSERT(status != 0 && errno == ELOOP, "Expected ELOOP for deep symlink chain");
 
     vafs_reader_close(vafs);
@@ -155,30 +149,27 @@ static int test_malformed_empty_target(void)
 {
     struct VaFs* vafs = NULL;
     struct VaFsBuilderConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsDirectoryBuilder* root = NULL;
     struct VaFsMetadata symlinkMetadata = metadata_for_mode(VaFsEntryType_Symlink, 0777);
     int status;
 
     vafs_builder_config_initialize(&config);
-    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory");
-
     // Create a symlink with empty target
-    status = vafs_directory_builder_create_symlink(root, "empty_link", "", &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(root, "empty_link", "", &symlinkMetadata, NULL);
     TEST_ASSERT(status == 0, "Failed to create symlink with empty target");
 
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     vafs_builder_close(vafs);
 
     // Now reopen and try to follow the malformed symlink
     status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to open test image");
 
-    struct VaFsFileHandle* file = NULL;
-    status = vafs_file_open(vafs, "/empty_link", &file);
+    struct VaFsObjectReader* file = NULL;
+    status = vafs_object_reader_open(vafs, "/empty_link", VaFsLookup_None, &file);
     TEST_ASSERT(status != 0 && errno == EINVAL, "Expected EINVAL for empty symlink target");
 
     vafs_reader_close(vafs);
@@ -194,7 +185,7 @@ static int test_malformed_long_target(void)
 {
     struct VaFs* vafs = NULL;
     struct VaFsBuilderConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsDirectoryBuilder* root = NULL;
     struct VaFsMetadata symlinkMetadata = metadata_for_mode(VaFsEntryType_Symlink, 0777);
     char* long_path;
     int status;
@@ -206,25 +197,22 @@ static int test_malformed_long_target(void)
     long_path[4999] = '\0';
 
     vafs_builder_config_initialize(&config);
-    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory");
-
     // Try to create a symlink with an extremely long target
-    status = vafs_directory_builder_create_symlink(root, "long_link", long_path, &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(root, "long_link", long_path, &symlinkMetadata, NULL);
     // The creation might succeed or fail depending on validation at creation time
     // but resolution should definitely fail
 
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     vafs_builder_close(vafs);
 
     // Try to open and follow if it was created
     status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     if (status == 0) {
-        struct VaFsFileHandle* file = NULL;
-        status = vafs_file_open(vafs, "/long_link", &file);
+        struct VaFsObjectReader* file = NULL;
+        status = vafs_object_reader_open(vafs, "/long_link", VaFsLookup_None, &file);
         // Should fail with ENAMETOOLONG or EINVAL
         TEST_ASSERT(status != 0, "Expected failure for extremely long symlink target");
         vafs_reader_close(vafs);
@@ -243,36 +231,33 @@ static int test_indirect_cyclic_symlink(void)
 {
     struct VaFs* vafs = NULL;
     struct VaFsBuilderConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsDirectoryBuilder* root = NULL;
     struct VaFsMetadata symlinkMetadata = metadata_for_mode(VaFsEntryType_Symlink, 0777);
     int status;
 
     vafs_builder_config_initialize(&config);
-    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory");
-
     // Create indirect cyclic symlinks: A -> B -> C -> A
-    status = vafs_directory_builder_create_symlink(root, "link_a", "/link_b", &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(root, "link_a", "/link_b", &symlinkMetadata, NULL);
     TEST_ASSERT(status == 0, "Failed to create link_a");
 
-    status = vafs_directory_builder_create_symlink(root, "link_b", "/link_c", &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(root, "link_b", "/link_c", &symlinkMetadata, NULL);
     TEST_ASSERT(status == 0, "Failed to create link_b");
 
-    status = vafs_directory_builder_create_symlink(root, "link_c", "/link_a", &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(root, "link_c", "/link_a", &symlinkMetadata, NULL);
     TEST_ASSERT(status == 0, "Failed to create link_c");
 
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     vafs_builder_close(vafs);
 
     // Now reopen and try to follow the cyclic symlinks
     status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to open test image");
 
-    struct VaFsFileHandle* file = NULL;
-    status = vafs_file_open(vafs, "/link_a", &file);
+    struct VaFsObjectReader* file = NULL;
+    status = vafs_object_reader_open(vafs, "/link_a", VaFsLookup_None, &file);
     TEST_ASSERT(status != 0 && errno == ELOOP, "Expected ELOOP for indirect cyclic symlink");
 
     vafs_reader_close(vafs);
@@ -288,60 +273,58 @@ static int test_valid_symlink_chain(void)
 {
     struct VaFs* vafs = NULL;
     struct VaFsBuilderConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
+    struct VaFsDirectoryBuilder* root = NULL;
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     struct VaFsMetadata symlinkMetadata = metadata_for_mode(VaFsEntryType_Symlink, 0777);
     char symlink_name[64];
     char symlink_target[64];
     int status;
     int i;
+    size_t bytesWritten;
 
     vafs_builder_config_initialize(&config);
-    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory");
-
     // Create a file at the end of the chain
-    struct VaFsFileHandle* file_handle = NULL;
-    status = vafs_directory_create_file(root, "target_file", &fileMetadata, &file_handle);
+    struct VaFsFileBuilder* file_handle = NULL;
+    status = vafs_directory_builder_create_file(root, "target_file", &fileMetadata, &file_handle, NULL);
     TEST_ASSERT(status == 0, "Failed to create target file");
     const char* content = "test_content";
-    status = vafs_file_write(file_handle, (void*)content, strlen(content));
-    TEST_ASSERT(status == 0, "Failed to write to file");
-    vafs_file_close(file_handle);
+    status = vafs_file_builder_write(file_handle, content, strlen(content), &bytesWritten);
+    TEST_ASSERT(status == 0 && bytesWritten == strlen(content), "Failed to write to file");
+    vafs_file_builder_close(file_handle);
 
     // Create a chain of 10 symlinks (well within VAFS_SYMLINK_MAX_DEPTH of 40)
     strcpy(symlink_target, "/target_file");
     for (i = 10; i >= 1; i--) {
         snprintf(symlink_name, sizeof(symlink_name), "link_%d", i);
-        status = vafs_directory_builder_create_symlink(root, symlink_name, symlink_target, &symlinkMetadata);
+        status = vafs_directory_builder_create_symlink(root, symlink_name, symlink_target, &symlinkMetadata, NULL);
         TEST_ASSERT(status == 0, "Failed to create symlink in chain");
         snprintf(symlink_target, sizeof(symlink_target), "/link_%d", i);
     }
 
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     vafs_builder_close(vafs);
 
     // Now reopen and try to follow the valid chain
     status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to open test image");
 
-    struct VaFsFileHandle* file = NULL;
-    status = vafs_file_open(vafs, "/link_1", &file);
+    struct VaFsObjectReader* file = NULL;
+    status = vafs_object_reader_open(vafs, "/link_1", VaFsLookup_None, &file);
     TEST_ASSERT(status == 0, "Failed to follow valid symlink chain");
 
     if (file) {
-        size_t length = vafs_file_length(file);
+        uint64_t length = vafs_object_reader_length(file);
         TEST_ASSERT(length == strlen(content), "File length mismatch");
 
         char buffer[64] = {0};
-        size_t read = vafs_file_read(file, buffer, sizeof(buffer));
+        uint64_t read = vafs_object_reader_read(file, buffer, sizeof(buffer));
         TEST_ASSERT(read == strlen(content), "Read size mismatch");
         TEST_ASSERT(strcmp(buffer, content) == 0, "File content mismatch");
 
-        vafs_file_close(file);
+        vafs_object_reader_close(file);
     }
 
     vafs_reader_close(vafs);

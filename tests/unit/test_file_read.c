@@ -12,8 +12,6 @@
 #include <vafs/vafs.h>
 #include <vafs/builder.h>
 #include <vafs/reader.h>
-#include 
-#include 
 #include "test_common.h"
 
 #define TEST_IMAGE_PATH "test_file_read.vafs"
@@ -50,7 +48,7 @@ struct BlockingReadAtBuffer {
 };
 
 struct ConcurrentReadWorker {
-    struct VaFsFileHandle* File;
+    struct VaFsObjectReader* File;
     char*                  Buffer;
     size_t                 Size;
     size_t                 BytesRead;
@@ -441,21 +439,21 @@ static DWORD WINAPI concurrent_read_worker(LPVOID parameter)
 
     // Run one file-handle read to completion and capture both the byte count
     // and the thread-local errno visible to the caller path.
-    worker->BytesRead = vafs_file_read(worker->File, worker->Buffer, worker->Size);
+    worker->BytesRead = vafs_object_reader_read(worker->File, worker->Buffer, worker->Size);
     worker->ErrnoValue = errno;
     return 0;
 }
 #endif
 
-static void cleanup_image(struct VaFs* vafs, struct VaFsDirectoryHandle* root, struct VaFsFileHandle* file)
+static void cleanup_image(struct VaFs* vafs, struct VaFsDirectoryReader* root, struct VaFsObjectReader* file)
 {
     // Tear down in reverse ownership order so partially constructed test cases
     // can safely reuse this helper.
     if (file != NULL) {
-        vafs_file_close(file);
+        vafs_object_reader_close(file);
     }
     if (root != NULL) {
-        vafs_directory_close(root);
+        vafs_directory_reader_close(root);
     }
     if (vafs != NULL) {
         vafs_reader_close(vafs);
@@ -467,14 +465,16 @@ static int test_sequential_reads_advance_position(void)
 {
     struct VaFs* vafs = NULL;
     struct VaFsBuilderConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
-    struct VaFsFileHandle* file = NULL;
+    struct VaFsDirectoryBuilder* root = NULL;
+    struct VaFsFileBuilder* file = NULL;
+    struct VaFsObjectReader* reader = NULL;
     char* expected = NULL;
     char* firstChunk = NULL;
     char secondChunk[TEST_TAIL_SIZE] = { 0 };
     size_t expectedLength = TEST_BLOCK_SIZE + TEST_TAIL_SIZE;
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
-    size_t read;
+    size_t bytesWritten;
+    uint64_t read;
     int status;
 
     // Create a payload that spans a block boundary, reopen it, and prove that
@@ -489,21 +489,18 @@ static int test_sequential_reads_advance_position(void)
     vafs_builder_config_initialize(&config);
     vafs_builder_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
-    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory");
-
-    status = vafs_directory_create_file(root, "payload", &fileMetadata, &file);
+    status = vafs_directory_builder_create_file(root, "payload", &fileMetadata, &file, NULL);
     TEST_ASSERT(status == 0, "Failed to create test file");
 
-    read = vafs_file_write(file, expected, expectedLength);
-    TEST_ASSERT(read == 0, "Failed to write test payload");
+    status = vafs_file_builder_write(file, expected, expectedLength, &bytesWritten);
+    TEST_ASSERT(status == 0 && bytesWritten == expectedLength, "Failed to write test payload");
 
-    vafs_file_close(file);
+    vafs_file_builder_close(file);
     file = NULL;
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     root = NULL;
     vafs_builder_close(vafs);
     vafs = NULL;
@@ -511,21 +508,21 @@ static int test_sequential_reads_advance_position(void)
     status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen test image");
 
-    status = vafs_file_open(vafs, "/payload", &file);
+    status = vafs_object_reader_open(vafs, "/payload", VaFsLookup_None, &reader);
     TEST_ASSERT(status == 0, "Failed to open payload file");
 
-    read = vafs_file_read(file, firstChunk, TEST_BLOCK_SIZE);
+    read = vafs_object_reader_read(reader, firstChunk, TEST_BLOCK_SIZE);
     TEST_ASSERT(read == TEST_BLOCK_SIZE, "First read size mismatch");
     TEST_ASSERT(memcmp(firstChunk, expected, TEST_BLOCK_SIZE) == 0, "First read content mismatch");
 
-    read = vafs_file_read(file, secondChunk, sizeof(secondChunk));
+    read = vafs_object_reader_read(reader, secondChunk, sizeof(secondChunk));
     TEST_ASSERT(read == sizeof(secondChunk), "Second read size mismatch");
     TEST_ASSERT(memcmp(secondChunk, expected + TEST_BLOCK_SIZE, sizeof(secondChunk)) == 0,
         "Second read did not continue from the previous file position");
 
-    TEST_ASSERT(vafs_file_read(file, secondChunk, sizeof(secondChunk)) == 0, "Expected EOF after sequential reads");
+    TEST_ASSERT(vafs_object_reader_read(reader, secondChunk, sizeof(secondChunk)) == 0, "Expected EOF after sequential reads");
 
-    cleanup_image(vafs, NULL, file);
+    cleanup_image(vafs, NULL, reader);
     free(firstChunk);
     free(expected);
     TEST_PASS("Sequential reads advance file position across block boundaries");
@@ -543,12 +540,14 @@ static int test_stored_blocks_skip_runtime_decode(void)
             .Decode = fail_decode
         }
     };
-    struct VaFsDirectoryHandle* root = NULL;
-    struct VaFsFileHandle* file = NULL;
+    struct VaFsDirectoryBuilder* root = NULL;
+    struct VaFsFileBuilder* file = NULL;
+    struct VaFsObjectReader* reader = NULL;
     const char payload[] = "stored block payload";
     char buffer[sizeof(payload)] = { 0 };
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
-    size_t read;
+    size_t bytesWritten;
+    uint64_t read;
     int status;
 
     // Use an expanding codec so the writer chooses BLOCK_FLAG_STORED, then
@@ -559,24 +558,21 @@ static int test_stored_blocks_skip_runtime_decode(void)
     config.Codecs[0] = codecs[0];
     config.Codecs[1] = codecs[0];
 
-    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create filtered test image");
 
     status = install_expanding_filter(vafs);
     TEST_ASSERT(status == 0, "Failed to install expanding filter");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory");
-
-    status = vafs_directory_create_file(root, "stored", &fileMetadata, &file);
+    status = vafs_directory_builder_create_file(root, "stored", &fileMetadata, &file, NULL);
     TEST_ASSERT(status == 0, "Failed to create filtered test file");
 
-    read = vafs_file_write(file, (void*)payload, sizeof(payload) - 1);
-    TEST_ASSERT(read == 0, "Failed to write filtered payload");
+    status = vafs_file_builder_write(file, payload, sizeof(payload) - 1, &bytesWritten);
+    TEST_ASSERT(status == 0 && bytesWritten == sizeof(payload) - 1, "Failed to write filtered payload");
 
-    vafs_file_close(file);
+    vafs_file_builder_close(file);
     file = NULL;
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     root = NULL;
     vafs_builder_close(vafs);
     vafs = NULL;
@@ -586,15 +582,15 @@ static int test_stored_blocks_skip_runtime_decode(void)
     status = vafs_reader_open_file(TEST_IMAGE_PATH, &readerConfig, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen filtered test image");
 
-    status = vafs_file_open(vafs, "/stored", &file);
+    status = vafs_object_reader_open(vafs, "/stored", VaFsLookup_None, &reader);
     TEST_ASSERT(status == 0, "Failed to open stored-block file with registered codec");
 
-    read = vafs_file_read(file, buffer, sizeof(payload) - 1);
+    read = vafs_object_reader_read(reader, buffer, sizeof(payload) - 1);
     TEST_ASSERT(read == sizeof(payload) - 1, "Stored-block read size mismatch");
     TEST_ASSERT(memcmp(buffer, payload, sizeof(payload) - 1) == 0,
         "Stored blocks should be readable without invoking runtime decode");
 
-    cleanup_image(vafs, NULL, file);
+    cleanup_image(vafs, NULL, reader);
     TEST_PASS("Stored blocks bypass decode when compression is not beneficial");
 }
 
@@ -602,12 +598,13 @@ static int test_descriptor_and_data_streams_can_diverge(void)
 {
     struct VaFs* vafs = NULL;
     struct VaFsBuilderConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
-    struct VaFsFileHandle* file = NULL;
+    struct VaFsDirectoryBuilder* root = NULL;
+    struct VaFsFileBuilder* file = NULL;
     uint32_t descriptorBlockSize;
     uint32_t dataBlockSize;
     const char payload[] = "separate stream policies";
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
+    size_t bytesWritten;
     int status;
 
     // Configure distinct block sizes and runtime callbacks, then verify both
@@ -621,20 +618,18 @@ static int test_descriptor_and_data_streams_can_diverge(void)
     vafs_builder_config_set_data_block_size(&config, TEST_DATA_BLOCK_SIZE);
     configure_split_stream_codecs(&config);
 
-    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create split-policy test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory");
-
-    status = vafs_directory_create_file(root, "split", &fileMetadata, &file);
+    status = vafs_directory_builder_create_file(root, "split", &fileMetadata, &file, NULL);
     TEST_ASSERT(status == 0, "Failed to create split test file");
 
-    TEST_ASSERT(vafs_file_write(file, (void*)payload, sizeof(payload) - 1) == 0, "Failed to write split test payload");
+    status = vafs_file_builder_write(file, payload, sizeof(payload) - 1, &bytesWritten);
+    TEST_ASSERT(status == 0 && bytesWritten == sizeof(payload) - 1, "Failed to write split test payload");
 
-    vafs_file_close(file);
+    vafs_file_builder_close(file);
     file = NULL;
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     root = NULL;
     vafs_builder_close(vafs);
     vafs = NULL;
@@ -661,9 +656,9 @@ static int test_root_open_waits_for_custom_filter_ops(void)
         .Encode = custom_descriptor_encode,
         .Decode = custom_descriptor_decode
     };
-    struct VaFsDirectoryHandle* root = NULL;
-    struct VaFsDirectoryHandle* reopenedRoot = NULL;
-    struct VaFsFileHandle* file = NULL;
+    struct VaFsDirectoryBuilder* root = NULL;
+    struct VaFsDirectoryReader* reopenedRoot = NULL;
+    struct VaFsFileBuilder* file = NULL;
     struct VaFsFeatureEncoding* filter = NULL;
     char name[32];
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
@@ -674,24 +669,21 @@ static int test_root_open_waits_for_custom_filter_ops(void)
 
     vafs_builder_config_initialize(&config);
     configure_custom_descriptor_codec(&config);
-    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create custom-filter test image");
 
     status = install_custom_descriptor_filter(vafs);
     TEST_ASSERT(status == 0, "Failed to install custom descriptor filter");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory for custom-filter image");
-
     for (int i = 0; i < 64; ++i) {
         snprintf(name, sizeof(name), "entry-%02d", i);
-        status = vafs_directory_create_file(root, name, &fileMetadata, &file);
+        status = vafs_directory_builder_create_file(root, name, &fileMetadata, &file, NULL);
         TEST_ASSERT(status == 0, "Failed to create custom-filter descriptor entry");
-        vafs_file_close(file);
+        vafs_file_builder_close(file);
         file = NULL;
     }
 
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     root = NULL;
     vafs_builder_close(vafs);
     vafs = NULL;
@@ -712,7 +704,7 @@ static int test_root_open_waits_for_custom_filter_ops(void)
     TEST_ASSERT(strcmp(filter->DescriptorEncoding, TEST_CUSTOM_DESCRIPTOR_CODEC_ID) == 0,
         "Persisted descriptor codec id mismatch");
 
-    status = vafs_directory_open(vafs, "/", &reopenedRoot);
+    status = vafs_directory_reader_open(vafs, "/", VaFsLookup_None, &reopenedRoot);
     TEST_ASSERT(status == 0, "Failed to open root directory after registering custom descriptor codec");
     TEST_ASSERT(g_custom_descriptor_decode_calls > 0,
         "Expected custom descriptor decode to run during lazy root open");
@@ -725,15 +717,17 @@ static int test_open_ops_accepts_read_at_only_backend(void)
 {
     struct VaFs* vafs = NULL;
     struct VaFsBuilderConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
-    struct VaFsFileHandle* file = NULL;
+    struct VaFsDirectoryBuilder* root = NULL;
+    struct VaFsFileBuilder* file = NULL;
+    struct VaFsObjectReader* reader = NULL;
     struct VaFsReaderBackendOps ops = { 0 };
     struct ReadAtOnlyBuffer image = { 0 };
     void* imageData = NULL;
     const char payload[] = "read-at backend";
     char buffer[sizeof(payload)] = { 0 };
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
-    size_t read;
+    size_t bytesWritten;
+    uint64_t read;
     int status;
 
     // Prove that the read path no longer requires a mutable device cursor by
@@ -742,20 +736,18 @@ static int test_open_ops_accepts_read_at_only_backend(void)
     vafs_builder_config_initialize(&config);
     vafs_builder_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
-    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create readAt-only test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory");
-
-    status = vafs_directory_create_file(root, "ops", &fileMetadata, &file);
+    status = vafs_directory_builder_create_file(root, "ops", &fileMetadata, &file, NULL);
     TEST_ASSERT(status == 0, "Failed to create readAt-only test file");
 
-    TEST_ASSERT(vafs_file_write(file, (void*)payload, sizeof(payload) - 1) == 0, "Failed to write readAt-only payload");
+    status = vafs_file_builder_write(file, payload, sizeof(payload) - 1, &bytesWritten);
+    TEST_ASSERT(status == 0 && bytesWritten == sizeof(payload) - 1, "Failed to write readAt-only payload");
 
-    vafs_file_close(file);
+    vafs_file_builder_close(file);
     file = NULL;
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     root = NULL;
     vafs_builder_close(vafs);
     vafs = NULL;
@@ -770,15 +762,15 @@ static int test_open_ops_accepts_read_at_only_backend(void)
     status = vafs_reader_open_ops(&ops, &image, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to open image with readAt-only backend");
 
-    status = vafs_file_open(vafs, "/ops", &file);
+    status = vafs_object_reader_open(vafs, "/ops", VaFsLookup_None, &reader);
     TEST_ASSERT(status == 0, "Failed to open file through readAt-only backend");
 
-    read = vafs_file_read(file, buffer, sizeof(payload) - 1);
+    read = vafs_object_reader_read(reader, buffer, sizeof(payload) - 1);
     TEST_ASSERT(read == sizeof(payload) - 1, "Read size mismatch through readAt-only backend");
     TEST_ASSERT(memcmp(buffer, payload, sizeof(payload) - 1) == 0, "Read content mismatch through readAt-only backend");
     TEST_ASSERT(image.ReadAtCalls > 0, "Expected readAt callback to service the read path");
 
-    cleanup_image(vafs, NULL, file);
+    cleanup_image(vafs, NULL, reader);
     free(imageData);
     TEST_PASS("Read-only custom backends can rely on readAt without seek+read");
 }
@@ -787,9 +779,10 @@ static int test_boundary_read_does_not_prefetch_next_stream_block(void)
 {
     struct VaFs* vafs = NULL;
     struct VaFsBuilderConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
-    struct VaFsFileHandle* first = NULL;
-    struct VaFsFileHandle* second = NULL;
+    struct VaFsDirectoryBuilder* root = NULL;
+    struct VaFsFileBuilder* first = NULL;
+    struct VaFsFileBuilder* second = NULL;
+    struct VaFsObjectReader* reader = NULL;
     struct VaFsReaderBackendOps ops = { 0 };
     struct ReadAtOnlyBuffer image = { 0 };
     void* imageData = NULL;
@@ -797,7 +790,8 @@ static int test_boundary_read_does_not_prefetch_next_stream_block(void)
     char* buffer = NULL;
     const char tailPayload[] = "tail";
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
-    size_t read;
+    size_t bytesWritten;
+    uint64_t read;
     int status;
 
     // Read exactly one logical block from the first file while a later block
@@ -813,26 +807,24 @@ static int test_boundary_read_does_not_prefetch_next_stream_block(void)
     vafs_builder_config_initialize(&config);
     vafs_builder_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
-    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create boundary-read test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory");
-
-    status = vafs_directory_create_file(root, "first", &fileMetadata, &first);
+    status = vafs_directory_builder_create_file(root, "first", &fileMetadata, &first, NULL);
     TEST_ASSERT(status == 0, "Failed to create first boundary-read file");
-    TEST_ASSERT(vafs_file_write(first, payload, TEST_BLOCK_SIZE) == 0, "Failed to write first boundary-read payload");
-    vafs_file_close(first);
+    status = vafs_file_builder_write(first, payload, TEST_BLOCK_SIZE, &bytesWritten);
+    TEST_ASSERT(status == 0 && bytesWritten == TEST_BLOCK_SIZE, "Failed to write first boundary-read payload");
+    vafs_file_builder_close(first);
     first = NULL;
 
-    status = vafs_directory_create_file(root, "second", &fileMetadata, &second);
+    status = vafs_directory_builder_create_file(root, "second", &fileMetadata, &second, NULL);
     TEST_ASSERT(status == 0, "Failed to create second boundary-read file");
-    TEST_ASSERT(vafs_file_write(second, (void*)tailPayload, sizeof(tailPayload) - 1) == 0,
-        "Failed to write second boundary-read payload");
-    vafs_file_close(second);
+    status = vafs_file_builder_write(second, tailPayload, sizeof(tailPayload) - 1, &bytesWritten);
+    TEST_ASSERT(status == 0 && bytesWritten == sizeof(tailPayload) - 1, "Failed to write second boundary-read payload");
+    vafs_file_builder_close(second);
     second = NULL;
 
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     root = NULL;
     vafs_builder_close(vafs);
     vafs = NULL;
@@ -846,16 +838,16 @@ static int test_boundary_read_does_not_prefetch_next_stream_block(void)
     status = vafs_reader_open_ops(&ops, &image, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen boundary-read image");
 
-    status = vafs_file_open(vafs, "/first", &first);
+    status = vafs_object_reader_open(vafs, "/first", VaFsLookup_None, &reader);
     TEST_ASSERT(status == 0, "Failed to open first boundary-read file");
 
     image.ReadAtCalls = 0;
-    read = vafs_file_read(first, buffer, TEST_BLOCK_SIZE);
+    read = vafs_object_reader_read(reader, buffer, TEST_BLOCK_SIZE);
     TEST_ASSERT(read == TEST_BLOCK_SIZE, "Boundary read size mismatch");
     TEST_ASSERT(memcmp(buffer, payload, TEST_BLOCK_SIZE) == 0, "Boundary read content mismatch");
     TEST_ASSERT(image.ReadAtCalls == 1, "Boundary read should consume exactly one backend block read");
 
-    cleanup_image(vafs, NULL, first);
+    cleanup_image(vafs, NULL, reader);
     free(imageData);
     free(buffer);
     free(payload);
@@ -867,10 +859,10 @@ static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
 #if defined(_WIN32) || defined(_WIN64)
     struct VaFs* vafs = NULL;
     struct VaFsBuilderConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
-    struct VaFsFileHandle* writer = NULL;
-    struct VaFsFileHandle* readerA = NULL;
-    struct VaFsFileHandle* readerB = NULL;
+    struct VaFsDirectoryBuilder* root = NULL;
+    struct VaFsFileBuilder* writer = NULL;
+    struct VaFsObjectReader* readerA = NULL;
+    struct VaFsObjectReader* readerB = NULL;
     struct VaFsReaderBackendOps ops = { 0 };
     struct BlockingReadAtBuffer image = { 0 };
     void* imageData = NULL;
@@ -883,6 +875,7 @@ static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
     HANDLE waitHandles[2];
     DWORD waitStatus;
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
+    size_t bytesWritten;
     int status;
 
     // Hold the first backend read inside readAt, then start a second file
@@ -895,19 +888,17 @@ static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
     vafs_builder_config_initialize(&config);
     vafs_builder_config_set_data_block_size(&config, TEST_BLOCK_SIZE);
 
-    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create concurrent-read test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory");
-
-    status = vafs_directory_create_file(root, "parallel", &fileMetadata, &writer);
+    status = vafs_directory_builder_create_file(root, "parallel", &fileMetadata, &writer, NULL);
     TEST_ASSERT(status == 0, "Failed to create concurrent-read test file");
-    TEST_ASSERT(vafs_file_write(writer, payload, sizeof(payload)) == 0, "Failed to write concurrent-read payload");
+    status = vafs_file_builder_write(writer, payload, sizeof(payload), &bytesWritten);
+    TEST_ASSERT(status == 0 && bytesWritten == sizeof(payload), "Failed to write concurrent-read payload");
 
-    vafs_file_close(writer);
+    vafs_file_builder_close(writer);
     writer = NULL;
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     root = NULL;
     vafs_builder_close(vafs);
     vafs = NULL;
@@ -927,9 +918,9 @@ static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
     status = vafs_reader_open_ops(&ops, &image, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen image with blocking readAt backend");
 
-    status = vafs_file_open(vafs, "/parallel", &readerA);
+    status = vafs_object_reader_open(vafs, "/parallel", VaFsLookup_None, &readerA);
     TEST_ASSERT(status == 0, "Failed to open first concurrent reader");
-    status = vafs_file_open(vafs, "/parallel", &readerB);
+    status = vafs_object_reader_open(vafs, "/parallel", VaFsLookup_None, &readerB);
     TEST_ASSERT(status == 0, "Failed to open second concurrent reader");
 
     workerA.File = readerA;
@@ -973,8 +964,8 @@ static int test_concurrent_file_handles_do_not_serialize_on_stream_lock(void)
     CloseHandle(image.ReleaseReads);
     free(workerA.Buffer);
     free(workerB.Buffer);
-    vafs_file_close(readerA);
-    vafs_file_close(readerB);
+    vafs_object_reader_close(readerA);
+    vafs_object_reader_close(readerB);
     vafs_reader_close(vafs);
     free((void*)image.Data);
     remove(TEST_IMAGE_PATH);

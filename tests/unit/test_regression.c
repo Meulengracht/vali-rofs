@@ -16,7 +16,6 @@
 #include <vafs/vafs.h>
 #include <vafs/reader.h>
 #include <vafs/builder.h>
-#include 
 #include <vafs/stat.h>
 #include "test_common.h"
 
@@ -621,14 +620,19 @@ int main(int argc, char* argv[]) {
         int result = vafs_reader_open_file(filename, NULL, &vafs);
 
         if (result == 0) {
-            struct VaFsDirectoryHandle* root = NULL;
+            struct VaFsDirectoryReader* root = NULL;
+            struct VaFsObjectReader* self = NULL;
             struct VaFsMetadata metadata;
 
             vafs_metadata_initialize(&metadata);
-            result = vafs_directory_open(vafs, "/", &root);
+            result = vafs_directory_reader_open(vafs, "/", VaFsLookup_None, &root);
             if (result == 0) {
-                vafs_directory_close(root);
-                result = vafs_path_stat(vafs, "/self", 1, &metadata);
+                vafs_directory_reader_close(root);
+                result = vafs_object_reader_open(vafs, "/self", VaFsLookup_None, &self);
+                if (result == 0) {
+                    result = vafs_object_reader_stat(self, &metadata);
+                    vafs_object_reader_close(self);
+                }
             }
 
             if (result == 0) {

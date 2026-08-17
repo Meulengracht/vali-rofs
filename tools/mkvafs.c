@@ -36,6 +36,7 @@
 
 struct progress_context {
     struct list file_list;
+    struct list directory_builders;
     int         disabled;
 
     int files;
@@ -225,19 +226,21 @@ static void __write_progress(const char* prefix, struct progress_context* contex
 }
 
 static int __write_file(
-    struct VaFsDirectoryHandle* directoryHandle,
+    struct VaFsDirectoryBuilder* directoryHandle,
     const char*                 path,
     const char*                 filename,
-    const struct VaFsMetadata*  metadata)
+    const struct VaFsMetadata*  metadata,
+    struct VaFsObjectBuilder**  objectOut)
 {
-    struct VaFsFileHandle* fileHandle;
+    struct VaFsFileBuilder* fileHandle;
     FILE*                  file;
     long                   fileSize;
     void*                  fileBuffer;
+    size_t                 bytesWritten;
     int                    status;
 
     // create the VaFS file
-    status = vafs_directory_create_file(directoryHandle, filename, metadata, &fileHandle);
+    status = vafs_directory_builder_create_file(directoryHandle, filename, metadata, &fileHandle, objectOut);
     if (status) {
         fprintf(stderr, "mkvafs: failed to create file '%s'\n", filename);
         return -1;
@@ -262,12 +265,16 @@ static int __write_file(
         fread(fileBuffer, 1, fileSize, file);
 
         // write the file to the VaFS file
-        vafs_file_write(fileHandle, fileBuffer, fileSize);
+        status = vafs_file_builder_write(fileHandle, fileBuffer, (size_t)fileSize, &bytesWritten);
         free(fileBuffer);
+        if (status != 0 || bytesWritten != (size_t)fileSize) {
+            fclose(file);
+            return -1;
+        }
     }
     fclose(file);
 
-    status = vafs_file_close(fileHandle);
+    status = vafs_file_builder_close(fileHandle);
     if (status) {
         fprintf(stderr, "mkvafs: failed to close file '%s'\n", filename);
         return -1;
@@ -278,6 +285,13 @@ static int __write_file(
 struct __hardlink_object {
     struct list_item list_header;
     uint64_t         objectId;
+    struct VaFsObjectBuilder* object;
+};
+
+struct __directory_builder_cache {
+    struct list_item list_header;
+    char*            path;
+    struct VaFsDirectoryBuilder* builder;
 };
 
 static int __metadata_needs_hardlink(
@@ -292,7 +306,7 @@ static int __metadata_needs_hardlink(
         metadata->ObjectId != 0;
 }
 
-static int __hardlink_object_seen(
+static struct __hardlink_object* __find_hardlink_object(
     struct list* objects,
     uint64_t     objectId)
 {
@@ -301,15 +315,23 @@ static int __hardlink_object_seen(
     list_foreach(objects, it) {
         struct __hardlink_object* object = (struct __hardlink_object*)it;
         if (object->objectId == objectId) {
-            return 1;
+            return object;
         }
     }
-    return 0;
+    return NULL;
+}
+
+static int __hardlink_object_seen(
+    struct list* objects,
+    uint64_t     objectId)
+{
+    return __find_hardlink_object(objects, objectId) != NULL;
 }
 
 static int __remember_hardlink_object(
     struct list* objects,
-    uint64_t     objectId)
+    uint64_t     objectId,
+    struct VaFsObjectBuilder* target)
 {
     struct __hardlink_object* object;
 
@@ -323,6 +345,7 @@ static int __remember_hardlink_object(
     }
 
     object->objectId = objectId;
+    object->object = target;
     list_add(objects, &object->list_header);
     return 0;
 }
@@ -340,12 +363,70 @@ static void __destroy_hardlink_objects(
     list_init(objects);
 }
 
+static struct VaFsDirectoryBuilder* __find_directory_builder(
+    struct list* cache,
+    const char*  path)
+{
+    struct list_item* it;
+
+    list_foreach(cache, it) {
+        struct __directory_builder_cache* entry = (struct __directory_builder_cache*)it;
+        if (strcmp(entry->path, path) == 0) {
+            return entry->builder;
+        }
+    }
+    return NULL;
+}
+
+static int __remember_directory_builder(
+    struct list* cache,
+    const char*  path,
+    struct VaFsDirectoryBuilder* builder)
+{
+    struct __directory_builder_cache* entry;
+
+    if (__find_directory_builder(cache, path) != NULL) {
+        return 0;
+    }
+
+    entry = calloc(1, sizeof(struct __directory_builder_cache));
+    if (entry == NULL) {
+        return -1;
+    }
+
+    entry->path = strdup(path);
+    if (entry->path == NULL) {
+        free(entry);
+        return -1;
+    }
+
+    entry->builder = builder;
+    list_add(cache, &entry->list_header);
+    return 0;
+}
+
+static void __destroy_directory_builders(
+    struct list* cache)
+{
+    struct list_item* it;
+
+    for (it = cache->head; it != NULL;) {
+        struct __directory_builder_cache* entry = (struct __directory_builder_cache*)it;
+        it = it->next;
+        vafs_directory_builder_close(entry->builder);
+        free(entry->path);
+        free(entry);
+    }
+    list_init(cache);
+}
+
 static int __write_special(
-    struct VaFsDirectoryHandle* directoryHandle,
+    struct VaFsDirectoryBuilder* directoryHandle,
     const char*                 path,
     const char*                 filename)
 {
     struct VaFsMetadata metadata;
+    const struct VaFsDeviceNumber* device = NULL;
     int                 status;
 
     // Special nodes need non-following metadata so the image records the host
@@ -356,7 +437,11 @@ static int __write_special(
         return -1;
     }
 
-    status = vafs_directory_builder_create_special(directoryHandle, filename, &metadata);
+    if (metadata.Type == VaFsEntryType_CharacterDevice || metadata.Type == VaFsEntryType_BlockDevice) {
+        device = &metadata.Device;
+    }
+
+    status = vafs_directory_builder_create_special(directoryHandle, filename, metadata.Type, &metadata, device, NULL);
     if (status != 0) {
         fprintf(stderr, "mkvafs: failed to create special entry '%s'\n", filename);
         return -1;
@@ -788,10 +873,11 @@ static int __discover_files(struct progress_context* progress, const char** path
 
 static struct VaFsDirectoryBuilder* __get_directory_builder(
     struct VaFs*                 vafs, 
-    struct VaFsDirectoryBuilder* parent,
+    struct list*                 cache,
+    struct VaFsDirectoryBuilder* root,
     const char* abs, const char* relative)
 {
-    struct VaFsDirectoryBuilder* builder;
+    struct VaFsDirectoryBuilder* builder = root;
     
     char        temp[4096] = { 0 };
     char        full[4096] = { 0 };
@@ -799,11 +885,6 @@ static struct VaFsDirectoryBuilder* __get_directory_builder(
     const char* last;
     const char* st;
     const char* token = relative;
-
-    if (vafs_directory_open(vafs, "/", &builder)) {
-        fprintf(stderr, "mkvafs: failed to open image root directory\n");
-        return NULL;
-    }
 
     last = strrchr(relative, __PATH_SEPARATOR);
     if (last == NULL || last == relative) {
@@ -823,11 +904,12 @@ static struct VaFsDirectoryBuilder* __get_directory_builder(
     strcat(&image[0], &temp[0]);
 
     for (;;) {
-        struct VaFsDirectoryHandle* next;
+        struct VaFsDirectoryBuilder* next;
         uint32_t                    filemode;
         int                         status;
 
-        if (vafs_directory_open_directory(builder, &temp[0], &next)) {
+        next = __find_directory_builder(cache, &image[0]);
+        if (next == NULL) {
             struct VaFsMetadata metadata;
 
             status = symlink_utils_ministat(&full[0], &filemode);
@@ -837,9 +919,14 @@ static struct VaFsDirectoryBuilder* __get_directory_builder(
             }
 
             metadata = __metadata_for_mode(VaFsEntryType_Directory, platform_fs_mode_permissions(filemode));
-            status = vafs_directory_create_directory(builder, &temp[0], &metadata, &next);
+            status = vafs_directory_builder_create_directory(builder, &temp[0], &metadata, &next, NULL);
             if (status) {
                 fprintf(stderr, "mkvafs: failed to create directory %s\n", &temp[0]);
+                return NULL;
+            }
+
+            status = __remember_directory_builder(cache, &image[0], next);
+            if (status != 0) {
                 return NULL;
             }
 
@@ -881,12 +968,14 @@ static int __platform_filetype_is_special(
 
 static int __create_image(struct __options* opts)
 {
-    struct VaFs*             vafsHandle;
+    struct VaFs*             vafsHandle = NULL;
+    struct VaFsDirectoryBuilder* rootBuilder = NULL;
     struct VaFsBuilderConfiguration configuration;
     struct list              hardlinkObjects = LIST_INIT;
     int                      status;
     struct list_item*        it;
     struct progress_context  progressContext = { 
+        LIST_INIT,
         LIST_INIT,
         0
     };
@@ -932,9 +1021,16 @@ static int __create_image(struct __options* opts)
         return status;
     }
 
-    status = vafs_builder_new(opts->image_path, &configuration, &vafsHandle);
+    status = vafs_builder_new(opts->image_path, &configuration, &vafsHandle, &rootBuilder);
     if (status) {
         fprintf(stderr, "mkvafs: cannot create vafs output file: %s\n", opts->image_path);
+        return status;
+    }
+
+    status = __remember_directory_builder(&progressContext.directory_builders, "/", rootBuilder);
+    if (status != 0) {
+        vafs_directory_builder_close(rootBuilder);
+        vafs_builder_close(vafsHandle);
         return status;
     }
 
@@ -986,7 +1082,13 @@ static int __create_image(struct __options* opts)
             break;
         }
 
-        directoryHandle = __get_directory_builder(vafsHandle, entry->path, entry->sub_path);
+        directoryHandle = __get_directory_builder(
+            vafsHandle,
+            &progressContext.directory_builders,
+            rootBuilder,
+            entry->path,
+            entry->sub_path
+        );
         if (directoryHandle == NULL) {
             fprintf(stderr, "mkvafs: failed to get internal directory handle for %s\n", entry->sub_path);
             free(imagePath);
@@ -1004,7 +1106,7 @@ static int __create_image(struct __options* opts)
                 break;
             }
 
-            status = vafs_directory_builder_create_symlink(directoryHandle, entry->name, linkpath, &metadata);
+            status = vafs_directory_builder_create_symlink(directoryHandle, entry->name, linkpath, &metadata, NULL);
             free(linkpath);
 
             if (status != 0) {
@@ -1052,16 +1154,19 @@ static int __create_image(struct __options* opts)
             // the archive preserves link identity without duplicating data.
             if (__metadata_needs_hardlink(&metadata) &&
                 __hardlink_object_seen(&hardlinkObjects, metadata.ObjectId)) {
-                status = vafs_directory_create_hardlink(directoryHandle, entry->name, metadata.ObjectId);
+                struct __hardlink_object* target = __find_hardlink_object(&hardlinkObjects, metadata.ObjectId);
+                status = vafs_directory_builder_link(directoryHandle, entry->name, target->object);
             } else {
-                status = __write_file(directoryHandle, entry->path, entry->name, &metadata);
+                struct VaFsObjectBuilder* object = NULL;
+
+                status = __write_file(directoryHandle, entry->path, entry->name, &metadata, &object);
                 if (status == 0) {
                     // Shared host objects carry one xattr set, so only the
                     // canonical payload-bearing path imports them into the image.
                     status = __try_import_xattrs(vafsHandle, imagePath, entry->path, 1);
                 }
                 if (status == 0 && __metadata_needs_hardlink(&metadata)) {
-                    status = __remember_hardlink_object(&hardlinkObjects, metadata.ObjectId);
+                    status = __remember_hardlink_object(&hardlinkObjects, metadata.ObjectId, object);
                 }
             }
 
@@ -1085,6 +1190,7 @@ static int __create_image(struct __options* opts)
     if (vafs_builder_close(vafsHandle)) {
         fprintf(stderr, "mkvafs: failed to finalize image\n");
     }
+    __destroy_directory_builders(&progressContext.directory_builders);
     __destroy_hardlink_objects(&hardlinkObjects);
     return status;
 }
