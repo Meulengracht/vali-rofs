@@ -35,8 +35,6 @@
 struct VaFsStream;
 struct VaFsStreamReader;
 struct VaFsStreamDevice;
-struct VaFsDirectoryHandle;
-
 typedef uint32_t vafsblock_t;
 
 // Image headers begin with a fixed magic so readers can reject unrelated
@@ -362,7 +360,7 @@ struct VaFs {
 extern const struct VaFsGuid g_overviewGuid;
 extern const struct VaFsGuid g_filterGuid;
 
-struct VaFsDirectoryHandle {
+struct VaFsDirectoryBuilder {
     struct VaFsDirectory* Directory;
     int                   Index;
 };
@@ -986,17 +984,6 @@ extern int __vafs_resolve_symlink(char* buffer, size_t bufferLength, const char*
  * @return 0 on success, otherwise -1 with `errno` set.
  */
 extern int __vafs_path_stat_internal(struct VaFs* vafs, const char* path, int followLinks, struct VaFsMetadata* metadata, int symlinkDepth);
-
-/**
- * @brief Internal directory-open implementation with explicit symlink depth tracking.
- *
- * @param[In]  vafs         Filesystem instance to resolve within.
- * @param[In]  path         Path to the directory that should be opened.
- * @param[Out] handleOut    Receives the opened directory handle on success.
- * @param[In]  symlinkDepth Current recursive symlink depth.
- * @return 0 on success, otherwise -1 with `errno` set.
- */
-extern int __vafs_directory_open_internal(struct VaFs* vafs, const char* path, struct VaFsDirectoryHandle** handleOut, int symlinkDepth);
 
 /**
  * @brief Internal file-open implementation with explicit symlink depth tracking.

@@ -239,12 +239,17 @@ int vafs_builder_new(
     const char*                      path,
     struct VaFsBuilderConfiguration* configuration,
     struct VaFs**                    vafsOut,
-    struct VaFsDirectoryBuilder*     builderOut)
+    struct VaFsDirectoryBuilder**    builderOut)
 {
     struct VaFsStreamDevice* imageDevice;
     int                      status;
 
     VAFS_INFO("vafs_builder_new: creating new image file\n");
+
+    if (path == NULL || configuration == NULL || vafsOut == NULL || builderOut == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
 
     status = vafs_streamdevice_create_file(path, &imageDevice);
     if (status) {
@@ -262,7 +267,16 @@ int vafs_builder_new(
 
     // Open the root directory handle for callers to use. This builder handle
     // will represent the root directory.
-    // TODO: Implement this
+    *builderOut = malloc(sizeof(struct VaFsDirectoryBuilder));
+    if (*builderOut == NULL) {
+        vafs_destroy(*vafsOut);
+        *vafsOut = NULL;
+        errno = ENOMEM;
+        return -1;
+    }
+
+    (*builderOut)->Directory = (*vafsOut)->RootDirectory;
+    (*builderOut)->Index = 0;
     return 0;
 }
 

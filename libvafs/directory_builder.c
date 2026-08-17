@@ -26,10 +26,214 @@
 #include <vafs/builder.h>
 #include "private.h"
 
-struct VaFsDirectoryBuilder {
-    struct VaFsDirectory* Directory;
-    int                   Index;
+struct VaFsObjectBuilder {
+    struct VaFs*     VaFs;
+    VaFsDescriptor_t Descriptor;
 };
+
+struct VaFsFileHandle;
+
+extern size_t vafs_file_write(
+    struct VaFsFileHandle* handle,
+    void*                  buffer,
+    size_t                 size);
+
+extern int vafs_file_close(
+    struct VaFsFileHandle* handle);
+
+static struct VaFsDirectoryBuilder* __create_directory_builder_handle(
+    struct VaFsDirectory* directory)
+{
+    struct VaFsDirectoryBuilder* handle;
+
+    handle = malloc(sizeof(struct VaFsDirectoryBuilder));
+    if (handle == NULL) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    handle->Directory = directory;
+    handle->Index = 0;
+    return handle;
+}
+
+static struct VaFsObjectBuilder* __create_object_builder_handle(
+    void* object)
+{
+    return (struct VaFsObjectBuilder*)object;
+}
+
+static enum VaFsEntryType __object_builder_entry_type(
+    struct VaFsObjectBuilder* handle)
+{
+    if (handle == NULL) {
+        return VaFsEntryType_Unknown;
+    }
+
+    switch (handle->Descriptor.Type) {
+        case VA_FS_DESCRIPTOR_TYPE_FILE:
+            return VaFsEntryType_File;
+        case VA_FS_DESCRIPTOR_TYPE_DIRECTORY:
+            return VaFsEntryType_Directory;
+        case VA_FS_DESCRIPTOR_TYPE_SYMLINK:
+            return VaFsEntryType_Symlink;
+        case VA_FS_DESCRIPTOR_TYPE_SPECIAL:
+            return (enum VaFsEntryType)((struct VaFsSpecial*)handle)->Descriptor.EntryType;
+        default:
+            return VaFsEntryType_Unknown;
+    }
+}
+
+static struct VaFsMetadata* __object_builder_metadata(
+    struct VaFsObjectBuilder* handle)
+{
+    if (handle == NULL) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    switch (handle->Descriptor.Type) {
+        case VA_FS_DESCRIPTOR_TYPE_FILE:
+            return &((struct VaFsFile*)handle)->Stat;
+        case VA_FS_DESCRIPTOR_TYPE_DIRECTORY:
+            return &((struct VaFsDirectory*)handle)->Stat;
+        case VA_FS_DESCRIPTOR_TYPE_SYMLINK:
+            return &((struct VaFsSymlink*)handle)->Stat;
+        case VA_FS_DESCRIPTOR_TYPE_SPECIAL:
+            return &((struct VaFsSpecial*)handle)->Stat;
+        default:
+            errno = EINVAL;
+            return NULL;
+    }
+}
+
+static struct VaFsXattrSet** __object_builder_xattr_slot(
+    struct VaFsObjectBuilder* handle)
+{
+    if (handle == NULL) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    switch (handle->Descriptor.Type) {
+        case VA_FS_DESCRIPTOR_TYPE_FILE:
+            return &((struct VaFsFile*)handle)->Xattrs;
+        case VA_FS_DESCRIPTOR_TYPE_DIRECTORY:
+            return &((struct VaFsDirectory*)handle)->Xattrs;
+        case VA_FS_DESCRIPTOR_TYPE_SYMLINK:
+            return &((struct VaFsSymlink*)handle)->Xattrs;
+        case VA_FS_DESCRIPTOR_TYPE_SPECIAL:
+            return &((struct VaFsSpecial*)handle)->Xattrs;
+        default:
+            errno = EINVAL;
+            return NULL;
+    }
+}
+
+static int* __object_builder_xattrs_loaded_slot(
+    struct VaFsObjectBuilder* handle)
+{
+    if (handle == NULL) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    switch (handle->Descriptor.Type) {
+        case VA_FS_DESCRIPTOR_TYPE_FILE:
+            return &((struct VaFsFile*)handle)->XattrsLoaded;
+        case VA_FS_DESCRIPTOR_TYPE_DIRECTORY:
+            return &((struct VaFsDirectory*)handle)->XattrsLoaded;
+        case VA_FS_DESCRIPTOR_TYPE_SYMLINK:
+            return &((struct VaFsSymlink*)handle)->XattrsLoaded;
+        case VA_FS_DESCRIPTOR_TYPE_SPECIAL:
+            return &((struct VaFsSpecial*)handle)->XattrsLoaded;
+        default:
+            errno = EINVAL;
+            return NULL;
+    }
+}
+
+static struct VaFsXattr* __object_builder_find_xattr(
+    struct VaFsXattrSet* set,
+    const char*          name)
+{
+    struct VaFsXattr* entry;
+
+    if (set == NULL || name == NULL) {
+        return NULL;
+    }
+
+    entry = set->Entries;
+    while (entry != NULL) {
+        if (strcmp(entry->Name, name) == 0) {
+            return entry;
+        }
+        entry = entry->Link;
+    }
+    return NULL;
+}
+
+static int __object_builder_put_xattr(
+    struct VaFsXattrSet* set,
+    const char*          name,
+    const void*          value,
+    uint32_t             valueSize)
+{
+    struct VaFsXattr* entry;
+    void*             valueCopy = NULL;
+
+    if (set == NULL || name == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (valueSize != 0) {
+        valueCopy = malloc(valueSize);
+        if (valueCopy == NULL) {
+            errno = ENOMEM;
+            return -1;
+        }
+        memcpy(valueCopy, value, valueSize);
+    }
+
+    entry = __object_builder_find_xattr(set, name);
+    if (entry != NULL) {
+        free(entry->Value);
+        entry->Value = valueCopy;
+        entry->ValueLength = valueSize;
+        return 0;
+    }
+
+    entry = calloc(1, sizeof(struct VaFsXattr));
+    if (entry == NULL) {
+        free(valueCopy);
+        errno = ENOMEM;
+        return -1;
+    }
+
+    entry->Name = strdup(name);
+    if (entry->Name == NULL) {
+        free(valueCopy);
+        free(entry);
+        errno = ENOMEM;
+        return -1;
+    }
+
+    entry->Value = valueCopy;
+    entry->ValueLength = valueSize;
+    if (set->Entries == NULL) {
+        set->Entries = entry;
+    } else {
+        struct VaFsXattr* tail = set->Entries;
+        while (tail->Link != NULL) {
+            tail = tail->Link;
+        }
+        tail->Link = entry;
+    }
+
+    set->Count++;
+    return 0;
+}
 
 static struct VaFsDirectoryEntry* __find_entry_by_object_id(
     struct VaFsDirectory* directory,
@@ -95,11 +299,11 @@ static int __prepare_metadata_for_create(
 }
 
 static int __prepare_special_metadata_for_create(
-    const struct VaFsMetadata* metadata,
-    struct VaFsMetadata*       preparedOut)
+    enum VaFsEntryType             type,
+    const struct VaFsMetadata*     metadata,
+    const struct VaFsDeviceNumber* device,
+    struct VaFsMetadata*           preparedOut)
 {
-    enum VaFsEntryType entryType = VaFsEntryType_Unknown;
-
     if (metadata == NULL || preparedOut == NULL) {
         errno = EINVAL;
         return -1;
@@ -110,32 +314,31 @@ static int __prepare_special_metadata_for_create(
         return -1;
     }
 
-    // Special creation accepts either an explicit entry type or a host-style
-    // mode-only description, so normalize both forms into one concrete subtype first.
-    if ((metadata->Mask & VaFsMetadataMask_Type) != 0 && metadata->Type != VaFsEntryType_Unknown) {
-        entryType = metadata->Type;
-    } else if (S_ISCHR(metadata->Mode)) {
-        entryType = VaFsEntryType_CharacterDevice;
-    } else if (S_ISBLK(metadata->Mode)) {
-        entryType = VaFsEntryType_BlockDevice;
-    } else if (S_ISFIFO(metadata->Mode)) {
-        entryType = VaFsEntryType_Fifo;
-    }
-
-    if (!__is_special_entry_type(entryType)) {
+    if (!__is_special_entry_type(type)) {
         errno = EINVAL;
         return -1;
     }
 
-    if ((entryType == VaFsEntryType_CharacterDevice || entryType == VaFsEntryType_BlockDevice) &&
-        (metadata->Mask & VaFsMetadataMask_Device) == 0) {
+    if ((metadata->Mask & VaFsMetadataMask_Type) != 0 &&
+        metadata->Type != VaFsEntryType_Unknown &&
+        metadata->Type != type) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if ((type == VaFsEntryType_CharacterDevice || type == VaFsEntryType_BlockDevice) &&
+        device == NULL) {
         errno = EINVAL;
         return -1;
     }
 
     *preparedOut = *metadata;
-    vafs_metadata_set_mode(preparedOut, entryType, preparedOut->Mode & 07777u);
-    __finalize_entry_metadata(preparedOut, entryType, 0);
+    vafs_metadata_set_mode(preparedOut, type, preparedOut->Mode & 07777u);
+    if (device != NULL) {
+        preparedOut->Device = *device;
+        preparedOut->Mask |= VaFsMetadataMask_Device;
+    }
+    __finalize_entry_metadata(preparedOut, type, 0);
     return 0;
 }
 
@@ -455,10 +658,11 @@ static int __create_directory_entry(
 }
 
 int vafs_directory_builder_create_directory(
-    struct VaFsDirectoryBuilder* handle,
-    const char*                  name,
-    const struct VaFsMetadata*   metadata,
-    struct VaFsDirectoryHandle** handleOut)
+    struct VaFsDirectoryBuilder*  builder,
+    const char*                   name,
+    const struct VaFsMetadata*    metadata,
+    struct VaFsDirectoryBuilder** builderOut,
+    struct VaFsObjectBuilder**    objectOut)
 {
 
     struct VaFsDirectoryWriter* writer;
@@ -466,9 +670,9 @@ int vafs_directory_builder_create_directory(
     struct VaFsDirectoryEntry*  entry;
     struct VaFsMetadata         preparedMetadata;
     char                        token[VAFS_NAME_MAX + 1];
-    VAFS_DEBUG("vafs_directory_create_directory(handle=%p, name=%s, handleOut=%p)\n", handle, name, handleOut);
+    VAFS_DEBUG("vafs_directory_builder_create_directory(builder=%p, name=%s, builderOut=%p)\n", builder, name, builderOut);
 
-    if (handle == NULL || name == NULL || metadata == NULL || handleOut == NULL) {
+    if (builder == NULL || name == NULL || metadata == NULL || builderOut == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -478,7 +682,7 @@ int vafs_directory_builder_create_directory(
         return status;
     }
 
-    if (handle->Directory->VaFs->Mode != VaFsMode_Write) {
+    if (builder->Directory->VaFs->Mode != VaFsMode_Write) {
         errno = EACCES;
         return -1;
     }
@@ -490,22 +694,26 @@ int vafs_directory_builder_create_directory(
     }
 
     // find the name in the directory
-    entry = __vafs_directory_find_entry(handle->Directory, token);
+    entry = __vafs_directory_find_entry(builder->Directory, token);
     if (entry != NULL) {
-        // Directory creation intentionally behaves like open-or-create so tree
-        // import callers can descend without having to special-case preexisting parents.
-        *handleOut = __create_handle(entry->Directory);
-        return 0;
+        errno = EEXIST;
+        return -1;
     }
 
-    writer = (struct VaFsDirectoryWriter*)handle->Directory;
+    writer = (struct VaFsDirectoryWriter*)builder->Directory;
     status = __create_directory_entry(writer, token, &preparedMetadata);
     if (status != 0) {
         return status;
     }
-    entry = __vafs_directory_find_entry(handle->Directory, token);
+    entry = __vafs_directory_find_entry(builder->Directory, token);
 
-    *handleOut = __create_handle(entry->Directory);
+    *builderOut = __create_directory_builder_handle(entry->Directory);
+    if (*builderOut == NULL) {
+        return -1;
+    }
+    if (objectOut != NULL) {
+        *objectOut = __create_object_builder_handle(entry->Directory);
+    }
     return 0;
 }
 
@@ -562,8 +770,13 @@ int vafs_directory_builder_create_file(
     // wired to the canonical in-list entry rather than a temporary local pointer.
     entry = __vafs_directory_find_entry(handle->Directory, token);
     
-    *handleOut = vafs_file_create_handle(entry->File);
-    *objectOut = vafs_object_create_handle(entry->File);
+    *handleOut = (struct VaFsFileBuilder*)vafs_file_create_handle(entry->File);
+    if (*handleOut == NULL) {
+        return -1;
+    }
+    if (objectOut != NULL) {
+        *objectOut = __create_object_builder_handle(entry->File);
+    }
     return 0;
 }
 
@@ -613,7 +826,14 @@ int vafs_directory_builder_create_symlink(
         struct VaFsDirectoryWriter* writer = (struct VaFsDirectoryWriter*)handle->Directory;
         // Publish the alias only once the normalized metadata and copied target
         // are both ready, so duplicate-name failures remain side-effect free.
-        return __create_symlink_entry(writer, token, target, &preparedMetadata);
+        if (__create_symlink_entry(writer, token, target, &preparedMetadata) != 0) {
+            return -1;
+        }
+        entry = __vafs_directory_find_entry(handle->Directory, token);
+        if (objectOut != NULL) {
+            *objectOut = __create_object_builder_handle(entry->Symlink);
+        }
+        return 0;
     }
 
     errno = EEXIST;
@@ -639,7 +859,7 @@ int vafs_directory_builder_create_special(
         return -1;
     }
 
-    status = __prepare_special_metadata_for_create(metadata, &preparedMetadata);
+    status = __prepare_special_metadata_for_create(type, metadata, device, &preparedMetadata);
     if (status != 0) {
         return status;
     }
@@ -663,20 +883,31 @@ int vafs_directory_builder_create_special(
     writer = (struct VaFsDirectoryWriter*)handle->Directory;
     // Validation already proved the special subtype is reconstructible, so the
     // remaining work is just to materialize and publish the writer-side entry.
-    return __create_special_entry(writer, token, &preparedMetadata);
+    status = __create_special_entry(writer, token, &preparedMetadata);
+    if (status != 0) {
+        return status;
+    }
+
+    entry = __vafs_directory_find_entry(handle->Directory, token);
+    if (objectOut != NULL) {
+        *objectOut = __create_object_builder_handle(entry->Special);
+    }
+    return 0;
 }
 
-int vafs_directory_create_hardlink(
-    struct VaFsDirectoryHandle* handle,
-    const char*                 name,
-    uint64_t                    objectId)
+int vafs_directory_builder_link(
+    struct VaFsDirectoryBuilder* handle,
+    const char*                  name,
+    struct VaFsObjectBuilder*    target)
 {
     struct VaFsDirectoryWriter* writer;
     struct VaFsDirectoryEntry*  entry;
     struct VaFsDirectoryEntry*  targetEntry;
+    struct VaFsMetadata*        targetMetadata;
+    uint64_t                    objectId;
     char                        token[VAFS_NAME_MAX + 1];
 
-    if (handle == NULL || name == NULL || objectId == 0) {
+    if (handle == NULL || name == NULL || target == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -685,6 +916,22 @@ int vafs_directory_create_hardlink(
         errno = EACCES;
         return -1;
     }
+
+    if (target->VaFs != handle->Directory->VaFs ||
+        __object_builder_entry_type(target) == VaFsEntryType_Directory) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    targetMetadata = __object_builder_metadata(target);
+    if (targetMetadata == NULL) {
+        return -1;
+    }
+    if ((targetMetadata->Mask & VaFsMetadataMask_ObjectId) == 0 || targetMetadata->ObjectId == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    objectId = targetMetadata->ObjectId;
 
     if (!__vafs_pathtoken(name, token, sizeof(token))) {
         errno = ENOENT;
@@ -733,4 +980,156 @@ int vafs_directory_builder_close(
     // free handle
     free(handle);
     return 0;
+}
+
+int vafs_file_builder_write(
+    struct VaFsFileBuilder* handle,
+    const void*             buffer,
+    size_t                  length,
+    size_t*                 bytesWrittenOut)
+{
+    size_t result;
+
+    if (handle == NULL || bytesWrittenOut == NULL || (buffer == NULL && length != 0)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (length == 0) {
+        *bytesWrittenOut = 0;
+        return 0;
+    }
+
+    result = vafs_file_write((struct VaFsFileHandle*)handle, (void*)buffer, length);
+    if (result == (size_t)-1) {
+        return -1;
+    }
+
+    *bytesWrittenOut = length;
+    return 0;
+}
+
+int vafs_file_builder_close(
+    struct VaFsFileBuilder* handle)
+{
+    return vafs_file_close((struct VaFsFileHandle*)handle);
+}
+
+int vafs_object_builder_setxattr(
+    struct VaFsObjectBuilder* handle,
+    const char*               name,
+    const void*               value,
+    size_t                    valueSize)
+{
+    struct VaFsXattrSet** xattrSlot;
+    struct VaFsMetadata*  metadata;
+    int*                  loadedSlot;
+
+    if (handle == NULL || name == NULL || name[0] == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (valueSize != 0 && value == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (strlen(name) > UINT16_MAX || valueSize > UINT32_MAX) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (handle->VaFs->Mode != VaFsMode_Write) {
+        errno = EACCES;
+        return -1;
+    }
+
+    xattrSlot = __object_builder_xattr_slot(handle);
+    loadedSlot = __object_builder_xattrs_loaded_slot(handle);
+    metadata = __object_builder_metadata(handle);
+    if (xattrSlot == NULL || loadedSlot == NULL || metadata == NULL) {
+        return -1;
+    }
+
+    if (*xattrSlot == NULL) {
+        *xattrSlot = calloc(1, sizeof(struct VaFsXattrSet));
+        if (*xattrSlot == NULL) {
+            errno = ENOMEM;
+            return -1;
+        }
+        (*xattrSlot)->Index = VA_FS_INVALID_XATTR_INDEX;
+    }
+
+    if (__object_builder_put_xattr(*xattrSlot, name, value, (uint32_t)valueSize) != 0) {
+        return -1;
+    }
+
+    *loadedSlot = 1;
+    metadata->XattrCount = (*xattrSlot)->Count;
+    metadata->Mask |= VaFsMetadataMask_XattrCount;
+    return 0;
+}
+
+int vafs_object_builder_removexattr(
+    struct VaFsObjectBuilder* handle,
+    const char*               name)
+{
+    struct VaFsXattrSet** xattrSlot;
+    struct VaFsMetadata*  metadata;
+    int*                  loadedSlot;
+    struct VaFsXattr*     entry;
+    struct VaFsXattr*     previous = NULL;
+
+    if (handle == NULL || name == NULL || name[0] == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (handle->VaFs->Mode != VaFsMode_Write) {
+        errno = EACCES;
+        return -1;
+    }
+
+    xattrSlot = __object_builder_xattr_slot(handle);
+    loadedSlot = __object_builder_xattrs_loaded_slot(handle);
+    metadata = __object_builder_metadata(handle);
+    if (xattrSlot == NULL || loadedSlot == NULL || metadata == NULL) {
+        return -1;
+    }
+
+    if (*xattrSlot == NULL) {
+        errno = ENODATA;
+        return -1;
+    }
+
+    entry = (*xattrSlot)->Entries;
+    while (entry != NULL) {
+        if (strcmp(entry->Name, name) == 0) {
+            if (previous == NULL) {
+                (*xattrSlot)->Entries = entry->Link;
+            } else {
+                previous->Link = entry->Link;
+            }
+
+            free(entry->Name);
+            free(entry->Value);
+            free(entry);
+            (*xattrSlot)->Count--;
+            *loadedSlot = 1;
+            metadata->XattrCount = (*xattrSlot)->Count;
+            metadata->Mask |= VaFsMetadataMask_XattrCount;
+
+            if ((*xattrSlot)->Count == 0) {
+                free(*xattrSlot);
+                *xattrSlot = NULL;
+            }
+            return 0;
+        }
+        previous = entry;
+        entry = entry->Link;
+    }
+
+    errno = ENODATA;
+    return -1;
 }

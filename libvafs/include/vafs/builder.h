@@ -120,13 +120,14 @@ extern void vafs_builder_config_set_data_block_size(struct VaFsBuilderConfigurat
  * @param[In]  path          The path the image file should be created at.
  * @param[In]  configuration Configuration parameters for the filesystem.
  * @param[Out] vafsOut       A pointer where the handle of the filesystem instance will be stored.
+ * @param[Out] builderOut    Receives an owned builder handle for the image root directory.
  * @return int 0 on success, -1 on failure.
  */
 extern int vafs_builder_new(
     const char*                      path,
     struct VaFsBuilderConfiguration* configuration,
     struct VaFs**                    vafsOut,
-    struct VaFsDirectoryBuilder*     builderOut);
+    struct VaFsDirectoryBuilder**    builderOut);
 
 /**
  * @brief Closes the filesystem handle. If the image was just created, the data streams are kept in 

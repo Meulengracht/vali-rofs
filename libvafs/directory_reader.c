@@ -26,6 +26,60 @@
 #include <vafs/reader.h>
 #include "private.h"
 
+struct VaFsDirectoryReaderHandle {
+    struct VaFsDirectory* Directory;
+    int                   Index;
+    char*                 Path;
+};
+
+struct VaFsObjectReader {
+    struct VaFsDirectoryEntry Entry;
+    struct VaFsStreamReader*  Reader;
+    uint64_t                  Position;
+    char*                     Path;
+    int                       FollowLinks;
+};
+
+void vafs_object_reader_close(
+    struct VaFsObjectReader* reader);
+
+static char* __join_reader_child_path(
+    const char* parent,
+    const char* name)
+{
+    char*  path;
+    size_t parentLength;
+    size_t nameLength;
+    size_t separatorLength;
+
+    if (parent == NULL || name == NULL) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    parentLength = strlen(parent);
+    nameLength = strlen(name);
+    separatorLength = (parentLength == 1 && parent[0] == '/') ? 0 : 1;
+    if (parentLength + separatorLength + nameLength + 1 > VAFS_PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return NULL;
+    }
+
+    path = malloc(parentLength + separatorLength + nameLength + 1);
+    if (path == NULL) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    memcpy(path, parent, parentLength);
+    if (separatorLength != 0) {
+        path[parentLength] = '/';
+    }
+    memcpy(path + parentLength + separatorLength, name, nameLength);
+    path[parentLength + separatorLength + nameLength] = '\0';
+    return path;
+}
+
 static void __directory_entry_destroy(struct VaFsDirectoryEntry* entry)
 {
     // Entry teardown fans back out through the concrete object type because
@@ -212,33 +266,206 @@ const char* __vafs_directory_entry_name(
     return NULL;
 }
 
-static struct VaFsDirectoryHandle* __create_handle(
-    struct VaFsDirectory* directory)
+static struct VaFsDirectoryReader* __create_directory_reader_handle(
+    struct VaFsDirectory* directory,
+    const char*           path)
 {
-    struct VaFsDirectoryHandle* handle;
+    struct VaFsDirectoryReaderHandle* handle;
 
-    handle = malloc(sizeof(struct VaFsDirectoryHandle));
-    if (!handle) {
+    handle = malloc(sizeof(struct VaFsDirectoryReaderHandle));
+    if (handle == NULL) {
+        errno = ENOMEM;
         return NULL;
     }
 
     handle->Directory = directory;
-    handle->Index     = 0;
-    return handle;
+    handle->Index = 0;
+    if (path != NULL) {
+        handle->Path = strdup(path);
+        if (handle->Path == NULL) {
+            free(handle);
+            errno = ENOMEM;
+            return NULL;
+        }
+    }
+    return (struct VaFsDirectoryReader*)handle;
 }
 
-int __vafs_directory_open_internal(
-    struct VaFs*                 vafs,
-    const char*                  path,
-    struct VaFsDirectoryHandle** handleOut,
-    int                          symlinkDepth)
+static struct VaFsObjectReader* __create_object_reader_handle(
+    struct VaFsDirectoryEntry* entry,
+    const char*                path,
+    int                        followLinks)
+{
+    struct VaFsObjectReader* reader;
+
+    if (entry == NULL) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    reader = calloc(1, sizeof(struct VaFsObjectReader));
+    if (reader == NULL) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    reader->Entry = *entry;
+    reader->FollowLinks = followLinks;
+    if (path != NULL) {
+        reader->Path = strdup(path);
+        if (reader->Path == NULL) {
+            free(reader);
+            errno = ENOMEM;
+            return NULL;
+        }
+    }
+    return reader;
+}
+
+static struct VaFs* __object_reader_vafs(
+    struct VaFsObjectReader* reader)
+{
+    if (reader == NULL) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    switch (reader->Entry.Type) {
+        case VA_FS_DESCRIPTOR_TYPE_FILE:
+            return reader->Entry.File->VaFs;
+        case VA_FS_DESCRIPTOR_TYPE_DIRECTORY:
+            return reader->Entry.Directory->VaFs;
+        case VA_FS_DESCRIPTOR_TYPE_SYMLINK:
+            return reader->Entry.Symlink->VaFs;
+        case VA_FS_DESCRIPTOR_TYPE_SPECIAL:
+            return reader->Entry.Special->VaFs;
+        default:
+            errno = EINVAL;
+            return NULL;
+    }
+}
+
+static int __vafs_object_reader_open_internal(
+    struct VaFs*              vafs,
+    const char*               path,
+    enum VaFsLookupFlags      flags,
+    struct VaFsObjectReader** readerOut,
+    int                       symlinkDepth)
 {
     struct VaFsDirectory*      currentDirectory;
     struct VaFsDirectoryEntry* entry;
     const char*                remainingPath = path;
     char                       token[VAFS_NAME_MAX + 1];
 
-    if (vafs == NULL || path == NULL || handleOut == NULL) {
+    if (vafs == NULL || path == NULL || readerOut == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (__vafs_ensure_root_open(vafs) != 0) {
+        return -1;
+    }
+
+    if (symlinkDepth > VAFS_SYMLINK_MAX_DEPTH) {
+        errno = ELOOP;
+        return -1;
+    }
+
+    if (__vafs_is_root_path(path)) {
+        struct VaFsDirectoryEntry rootEntry;
+
+        memset(&rootEntry, 0, sizeof(rootEntry));
+        rootEntry.Type = VA_FS_DESCRIPTOR_TYPE_DIRECTORY;
+        rootEntry.Directory = vafs->RootDirectory;
+        *readerOut = __create_object_reader_handle(&rootEntry, "/", 1);
+        return (*readerOut == NULL) ? -1 : 0;
+    }
+
+    currentDirectory = vafs->RootDirectory;
+    do {
+        const char* previousPath = remainingPath;
+        int         charsConsumed = __vafs_pathtoken(remainingPath, token, sizeof(token));
+
+        if (!charsConsumed) {
+            break;
+        }
+        remainingPath += charsConsumed;
+
+        entry = __vafs_directory_find_entry(currentDirectory, token);
+        if (entry == NULL) {
+            return -1;
+        }
+
+        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
+            entry = __vafs_resolve_hardlink(vafs, entry);
+            if (entry == NULL) {
+                return -1;
+            }
+        }
+
+        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
+            if (remainingPath[0] == '\0') {
+                *readerOut = __create_object_reader_handle(entry, path, 1);
+                return (*readerOut == NULL) ? -1 : 0;
+            }
+
+            currentDirectory = entry->Directory;
+            continue;
+        }
+
+        if (entry->Type == VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
+            char* pathBuffer;
+            int   written;
+            int   status;
+
+            if ((flags & VaFsLookup_NoFollow) != 0 && remainingPath[0] == '\0') {
+                *readerOut = __create_object_reader_handle(entry, path, 0);
+                return (*readerOut == NULL) ? -1 : 0;
+            }
+
+            pathBuffer = malloc(VAFS_PATH_MAX);
+            if (pathBuffer == NULL) {
+                errno = ENOMEM;
+                return -1;
+            }
+
+            written = __vafs_resolve_symlink(pathBuffer, VAFS_PATH_MAX, path, previousPath - path, entry->Symlink->Target);
+            if (written < 0) {
+                free(pathBuffer);
+                return -1;
+            }
+
+            status = __vafs_object_reader_open_internal(vafs, pathBuffer, flags, readerOut, symlinkDepth + 1);
+            free(pathBuffer);
+            return status;
+        }
+
+        if (remainingPath[0] != '\0') {
+            errno = ENOTDIR;
+            return -1;
+        }
+
+        *readerOut = __create_object_reader_handle(entry, path, 1);
+        return (*readerOut == NULL) ? -1 : 0;
+    } while (1);
+
+    errno = ENOENT;
+    return -1;
+}
+
+static int __vafs_directory_reader_open_internal(
+    struct VaFs*                  vafs,
+    const char*                   path,
+    enum VaFsLookupFlags          flags,
+    struct VaFsDirectoryReader**  readerOut,
+    int                           symlinkDepth)
+{
+    struct VaFsDirectory*      currentDirectory;
+    struct VaFsDirectoryEntry* entry;
+    const char*                remainingPath = path;
+    char                       token[VAFS_NAME_MAX + 1];
+
+    if (vafs == NULL || path == NULL || readerOut == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -249,15 +476,15 @@ int __vafs_directory_open_internal(
 
     // Check symlink depth limit
     if (symlinkDepth > VAFS_SYMLINK_MAX_DEPTH) {
-        VAFS_ERROR("__vafs_directory_open_internal: symlink depth limit exceeded (depth=%d, max=%d)\n",
+        VAFS_ERROR("__vafs_directory_reader_open_internal: symlink depth limit exceeded (depth=%d, max=%d)\n",
             symlinkDepth, VAFS_SYMLINK_MAX_DEPTH);
         errno = ELOOP;
         return -1;
     }
 
     if (__vafs_is_root_path(path)) {
-        *handleOut = __create_handle(vafs->RootDirectory);
-        return 0;
+        *readerOut = __create_directory_reader_handle(vafs->RootDirectory, "/");
+        return (*readerOut == NULL) ? -1 : 0;
     }
 
     currentDirectory = vafs->RootDirectory;
@@ -290,22 +517,28 @@ int __vafs_directory_open_internal(
             char* pathBuffer = malloc(VAFS_PATH_MAX);
             int   written;
             int   status;
+
+            if ((flags & VaFsLookup_NoFollow) != 0 && remainingPath[0] == '\0') {
+                errno = ENOTDIR;
+                return -1;
+            }
+
             if (!pathBuffer) {
-                VAFS_ERROR("__vafs_directory_open_internal: failed to allocate path buffer\n");
+                VAFS_ERROR("__vafs_directory_reader_open_internal: failed to allocate path buffer\n");
                 errno = ENOMEM;
                 return -1;
             }
 
             written = __vafs_resolve_symlink(pathBuffer, VAFS_PATH_MAX, path, previousPath - path, entry->Symlink->Target);
             if (written < 0) {
-                VAFS_ERROR("__vafs_directory_open_internal: failed to resolve symlink %s\n", entry->Symlink->Target);
+                VAFS_ERROR("__vafs_directory_reader_open_internal: failed to resolve symlink %s\n", entry->Symlink->Target);
                 free(pathBuffer);
                 return -1;
             }
 
             // Restart resolution from the expanded target path so recursive
             // symlink chains share one depth limit and one normalization path.
-            status = __vafs_directory_open_internal(vafs, pathBuffer, handleOut, symlinkDepth + 1);
+            status = __vafs_directory_reader_open_internal(vafs, pathBuffer, flags, readerOut, symlinkDepth + 1);
             free(pathBuffer);
             return status;
         }
@@ -317,39 +550,23 @@ int __vafs_directory_open_internal(
 
         if (remainingPath[0] == '\0') {
             // we found the directory
-            *handleOut = __create_handle(entry->Directory);
-            return 0;
+            *readerOut = __create_directory_reader_handle(entry->Directory, path);
+            return (*readerOut == NULL) ? -1 : 0;
         }
 
         currentDirectory = entry->Directory;
     } while (1);
+    errno = ENOENT;
     return -1;
 }
 
-int vafs_directory_open(
+int vafs_directory_reader_open(
     struct VaFs*                 vafs,
     const char*                  path,
-    struct VaFsDirectoryHandle** handleOut)
+    enum VaFsLookupFlags         flags,
+    struct VaFsDirectoryReader** readerOut)
 {
-    return __vafs_directory_open_internal(vafs, path, handleOut, 0);
-}
-
-int vafs_directory_stat(
-    struct VaFsDirectoryHandle* handle,
-    struct VaFsMetadata*        metadata)
-{
-    if (handle == NULL || metadata == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    return __vafs_directory_entry_stat(
-        &(struct VaFsDirectoryEntry) {
-            .Type = VA_FS_DESCRIPTOR_TYPE_DIRECTORY,
-            .Directory = handle->Directory
-        },
-        metadata
-    );
+    return __vafs_directory_reader_open_internal(vafs, path, flags, readerOut, 0);
 }
 
 static size_t __directory_entry_count(
@@ -361,15 +578,16 @@ static size_t __directory_entry_count(
     return ((struct VaFsDirectoryWriter*)directory)->EntryCount;
 }
 
-int vafs_directory_read(
-    struct VaFsDirectoryHandle* handle,
+int vafs_directory_reader_next(
+    struct VaFsDirectoryReader* handle,
     struct VaFsEntry*           entryOut)
 {
+    struct VaFsDirectoryReaderHandle* readerHandle = (struct VaFsDirectoryReaderHandle*)handle;
     struct VaFsDirectoryEntry* entry;
     struct VaFsMetadata        metadata;
     size_t                     count;
     size_t                     i;
-    VAFS_INFO("vafs_directory_read(handle=%p)\n", handle);
+    VAFS_INFO("vafs_directory_reader_next(handle=%p)\n", handle);
 
     if (handle == NULL || entryOut == NULL) {
         errno = EINVAL;
@@ -377,23 +595,23 @@ int vafs_directory_read(
     }
 
     // make sure directory entries are loaded and indexed
-    (void)__vafs_directory_entries(handle->Directory);
+    (void)__vafs_directory_entries(readerHandle->Directory);
 
-    count = __directory_entry_count(handle->Directory);
-    VAFS_DEBUG("vafs_directory_read: locate index %i\n", handle->Index);
-    if (count == 0 || (size_t)handle->Index >= count) {
-        VAFS_INFO("vafs_directory_read: end of directory\n");
+    count = __directory_entry_count(readerHandle->Directory);
+    VAFS_DEBUG("vafs_directory_reader_next: locate index %i\n", readerHandle->Index);
+    if (count == 0 || (size_t)readerHandle->Index >= count) {
+        VAFS_INFO("vafs_directory_reader_next: end of directory\n");
         errno = ENOENT;
         return -1;
     }
 
     // Directory iteration preserves the stored list order for compatibility.
-    entry = __vafs_directory_entries(handle->Directory);
+    entry = __vafs_directory_entries(readerHandle->Directory);
     if (entry == NULL) {
         return -1;
     }
 
-    for (i = 0; i < (size_t)handle->Index; i++) {
+    for (i = 0; i < (size_t)readerHandle->Index; i++) {
         if (entry == NULL) {
             errno = ENOENT;
             return -1;
@@ -405,7 +623,7 @@ int vafs_directory_read(
         __vafs_directory_entry_name(entry));
 
     // we found an entry, move to next
-    handle->Index++;
+    readerHandle->Index++;
 
     if (__vafs_directory_entry_stat(entry, &metadata) != 0) {
         return -1;
@@ -421,21 +639,22 @@ int vafs_directory_read(
     return 0;
 }
 
-int vafs_directory_open_directory(
-    struct VaFsDirectoryHandle*  handle,
-    const char*                  name,
-    struct VaFsDirectoryHandle** handleOut)
+int vafs_directory_reader_open_object_in(
+    struct VaFsDirectoryReader* reader,
+    const char*                 name,
+    struct VaFsObjectReader**   readerOut)
 {
+    struct VaFsDirectoryReaderHandle* readerHandle = (struct VaFsDirectoryReaderHandle*)reader;
     struct VaFsDirectoryEntry* entry;
     char                       token[VAFS_NAME_MAX + 1];
-    VAFS_DEBUG("vafs_directory_open_directory(handle=%p, name=%s, handleOut=%p)\n", handle, name, handleOut);
+    VAFS_DEBUG("vafs_directory_reader_open_object_in(reader=%p, name=%s, readerOut=%p)\n", reader, name, readerOut);
 
-    if (handle == NULL || name == NULL || handleOut == NULL) {
+    if (reader == NULL || name == NULL || readerOut == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    if (handle->Directory->VaFs->Mode != VaFsMode_Read) {
+    if (readerHandle->Directory->VaFs->Mode != VaFsMode_Read) {
         errno = EACCES;
         return -1;
     }
@@ -447,123 +666,303 @@ int vafs_directory_open_directory(
     }
 
     // find the name in the directory
-    entry = __vafs_directory_find_entry(handle->Directory, token);
+    entry = __vafs_directory_find_entry(readerHandle->Directory, token);
     if (entry == NULL) {
         return -1;
     }
 
     if (entry->Type == VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
-        entry = __vafs_resolve_hardlink(handle->Directory->VaFs, entry);
+        entry = __vafs_resolve_hardlink(readerHandle->Directory->VaFs, entry);
         if (entry == NULL) {
             return -1;
         }
     }
 
-    if (entry->Type != VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
+    char* childPath = __join_reader_child_path(readerHandle->Path, token);
+    if (childPath == NULL) {
+        return -1;
+    }
+
+    *readerOut = __create_object_reader_handle(entry, childPath, 0);
+    free(childPath);
+    return (*readerOut == NULL) ? -1 : 0;
+}
+
+int vafs_directory_reader_open_directory_in(
+    struct VaFsDirectoryReader*  reader,
+    const char*                  name,
+    struct VaFsDirectoryReader** readerOut)
+{
+    struct VaFsObjectReader* objectReader;
+    int                      status;
+
+    if (reader == NULL || name == NULL || readerOut == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    status = vafs_directory_reader_open_object_in(reader, name, &objectReader);
+    if (status != 0) {
+        return status;
+    }
+
+    if (objectReader->Entry.Type != VA_FS_DESCRIPTOR_TYPE_DIRECTORY) {
+        vafs_object_reader_close(objectReader);
         errno = ENOTDIR;
         return -1;
     }
 
-    *handleOut = __create_handle(entry->Directory);
+    *readerOut = __create_directory_reader_handle(objectReader->Entry.Directory, objectReader->Path);
+    vafs_object_reader_close(objectReader);
+    return (*readerOut == NULL) ? -1 : 0;
+}
+
+int vafs_directory_reader_close(
+    struct VaFsDirectoryReader* handle)
+{
+    if (handle == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    free(((struct VaFsDirectoryReaderHandle*)handle)->Path);
+    free(handle);
     return 0;
 }
 
-int vafs_directory_open_file(
-    struct VaFsDirectoryHandle* handle,
-    const char*                 name,
-    struct VaFsFileHandle**     handleOut)
+int vafs_object_reader_open(
+    struct VaFs*              vafs,
+    const char*               path,
+    enum VaFsLookupFlags      flags,
+    struct VaFsObjectReader** readerOut)
 {
-    struct VaFsDirectoryEntry* entry;
-    char                       token[VAFS_NAME_MAX + 1];
-    VAFS_DEBUG("vafs_directory_open_file(name=%s)\n", name);
+    return __vafs_object_reader_open_internal(vafs, path, flags, readerOut, 0);
+}
 
-    if (handle == NULL || name == NULL || handleOut == NULL) {
+void vafs_object_reader_close(
+    struct VaFsObjectReader* reader)
+{
+    if (reader == NULL) {
+        return;
+    }
+
+    if (reader->Reader != NULL) {
+        vafs_stream_reader_close(reader->Reader);
+    }
+    free(reader->Path);
+    free(reader);
+}
+
+uint64_t vafs_object_reader_length(
+    struct VaFsObjectReader* reader)
+{
+    if (reader == NULL) {
+        errno = EINVAL;
+        return UINT64_MAX;
+    }
+
+    switch (reader->Entry.Type) {
+        case VA_FS_DESCRIPTOR_TYPE_FILE:
+            return reader->Entry.File->Descriptor.FileLength;
+        case VA_FS_DESCRIPTOR_TYPE_DIRECTORY:
+            (void)__vafs_directory_entries(reader->Entry.Directory);
+            return __directory_entry_count(reader->Entry.Directory);
+        case VA_FS_DESCRIPTOR_TYPE_SYMLINK:
+            return strlen(reader->Entry.Symlink->Target);
+        case VA_FS_DESCRIPTOR_TYPE_SPECIAL:
+            return 0;
+        default:
+            errno = EINVAL;
+            return UINT64_MAX;
+    }
+}
+
+uint64_t vafs_object_reader_read(
+    struct VaFsObjectReader* reader,
+    void*                    buffer,
+    uint64_t                 length)
+{
+    uint64_t objectLength;
+    uint64_t bytesRemaining;
+    size_t   bytesRead;
+
+    if (reader == NULL || buffer == NULL) {
+        errno = EINVAL;
+        return UINT64_MAX;
+    }
+
+    objectLength = vafs_object_reader_length(reader);
+    if (objectLength == UINT64_MAX) {
+        return UINT64_MAX;
+    }
+    if (reader->Position > objectLength) {
+        errno = EINVAL;
+        return UINT64_MAX;
+    }
+
+    bytesRemaining = objectLength - reader->Position;
+    if (length > bytesRemaining) {
+        length = bytesRemaining;
+    }
+    if (length == 0) {
+        return 0;
+    }
+    if (length > SIZE_MAX) {
+        length = SIZE_MAX;
+    }
+
+    switch (reader->Entry.Type) {
+        case VA_FS_DESCRIPTOR_TYPE_FILE:
+            if (reader->Reader == NULL &&
+                vafs_stream_reader_open(reader->Entry.File->VaFs->DataStream, &reader->Reader) != 0) {
+                return UINT64_MAX;
+            }
+
+            if (vafs_stream_reader_seek(
+                    reader->Reader,
+                    reader->Entry.File->Descriptor.Data.Index,
+                    reader->Entry.File->Descriptor.Data.Offset + (uint32_t)reader->Position
+                ) != 0) {
+                return UINT64_MAX;
+            }
+
+            if (vafs_stream_reader_read(reader->Reader, buffer, (size_t)length, &bytesRead) != 0) {
+                return UINT64_MAX;
+            }
+            reader->Position += bytesRead;
+            return bytesRead;
+        case VA_FS_DESCRIPTOR_TYPE_SYMLINK:
+            memcpy(buffer, reader->Entry.Symlink->Target + reader->Position, (size_t)length);
+            reader->Position += length;
+            return length;
+        case VA_FS_DESCRIPTOR_TYPE_DIRECTORY:
+            errno = EISDIR;
+            return UINT64_MAX;
+        case VA_FS_DESCRIPTOR_TYPE_SPECIAL:
+            return 0;
+        default:
+            errno = EINVAL;
+            return UINT64_MAX;
+    }
+}
+
+int vafs_object_reader_seek(
+    struct VaFsObjectReader* reader,
+    int64_t                  offset,
+    int                      whence)
+{
+    uint64_t objectLength;
+    int64_t  base;
+    int64_t  position;
+
+    if (reader == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    // verify read mode
-    if (handle->Directory->VaFs->Mode != VaFsMode_Read) {
-        errno = EACCES;
+    objectLength = vafs_object_reader_length(reader);
+    if (objectLength == UINT64_MAX || objectLength > INT64_MAX || reader->Position > INT64_MAX) {
+        errno = EINVAL;
         return -1;
     }
 
-    // do this to verify the incoming name
-    if (!__vafs_pathtoken(name, token, sizeof(token))) {
-        errno = ENOENT;
-        return -1;
-    }
-
-    // find the name in the directory
-    entry = __vafs_directory_find_entry(handle->Directory, token);
-    if (entry == NULL) {
-        return -1;
-    }
-
-    if (entry->Type == VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
-        // File opens resolve alias entries before the file-type check so hardlinks
-        // remain transparent to callers that just want file semantics.
-        entry = __vafs_resolve_hardlink(handle->Directory->VaFs, entry);
-        if (entry == NULL) {
+    switch (whence) {
+        case SEEK_SET:
+            base = 0;
+            break;
+        case SEEK_CUR:
+            base = (int64_t)reader->Position;
+            break;
+        case SEEK_END:
+            base = (int64_t)objectLength;
+            break;
+        default:
+            errno = EINVAL;
             return -1;
-        }
     }
 
-    if (entry->Type != VA_FS_DESCRIPTOR_TYPE_FILE) {
-        errno = ENFILE;
+    if ((offset > 0 && base > INT64_MAX - offset) ||
+        (offset < 0 && base < INT64_MIN - offset)) {
+        errno = EOVERFLOW;
         return -1;
     }
 
-    *handleOut = vafs_file_create_handle(entry->File);
+    position = base + offset;
+    if (position < 0 || (uint64_t)position > objectLength) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    reader->Position = (uint64_t)position;
     return 0;
 }
 
-int vafs_directory_read_symlink(
-    struct VaFsDirectoryHandle* handle,
-    const char*                 name,
-    const char**                targetOut)
+int vafs_object_reader_stat(
+    struct VaFsObjectReader* reader,
+    struct VaFsMetadata*     metadataOut)
 {
-    struct VaFsDirectoryEntry* entry;
-    char                       token[VAFS_NAME_MAX + 1];
-    VAFS_DEBUG("vafs_directory_read_symlink(name=%s)\n", name);
-
-    if (handle == NULL || name == NULL || targetOut == NULL) {
+    if (reader == NULL || metadataOut == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    if (handle->Directory->VaFs->Mode != VaFsMode_Read) {
-        errno = EACCES;
-        return -1;
-    }
+    return __vafs_directory_entry_stat(&reader->Entry, metadataOut);
+}
 
-    // do this to verify the incoming name
-    if (!__vafs_pathtoken(name, token, sizeof(token))) {
-        errno = ENOENT;
-        return -1;
-    }
+int vafs_object_reader_listxattr(
+    struct VaFsObjectReader* handle,
+    char*                    buffer,
+    size_t                   bufferSize,
+    size_t*                  bytesWrittenOut)
+{
+    struct VaFs* vafs;
 
-    // find the name in the directory
-    VAFS_DEBUG("vafs_directory_read_symlink: locating %s\n", token);
-    entry = __vafs_directory_find_entry(handle->Directory, token);
-    if (entry == NULL) {
-        return -1;
-    }
-
-    if (entry->Type == VA_FS_DESCRIPTOR_TYPE_HARDLINK) {
-        // A hardlink may alias a symlink object, so resolve first and then apply
-        // the symlink-type check to the canonical entry.
-        entry = __vafs_resolve_hardlink(handle->Directory->VaFs, entry);
-        if (entry == NULL) {
-            return -1;
-        }
-    }
-    
-    if (entry->Type != VA_FS_DESCRIPTOR_TYPE_SYMLINK) {
+    if (handle == NULL || handle->Path == NULL || bytesWrittenOut == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    *targetOut = entry->Symlink->Target;
-    return 0;
+    vafs = __object_reader_vafs(handle);
+    if (vafs == NULL) {
+        return -1;
+    }
+
+    return __vafs_path_listxattr(
+        vafs,
+        handle->Path,
+        handle->FollowLinks,
+        buffer,
+        bufferSize,
+        bytesWrittenOut
+    );
+}
+
+int vafs_object_reader_getxattr(
+    struct VaFsObjectReader* handle,
+    const char*              name,
+    void*                    value,
+    size_t                   valueSize,
+    size_t*                  bytesWrittenOut)
+{
+    struct VaFs* vafs;
+
+    if (handle == NULL || handle->Path == NULL || bytesWrittenOut == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    vafs = __object_reader_vafs(handle);
+    if (vafs == NULL) {
+        return -1;
+    }
+
+    return __vafs_path_getxattr(
+        vafs,
+        handle->Path,
+        handle->FollowLinks,
+        name,
+        value,
+        valueSize,
+        bytesWrittenOut
+    );
 }
