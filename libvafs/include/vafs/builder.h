@@ -125,7 +125,8 @@ extern void vafs_builder_config_set_data_block_size(struct VaFsBuilderConfigurat
 extern int vafs_builder_new(
     const char*                      path,
     struct VaFsBuilderConfiguration* configuration,
-    struct VaFs**                    vafsOut);
+    struct VaFs**                    vafsOut,
+    struct VaFsDirectoryBuilder*     builderOut);
 
 /**
  * @brief Closes the filesystem handle. If the image was just created, the data streams are kept in 

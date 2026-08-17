@@ -20,10 +20,10 @@
  */
 
 #include <errno.h>
-#include "private.h"
 #include <stdlib.h>
 #include <string.h>
-#include <vafs/file.h>
+
+#include "private.h"
 
 struct VaFsSymlinkHandle {
     struct VaFsSymlink* Symlink;

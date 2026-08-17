@@ -19,9 +19,10 @@
  *   This filesystem is used to store the initrd of the kernel.
  */
 
-#include "private.h"
 #include <stdarg.h>
 #include <stdio.h>
+
+#include "private.h"
 
 static enum VaFsLogLevel g_loglevel = VaFsLogLevel_Warning;
 

@@ -29,11 +29,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+
 #include <vafs/vafs.h>
-#include <vafs/builder.h>
 #include <vafs/reader.h>
-#include <vafs/directory.h>
-#include <vafs/file.h>
 #include "utils/utils.h"
 
 struct __options {

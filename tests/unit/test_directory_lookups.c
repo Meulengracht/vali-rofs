@@ -12,8 +12,8 @@
 #include <vafs/vafs.h>
 #include <vafs/reader.h>
 #include <vafs/builder.h>
-#include <vafs/directory.h>
-#include <vafs/file.h>
+#include 
+#include 
 #include <vafs/stat.h>
 #include <vafs/xattr.h>
 #include "../../libvafs/private.h"
@@ -243,7 +243,7 @@ static int test_metadata_roundtrip(void)
     vafs_file_close(file_handle);
     file_handle = NULL;
 
-    status = vafs_directory_create_symlink(meta, "alias", "/meta/payload", &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(meta, "alias", "/meta/payload", &symlinkMetadata);
     TEST_ASSERT(status == 0, "Failed to create metadata test symlink");
 
     vafs_directory_close(meta);
@@ -369,16 +369,16 @@ static int test_special_roundtrip(void)
     status = vafs_directory_create_directory(root, "specials", &dirMetadata, &specials);
     TEST_ASSERT(status == 0, "Failed to create special-file test directory");
 
-    status = vafs_directory_create_special(specials, "invalid", &invalidMetadata);
+    status = vafs_directory_builder_create_special(specials, "invalid", &invalidMetadata);
     TEST_ASSERT(status != 0 && errno == EINVAL, "Regular file metadata should be rejected for special entries");
 
-    status = vafs_directory_create_special(specials, "null", &charMetadata);
+    status = vafs_directory_builder_create_special(specials, "null", &charMetadata);
     TEST_ASSERT(status == 0, "Failed to create character device entry");
 
-    status = vafs_directory_create_special(specials, "loop", &blockMetadata);
+    status = vafs_directory_builder_create_special(specials, "loop", &blockMetadata);
     TEST_ASSERT(status == 0, "Failed to create block device entry");
 
-    status = vafs_directory_create_special(specials, "pipe", &fifoMetadata);
+    status = vafs_directory_builder_create_special(specials, "pipe", &fifoMetadata);
     TEST_ASSERT(status == 0, "Failed to create fifo entry");
 
     vafs_directory_close(specials);
@@ -787,7 +787,7 @@ static int test_symlink_xattr_nofollow_roundtrip(void)
     vafs_file_close(file_handle);
     file_handle = NULL;
 
-    status = vafs_directory_create_symlink(meta, "link", "/meta/target", &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(meta, "link", "/meta/target", &symlinkMetadata);
     TEST_ASSERT(status == 0, "Failed to create symlink xattr test link");
 
     status = vafs_path_setxattr(vafs, "/meta/target", "user.target", "file", strlen("file"));

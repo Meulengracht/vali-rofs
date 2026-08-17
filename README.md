@@ -81,7 +81,7 @@ On non-Windows hosts, the FUSE utility is only built when the FUSE development p
 ```c
 #include <stdio.h>
 #include <vafs/vafs.h>
-#include <vafs/file.h>
+#include 
 
 int main(void) {
 	struct VaFs* fs = NULL;

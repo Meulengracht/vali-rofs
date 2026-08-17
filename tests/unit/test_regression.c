@@ -16,7 +16,7 @@
 #include <vafs/vafs.h>
 #include <vafs/reader.h>
 #include <vafs/builder.h>
-#include <vafs/directory.h>
+#include 
 #include <vafs/stat.h>
 #include "test_common.h"
 

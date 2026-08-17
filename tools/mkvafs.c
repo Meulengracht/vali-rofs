@@ -29,11 +29,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+
 #include <vafs/vafs.h>
-#include <vafs/reader.h>
 #include <vafs/builder.h>
-#include <vafs/directory.h>
-#include <vafs/file.h>
 #include "utils/utils.h"
 
 struct progress_context {
@@ -358,7 +356,7 @@ static int __write_special(
         return -1;
     }
 
-    status = vafs_directory_create_special(directoryHandle, filename, &metadata);
+    status = vafs_directory_builder_create_special(directoryHandle, filename, &metadata);
     if (status != 0) {
         fprintf(stderr, "mkvafs: failed to create special entry '%s'\n", filename);
         return -1;
@@ -788,9 +786,12 @@ static int __discover_files(struct progress_context* progress, const char** path
     return 0;
 }
 
-static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, const char* abs, const char* relative)
+static struct VaFsDirectoryBuilder* __get_directory_builder(
+    struct VaFs*                 vafs, 
+    struct VaFsDirectoryBuilder* parent,
+    const char* abs, const char* relative)
 {
-    struct VaFsDirectoryHandle* handle;
+    struct VaFsDirectoryBuilder* builder;
     
     char        temp[4096] = { 0 };
     char        full[4096] = { 0 };
@@ -799,14 +800,14 @@ static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, con
     const char* st;
     const char* token = relative;
 
-    if (vafs_directory_open(vafs, "/", &handle)) {
+    if (vafs_directory_open(vafs, "/", &builder)) {
         fprintf(stderr, "mkvafs: failed to open image root directory\n");
         return NULL;
     }
 
     last = strrchr(relative, __PATH_SEPARATOR);
     if (last == NULL || last == relative) {
-        return handle;
+        return builder;
     }
 
     // setup full
@@ -826,7 +827,7 @@ static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, con
         uint32_t                    filemode;
         int                         status;
 
-        if (vafs_directory_open_directory(handle, &temp[0], &next)) {
+        if (vafs_directory_open_directory(builder, &temp[0], &next)) {
             struct VaFsMetadata metadata;
 
             status = symlink_utils_ministat(&full[0], &filemode);
@@ -836,7 +837,7 @@ static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, con
             }
 
             metadata = __metadata_for_mode(VaFsEntryType_Directory, platform_fs_mode_permissions(filemode));
-            status = vafs_directory_create_directory(handle, &temp[0], &metadata, &next);
+            status = vafs_directory_create_directory(builder, &temp[0], &metadata, &next);
             if (status) {
                 fprintf(stderr, "mkvafs: failed to create directory %s\n", &temp[0]);
                 return NULL;
@@ -851,7 +852,7 @@ static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, con
         }
 
         // yay, next token
-        handle = next;
+        builder = next;
         token = st + 1;
 
         st = strchr(token, __PATH_SEPARATOR);
@@ -867,7 +868,7 @@ static struct VaFsDirectoryHandle* __get_directory_handle(struct VaFs* vafs, con
         strcat(&image[0], "/");
         strcat(&image[0], &temp[0]);
     }
-    return handle;
+    return builder;
 }
 
 static int __platform_filetype_is_special(
@@ -974,9 +975,9 @@ static int __create_image(struct __options* opts)
     }
 
     list_foreach(&progressContext.file_list, it) {
-        struct platform_file_entry* entry = (struct platform_file_entry*)it;
-        struct VaFsDirectoryHandle* directoryHandle;
-        char*                       imagePath;
+        struct platform_file_entry*  entry = (struct platform_file_entry*)it;
+        struct VaFsDirectoryBuilder* directoryHandle;
+        char*                        imagePath;
         __write_progress(entry->sub_path, &progressContext);
 
         imagePath = __image_path_for_subpath(entry->sub_path);
@@ -985,7 +986,7 @@ static int __create_image(struct __options* opts)
             break;
         }
 
-        directoryHandle = __get_directory_handle(vafsHandle, entry->path, entry->sub_path);
+        directoryHandle = __get_directory_builder(vafsHandle, entry->path, entry->sub_path);
         if (directoryHandle == NULL) {
             fprintf(stderr, "mkvafs: failed to get internal directory handle for %s\n", entry->sub_path);
             free(imagePath);
@@ -1003,7 +1004,7 @@ static int __create_image(struct __options* opts)
                 break;
             }
 
-            status = vafs_directory_create_symlink(directoryHandle, entry->name, linkpath, &metadata);
+            status = vafs_directory_builder_create_symlink(directoryHandle, entry->name, linkpath, &metadata);
             free(linkpath);
 
             if (status != 0) {

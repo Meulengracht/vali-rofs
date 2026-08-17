@@ -30,8 +30,8 @@
 #include <stdlib.h>
 #include <vafs/vafs.h>
 #include <vafs/builder.h>
-#include <vafs/file.h>
-#include <vafs/directory.h>
+#include 
+#include 
 #include <vafs/reader.h>
 #include <vafs/symlink.h>
 #include <vafs/stat.h>

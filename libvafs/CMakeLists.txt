@@ -6,9 +6,10 @@ add_subdirectory(cache)
 add_library(vafs STATIC
     builder.c
     crc.c
-    directory_descriptor.c
+    directory_builder.c
     directory_cache.c
-    directory.c
+    directory_descriptor.c
+    directory_reader.c
     file.c
     log.c
     reader.c

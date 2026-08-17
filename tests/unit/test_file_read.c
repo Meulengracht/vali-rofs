@@ -12,8 +12,8 @@
 #include <vafs/vafs.h>
 #include <vafs/builder.h>
 #include <vafs/reader.h>
-#include <vafs/directory.h>
-#include <vafs/file.h>
+#include 
+#include 
 #include "test_common.h"
 
 #define TEST_IMAGE_PATH "test_file_read.vafs"

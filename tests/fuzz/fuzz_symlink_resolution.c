@@ -22,8 +22,8 @@
 #include <vafs/vafs.h>
 #include <vafs/reader.h>
 #include <vafs/builder.h>
-#include <vafs/directory.h>
-#include <vafs/file.h>
+#include 
+#include 
 #include <vafs/symlink.h>
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {

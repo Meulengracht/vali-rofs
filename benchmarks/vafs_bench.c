@@ -27,8 +27,8 @@
 #include <vafs/vafs.h>
 #include <vafs/reader.h>
 #include <vafs/builder.h>
-#include <vafs/file.h>
-#include <vafs/directory.h>
+#include 
+#include 
 #include <vafs/stat.h>
 #include <vafs/xattr.h>
 #include <stdio.h>

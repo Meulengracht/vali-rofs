@@ -19,13 +19,14 @@
  *   This filesystem is used to store the initrd of the kernel.
  */
 
-#include "cache/blockcache.h"
-#include "crc.h"
 #include <errno.h>
-#include "private.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+#include "cache/blockcache.h"
+#include "crc.h"
+#include "private.h"
 
 #define STREAM_TYPE_FILE   0
 #define STREAM_TYPE_MEMORY 1

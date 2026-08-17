@@ -21,10 +21,10 @@
 
 
 #include <errno.h>
-#include "private.h"
 #include <stdlib.h>
 #include <string.h>
-#include <vafs/directory.h>
+
+#include "private.h"
 
 struct __directory_name_index_entry {
     const char*                Name;

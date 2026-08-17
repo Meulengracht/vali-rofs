@@ -238,7 +238,8 @@ static void __initialize_overview(
 int vafs_builder_new(
     const char*                      path,
     struct VaFsBuilderConfiguration* configuration,
-    struct VaFs**                    vafsOut)
+    struct VaFs**                    vafsOut,
+    struct VaFsDirectoryBuilder*     builderOut)
 {
     struct VaFsStreamDevice* imageDevice;
     int                      status;
@@ -258,6 +259,10 @@ int vafs_builder_new(
     }
 
     __initialize_overview(*vafsOut);
+
+    // Open the root directory handle for callers to use. This builder handle
+    // will represent the root directory.
+    // TODO: Implement this
     return 0;
 }
 

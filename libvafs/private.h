@@ -362,6 +362,11 @@ struct VaFs {
 extern const struct VaFsGuid g_overviewGuid;
 extern const struct VaFsGuid g_filterGuid;
 
+struct VaFsDirectoryHandle {
+    struct VaFsDirectory* Directory;
+    int                   Index;
+};
+
 /**
  * @brief Initializes the VaFS library.
  */

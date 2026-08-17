@@ -15,8 +15,8 @@
 #include <vafs/vafs.h>
 #include <vafs/reader.h>
 #include <vafs/builder.h>
-#include <vafs/directory.h>
-#include <vafs/file.h>
+#include 
+#include 
 
 #define TEST_IMAGE_PATH "test_symlinks.vafs"
 
@@ -69,10 +69,10 @@ static int test_simple_cyclic_symlink(void)
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
     // Create cyclic symlinks: link_a -> link_b, link_b -> link_a
-    status = vafs_directory_create_symlink(root, "link_a", "/link_b", &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(root, "link_a", "/link_b", &symlinkMetadata);
     TEST_ASSERT(status == 0, "Failed to create link_a");
 
-    status = vafs_directory_create_symlink(root, "link_b", "/link_a", &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(root, "link_b", "/link_a", &symlinkMetadata);
     TEST_ASSERT(status == 0, "Failed to create link_b");
 
     vafs_directory_close(root);
@@ -126,7 +126,7 @@ static int test_deep_symlink_chain(void)
     strcpy(symlink_target, "/target_file");
     for (i = 50; i >= 1; i--) {
         snprintf(symlink_name, sizeof(symlink_name), "link_%d", i);
-        status = vafs_directory_create_symlink(root, symlink_name, symlink_target, &symlinkMetadata);
+        status = vafs_directory_builder_create_symlink(root, symlink_name, symlink_target, &symlinkMetadata);
         TEST_ASSERT(status == 0, "Failed to create symlink in chain");
         snprintf(symlink_target, sizeof(symlink_target), "/link_%d", i);
     }
@@ -167,7 +167,7 @@ static int test_malformed_empty_target(void)
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
     // Create a symlink with empty target
-    status = vafs_directory_create_symlink(root, "empty_link", "", &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(root, "empty_link", "", &symlinkMetadata);
     TEST_ASSERT(status == 0, "Failed to create symlink with empty target");
 
     vafs_directory_close(root);
@@ -213,7 +213,7 @@ static int test_malformed_long_target(void)
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
     // Try to create a symlink with an extremely long target
-    status = vafs_directory_create_symlink(root, "long_link", long_path, &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(root, "long_link", long_path, &symlinkMetadata);
     // The creation might succeed or fail depending on validation at creation time
     // but resolution should definitely fail
 
@@ -255,13 +255,13 @@ static int test_indirect_cyclic_symlink(void)
     TEST_ASSERT(status == 0, "Failed to open root directory");
 
     // Create indirect cyclic symlinks: A -> B -> C -> A
-    status = vafs_directory_create_symlink(root, "link_a", "/link_b", &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(root, "link_a", "/link_b", &symlinkMetadata);
     TEST_ASSERT(status == 0, "Failed to create link_a");
 
-    status = vafs_directory_create_symlink(root, "link_b", "/link_c", &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(root, "link_b", "/link_c", &symlinkMetadata);
     TEST_ASSERT(status == 0, "Failed to create link_b");
 
-    status = vafs_directory_create_symlink(root, "link_c", "/link_a", &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(root, "link_c", "/link_a", &symlinkMetadata);
     TEST_ASSERT(status == 0, "Failed to create link_c");
 
     vafs_directory_close(root);
@@ -316,7 +316,7 @@ static int test_valid_symlink_chain(void)
     strcpy(symlink_target, "/target_file");
     for (i = 10; i >= 1; i--) {
         snprintf(symlink_name, sizeof(symlink_name), "link_%d", i);
-        status = vafs_directory_create_symlink(root, symlink_name, symlink_target, &symlinkMetadata);
+        status = vafs_directory_builder_create_symlink(root, symlink_name, symlink_target, &symlinkMetadata);
         TEST_ASSERT(status == 0, "Failed to create symlink in chain");
         snprintf(symlink_target, sizeof(symlink_target), "/link_%d", i);
     }

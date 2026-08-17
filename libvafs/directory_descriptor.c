@@ -20,10 +20,10 @@
  */
 
 #include <errno.h>
-#include "private.h"
 #include <stdlib.h>
 #include <string.h>
-#include <vafs/directory.h>
+
+#include "private.h"
 
 static void __copy_timestamp_to_descriptor(
     VaFsDescriptorTimestamp_t*  destination,
