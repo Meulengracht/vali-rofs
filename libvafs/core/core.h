@@ -92,16 +92,6 @@ extern const struct VaFsGuid g_filterGuid;
 extern void vafs_init(void);
 
 /**
- * @brief Adds a feature record to a builder-owned image.
- *
- * Internal writer code uses this while assembling optional sections before the
- * outer image header and feature list are emitted.
- */
-extern int vafs_builder_add_feature(
-    struct VaFs*              vafs,
-    struct VaFsFeatureHeader* feature);
-
-/**
  * @brief Emits a formatted log message through the library logging backend.
  *
  * @param[In] level  Severity level for the message.
