@@ -28,6 +28,7 @@
 #include "../stream/device.h"
 #include "../stream/stream.h"
 #include "../fs/directory.h"
+#include "../fs/xattr.h"
 
 static void vafs_destroy(
     struct VaFs* vafs);
@@ -184,6 +185,12 @@ static int __new_vafs(
     memset(vafs, 0, sizeof(struct VaFs));
 
     vafs->Mode = mode;
+
+    status = __vafs_xattr_store_create(vafs);
+    if (status) {
+        vafs_destroy(vafs);
+        return -1;
+    }
 
     vafs->Features = malloc(sizeof(struct VaFsFeatureHeader*) * VA_FS_MAX_FEATURES);
     if (!vafs->Features) {

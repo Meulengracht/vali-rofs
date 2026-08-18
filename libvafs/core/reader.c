@@ -27,6 +27,7 @@
 #include "../stream/device.h"
 #include "../stream/stream.h"
 #include "../fs/directory.h"
+#include "../fs/xattr.h"
 
 static inline int __compare_guids(
     const struct VaFsGuid* lh,
@@ -401,6 +402,12 @@ static int __open_vafs(
     memset(vafs, 0, sizeof(struct VaFs));
 
     vafs->Mode = VaFsMode_Read;
+
+    status = __vafs_xattr_store_create(vafs);
+    if (status) {
+        vafs_destroy(vafs);
+        return -1;
+    }
 
     vafs->LookupCache = calloc(1, sizeof(struct VaFsLookupCache));
     if (!vafs->LookupCache) {

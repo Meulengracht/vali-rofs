@@ -26,12 +26,12 @@
 
 #include <vafs/types.h>
 #include "../format/format.h"
-#include "../fs/xattr.h"
 
 // Forward declarations
 struct VaFsStream;
 struct VaFsStreamDevice;
 struct VaFsLookupCache;
+struct VaFsXattrStore;
 
 // Feature discovery stays bounded because images only carry a small set of
 // global capabilities, and a fixed upper limit keeps header handling simple.
@@ -79,7 +79,7 @@ struct VaFs {
 
     struct VaFsDirectory*   RootDirectory;
     struct VaFsLookupCache* LookupCache;
-    struct VaFsXattrStore   XattrStore;
+    struct VaFsXattrStore*  XattrStore;
 };
 
 // Static guids used for feature discovery and validation.

@@ -27,6 +27,7 @@
 #include "directory.h"
 #include "object.h"
 #include "path.h"
+#include "xattr.h"
 
 struct VaFsSymlinkHandle {
     struct VaFsSymlink* Symlink;

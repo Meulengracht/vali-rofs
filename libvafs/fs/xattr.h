@@ -58,6 +58,21 @@ struct VaFsXattrStore {
 };
 
 /**
+ * @brief Allocates the xattr store owned by a filesystem instance.
+ *
+ * @param[In] vafs Filesystem instance whose store should be allocated.
+ * @return 0 on success, otherwise -1 with `errno` set.
+ */
+extern int __vafs_xattr_store_create(struct VaFs* vafs);
+
+/**
+ * @brief Clears cached and writer-side xattr store state without releasing the store object.
+ *
+ * @param[In] vafs Filesystem instance whose xattr store contents should be discarded.
+ */
+extern void __vafs_xattr_store_reset(struct VaFs* vafs);
+
+/**
  * @brief Internal listxattr implementation with explicit symlink-follow policy.
  *
  * Tooling uses this to preserve symlink-object xattrs without changing the
@@ -120,9 +135,9 @@ extern int __vafs_xattr_prepare_write(struct VaFs* vafs);
 extern int __vafs_xattr_write_section(struct VaFs* vafs);
 
 /**
- * @brief Releases cached reader-side xattr store state for an image.
+ * @brief Releases the xattr store owned by an image.
  *
- * @param[In] vafs Filesystem instance whose xattr store should be discarded.
+ * @param[In] vafs Filesystem instance whose xattr store should be released.
  */
 extern void __vafs_xattr_store_destroy(struct VaFs* vafs);
 

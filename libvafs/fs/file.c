@@ -29,6 +29,7 @@
 #include "directory.h"
 #include "object.h"
 #include "path.h"
+#include "xattr.h"
 
 
 static int __ensure_file_reader(
