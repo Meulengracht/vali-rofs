@@ -364,10 +364,6 @@ static int __vafs_object_reader_open_internal(
         return -1;
     }
 
-    if (__vafs_ensure_root_open(vafs) != 0) {
-        return -1;
-    }
-
     if (symlinkDepth > VAFS_SYMLINK_MAX_DEPTH) {
         errno = ELOOP;
         return -1;
@@ -469,10 +465,6 @@ static int __vafs_directory_reader_open_internal(
 
     if (vafs == NULL || path == NULL || readerOut == NULL) {
         errno = EINVAL;
-        return -1;
-    }
-
-    if (__vafs_ensure_root_open(vafs) != 0) {
         return -1;
     }
 

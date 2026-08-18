@@ -62,10 +62,6 @@ int __vafs_file_open_internal(
         return -1;
     }
 
-    if (__vafs_ensure_root_open(vafs) != 0) {
-        return -1;
-    }
-
     // Resolve the path one token at a time until it terminates in a file.
     // Directory edges advance traversal, symlinks recurse with a depth budget,
     // and regular files must be the final component.

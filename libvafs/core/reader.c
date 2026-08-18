@@ -448,6 +448,13 @@ static int __open_vafs(
         return -1;
     }
 
+    status = vafs_directory_open_root(vafs, &vafs->Header.RootDescriptor, &vafs->RootDirectory);
+    if (status) {
+        VAFS_ERROR("__open_vafs: failed to open root directory: %i\n", status);
+        vafs_destroy(vafs);
+        return -1;
+    }
+
     *vafsOut = vafs;
     return 0;
 }

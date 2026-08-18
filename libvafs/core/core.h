@@ -92,18 +92,6 @@ extern const struct VaFsGuid g_filterGuid;
 extern void vafs_init(void);
 
 /**
- * @brief Materializes the read-mode root directory on first use.
- *
- * Read-mode opens leave the root unopened until a path operation actually
- * needs descriptor bytes so callers can install custom runtime filter
- * callbacks immediately after `vafs_open_*` and before the first decode.
- *
- * @param[In] vafs Filesystem instance whose root should be available.
- * @return 0 when the root is ready, otherwise -1 with `errno` set.
- */
-extern int __vafs_ensure_root_open(struct VaFs* vafs);
-
-/**
  * @brief Adds a feature record to a builder-owned image.
  *
  * Internal writer code uses this while assembling optional sections before the

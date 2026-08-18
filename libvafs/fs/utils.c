@@ -218,10 +218,6 @@ int __vafs_path_stat_internal(
         return -1;
     }
 
-    if (__vafs_ensure_root_open(vafs) != 0) {
-        return -1;
-    }
-
     // Check symlink depth limit
     if (symlinkDepth > VAFS_SYMLINK_MAX_DEPTH) {
         VAFS_ERROR("__vafs_path_stat_internal: symlink depth limit exceeded (depth=%d, max=%d)\n",

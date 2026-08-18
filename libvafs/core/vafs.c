@@ -43,31 +43,3 @@ void vafs_init(void)
     g_initialized = 1;
 }
 
-static int __initialize_root(
-    struct VaFs* vafs)
-{
-    // Read mode reopens the persisted root descriptor, while write mode starts
-    // from an empty in-memory root that will later be serialized. The root is
-    // treated as a lazy dependency so callers can open a filesystem and only
-    // materialize the tree when they actually traverse it.
-    if (vafs->Mode == VaFsMode_Read) {
-        return vafs_directory_open_root(vafs, &vafs->Header.RootDescriptor, &vafs->RootDirectory);
-    }
-    else {
-        return vafs_directory_create_root(vafs, &vafs->RootDirectory);
-    }
-}
-
-int __vafs_ensure_root_open(
-    struct VaFs* vafs)
-{
-    if (vafs == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    if (vafs->RootDirectory != NULL) {
-        return 0;
-    }
-    return __initialize_root(vafs);
-}
