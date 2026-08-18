@@ -14,7 +14,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  *
- * Vali Initrd Filesystem
+ * Vali Container Filesystem
  * - Declares the draft codec registration surface for the next-generation VaFS public API.
  */
 

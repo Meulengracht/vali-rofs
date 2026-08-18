@@ -14,8 +14,8 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  *
- * Vali Initrd Filesystem
- * - Contains the implementation of the Vali Initrd Filesystem. maximum block size for data blocks is 1mb
+ * Vali Container Filesystem
+ * - Contains the implementation of the Vali Container Filesystem. maximum block size for data blocks is 1mb
  *   This filesystem is used to store the initrd of the kernel.
  */
 
