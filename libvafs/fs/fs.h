@@ -53,11 +53,35 @@
 // Utility functions
 struct VaFsDirectoryEntry;
 
+struct VaFsFile {
+    struct VaFs*         VaFs;
+    VaFsFileDescriptor_t Descriptor;
+    const char*          Name;
+    struct VaFsMetadata  Stat;
+    struct VaFsXattrSet* Xattrs;
+    int                  StatCached;
+    int                  XattrsLoaded;
+};
+
 // Read-mode directories start in a lightweight open state and only transition
 // to loaded once their child descriptors have been materialized.
 enum VaFsDirectoryState {
     VaFsDirectoryState_Open,
     VaFsDirectoryState_Loaded
+};
+
+struct VaFsDirectory {
+    struct VaFs*              VaFs;
+    VaFsDirectoryDescriptor_t Descriptor;
+    // Only the root directory needs its own descriptor position persisted back
+    // to the image header because every other directory descriptor is anchored
+    // by its parent entry.
+    VaFsBlockPosition_t       DescriptorPosition;
+    const char*               Name;
+    struct VaFsMetadata       Stat;
+    struct VaFsXattrSet*      Xattrs;
+    int                       StatCached;
+    int                       XattrsLoaded;
 };
 
 struct VaFsDirectoryReader {
@@ -123,28 +147,17 @@ struct VaFsLookupCache {
     struct VaFsLookupCacheEntry Entries[VAFS_LOOKUP_CACHE_CAPACITY];
 };
 
-struct VaFsFile {
-    struct VaFs*         VaFs;
-    VaFsFileDescriptor_t Descriptor;
-    const char*          Name;
-    struct VaFsMetadata  Stat;
-    struct VaFsXattrSet* Xattrs;
-    int                  StatCached;
-    int                  XattrsLoaded;
+enum VaFsFileState {
+    VaFsFileState_Open,
+    VaFsFileState_Read,
+    VaFsFileState_Write
 };
 
-struct VaFsDirectory {
-    struct VaFs*              VaFs;
-    VaFsDirectoryDescriptor_t Descriptor;
-    // Only the root directory needs its own descriptor position persisted back
-    // to the image header because every other directory descriptor is anchored
-    // by its parent entry.
-    VaFsBlockPosition_t       DescriptorPosition;
-    const char*               Name;
-    struct VaFsMetadata       Stat;
-    struct VaFsXattrSet*      Xattrs;
-    int                       StatCached;
-    int                       XattrsLoaded;
+struct VaFsFileHandle {
+    struct VaFsFile*   File;
+    enum VaFsFileState State;
+    struct VaFsStreamReader* Reader;
+    uint32_t           Position;
 };
 
 struct VaFsSymlink {

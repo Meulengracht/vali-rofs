@@ -13,7 +13,7 @@
 #include <vafs/reader.h>
 #include <vafs/builder.h>
 #include <vafs/stat.h>
-#include "../../libvafs/private.h"
+#include "../../libvafs/fs/fs.h"
 
 #define TEST_IMAGE_PATH "test_directory_lookups.vafs"
 #define SMALL_DIR_ENTRY_COUNT 64
@@ -68,7 +68,7 @@ static int lookup_cache_has_state(
     size_t i;
 
     for (i = 0; i < VAFS_LOOKUP_CACHE_CAPACITY; i++) {
-        struct VaFsLookupCacheEntry* entry = &vafs->LookupCache.Entries[i];
+        struct VaFsLookupCacheEntry* entry = &vafs->LookupCache->Entries[i];
         if (entry->State == state && entry->Parent == parent && strcmp(entry->Name, name) == 0) {
             return 1;
         }

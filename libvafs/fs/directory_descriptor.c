@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "fs.h"
+#include "../stream/stream.h"
 
 static void __copy_timestamp_to_descriptor(
     VaFsDescriptorTimestamp_t*  destination,

@@ -24,8 +24,13 @@
 #include <string.h>
 #include <stdio.h>
 
+#include <vafs/platform.h>
+#include <vafs/codec.h>
+
 #include "../cache/blockcache.h"
 #include "../core/crc.h"
+#include "../core/core.h"
+#include "../stream/stream.h"
 
 #define STREAM_TYPE_FILE   0
 #define STREAM_TYPE_MEMORY 1

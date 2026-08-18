@@ -29,6 +29,7 @@
 #include <vafs/builder.h>
 
 #include "fs.h"
+#include "../stream/stream.h"
 
 static struct VaFsGuid g_xattrGuid = VA_FS_FEATURE_XATTRS;
 

@@ -24,6 +24,8 @@
 
 #include <stdint.h>
 
+#include <vafs/types.h>
+
 // Forward declarations
 struct VaFsStream;
 struct VaFsStreamReader;

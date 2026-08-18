@@ -20,11 +20,13 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <vafs/reader.h>
 #include "fs.h"
+#include "../stream/stream.h"
 
 struct VaFsDirectoryReaderHandle {
     struct VaFsDirectory* Directory;

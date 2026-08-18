@@ -36,6 +36,8 @@
 #include <vafs/backend.h>
 #include <vafs/platform.h>
 
+#include "../core/core.h"
+
 #define __TRANSFER_BUFFER_SIZE 1024*1024
 
 static int  __file_get_size(void*, uint64_t*);

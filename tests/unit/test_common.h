@@ -12,7 +12,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include "crc.h"
+#include "core/crc.h"
 
 // VaFS format structures (from private.h)
 #define VA_FS_MAGIC       0x3144524D

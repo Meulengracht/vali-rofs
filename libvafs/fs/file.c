@@ -20,23 +20,12 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "fs.h"
-
-enum VaFsFileState {
-    VaFsFileState_Open,
-    VaFsFileState_Read,
-    VaFsFileState_Write
-};
-
-struct VaFsFileHandle {
-    struct VaFsFile*   File;
-    enum VaFsFileState State;
-    struct VaFsStreamReader* Reader;
-    uint32_t           Position;
-};
+#include "../stream/stream.h"
 
 static int __ensure_file_reader(
     struct VaFsFileHandle* handle)

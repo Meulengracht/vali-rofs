@@ -25,6 +25,7 @@
 
 #include "core.h"
 #include "../fs/fs.h"
+#include "../stream/stream.h"
 
 static inline int __compare_guids(
     const struct VaFsGuid* lh,

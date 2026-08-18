@@ -25,6 +25,7 @@
 #include <vafs/builder.h>
 #include "core.h"
 #include "../fs/fs.h"
+#include "../stream/stream.h"
 
 static void vafs_destroy(
     struct VaFs* vafs);
