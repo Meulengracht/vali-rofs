@@ -28,8 +28,12 @@
 #include <vafs/reader.h>
 #include <vafs/builder.h>
 
-#include "fs.h"
+#include "../core/core.h"
 #include "../stream/stream.h"
+#include "directory.h"
+#include "object.h"
+#include "path.h"
+#include "xattr.h"
 
 static struct VaFsGuid g_xattrGuid = VA_FS_FEATURE_XATTRS;
 

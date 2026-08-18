@@ -26,7 +26,6 @@
 
 #include "crc.h"
 #include "core.h"
-#include "../fs/fs.h"
 
 const struct VaFsGuid g_overviewGuid  = VA_FS_FEATURE_OVERVIEW;
 const struct VaFsGuid g_filterGuid    = VA_FS_FEATURE_FILTER;

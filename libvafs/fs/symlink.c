@@ -23,7 +23,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "fs.h"
+#include "../core/core.h"
+#include "directory.h"
+#include "object.h"
+#include "path.h"
 
 struct VaFsSymlinkHandle {
     struct VaFsSymlink* Symlink;

@@ -24,7 +24,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "fs.h"
+#include "../core/core.h"
+#include "directory.h"
+#include "object.h"
+#include "path.h"
+
 
 struct __directory_name_index_entry {
     const char*                Name;

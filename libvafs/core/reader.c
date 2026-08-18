@@ -24,8 +24,9 @@
 #include <vafs/reader.h>
 
 #include "core.h"
-#include "../fs/fs.h"
+#include "../stream/device.h"
 #include "../stream/stream.h"
+#include "../fs/directory.h"
 
 static inline int __compare_guids(
     const struct VaFsGuid* lh,

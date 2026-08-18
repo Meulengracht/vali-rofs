@@ -25,8 +25,12 @@
 #include <string.h>
 
 #include <vafs/reader.h>
-#include "fs.h"
+#include "../core/core.h"
 #include "../stream/stream.h"
+#include "directory.h"
+#include "object.h"
+#include "path.h"
+
 
 struct VaFsDirectoryReaderHandle {
     struct VaFsDirectory* Directory;

@@ -25,6 +25,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include <vafs/backend.h>
+
 // Forward declarations
 struct VaFsStreamDevice;
 

@@ -30,7 +30,10 @@
 #  endif
 #endif //!#if defined(_WIN32) || defined(_WIN64)
 
-#include "fs.h"
+#include "../core/core.h"
+#include "directory.h"
+#include "object.h"
+#include "path.h"
 
 int __vafs_is_root_path(
     const char* path)

@@ -24,8 +24,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "fs.h"
+#include "../core/core.h"
 #include "../stream/stream.h"
+#include "directory.h"
+#include "object.h"
+#include "path.h"
+
 
 static int __ensure_file_reader(
     struct VaFsFileHandle* handle)

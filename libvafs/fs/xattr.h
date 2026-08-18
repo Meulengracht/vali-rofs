@@ -23,6 +23,7 @@
 #define __VAFS_FS_XATTR_H_
 
 #include <stdint.h>
+#include <stddef.h>
 
 // Forward declarations
 struct VaFs;

@@ -30,7 +30,8 @@
 #include "../cache/blockcache.h"
 #include "../core/crc.h"
 #include "../core/core.h"
-#include "../stream/stream.h"
+#include "device.h"
+#include "stream.h"
 
 #define STREAM_TYPE_FILE   0
 #define STREAM_TYPE_MEMORY 1

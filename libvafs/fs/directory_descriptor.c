@@ -23,8 +23,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "fs.h"
+#include "../core/core.h"
 #include "../stream/stream.h"
+#include "directory.h"
+#include "object.h"
+#include "path.h"
 
 static void __copy_timestamp_to_descriptor(
     VaFsDescriptorTimestamp_t*  destination,

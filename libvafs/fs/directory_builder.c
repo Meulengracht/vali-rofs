@@ -24,7 +24,11 @@
 #include <string.h>
 
 #include <vafs/builder.h>
-#include "fs.h"
+#include "../core/core.h"
+#include "directory.h"
+#include "object.h"
+#include "path.h"
+
 
 struct VaFsObjectBuilder {
     struct VaFs*     VaFs;

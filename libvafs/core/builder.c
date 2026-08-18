@@ -23,9 +23,11 @@
 #include <string.h>
 
 #include <vafs/builder.h>
+
 #include "core.h"
-#include "../fs/fs.h"
+#include "../stream/device.h"
 #include "../stream/stream.h"
+#include "../fs/directory.h"
 
 static void vafs_destroy(
     struct VaFs* vafs);

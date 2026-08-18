@@ -13,7 +13,8 @@
 #include <vafs/reader.h>
 #include <vafs/builder.h>
 #include <vafs/stat.h>
-#include "../../libvafs/fs/fs.h"
+#include "../../libvafs/core/core.h"
+#include "../../libvafs/fs/directory.h"
 
 #define TEST_IMAGE_PATH "test_directory_lookups.vafs"
 #define SMALL_DIR_ENTRY_COUNT 64
