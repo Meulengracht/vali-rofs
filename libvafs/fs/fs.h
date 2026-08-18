@@ -27,8 +27,9 @@
 
 #include <vafs/types.h>
 #include <vafs/stat.h>
+
 #include "../cache/hashtable.h"
-#include "../core/core.h"
+#include "../format/format.h"
 
 // If a directory has more entries than this threshold, we will build a 
 // hash index for it to speed up lookups. This is a tradeoff between 
@@ -52,60 +53,6 @@
 
 // Utility functions
 struct VaFsDirectoryEntry;
-
-struct VaFsFile {
-    struct VaFs*         VaFs;
-    VaFsFileDescriptor_t Descriptor;
-    const char*          Name;
-    struct VaFsMetadata  Stat;
-    struct VaFsXattrSet* Xattrs;
-    int                  StatCached;
-    int                  XattrsLoaded;
-};
-
-// Read-mode directories start in a lightweight open state and only transition
-// to loaded once their child descriptors have been materialized.
-enum VaFsDirectoryState {
-    VaFsDirectoryState_Open,
-    VaFsDirectoryState_Loaded
-};
-
-struct VaFsDirectory {
-    struct VaFs*              VaFs;
-    VaFsDirectoryDescriptor_t Descriptor;
-    // Only the root directory needs its own descriptor position persisted back
-    // to the image header because every other directory descriptor is anchored
-    // by its parent entry.
-    VaFsBlockPosition_t       DescriptorPosition;
-    const char*               Name;
-    struct VaFsMetadata       Stat;
-    struct VaFsXattrSet*      Xattrs;
-    int                       StatCached;
-    int                       XattrsLoaded;
-};
-
-struct VaFsDirectoryReader {
-    struct VaFsDirectory       Base;
-    enum VaFsDirectoryState    State;
-    struct VaFsDirectoryEntry* Entries;
-    struct VaFsStreamReader*   Reader;
-    // Small read-mode directories use this sorted view for binary search by name.
-    struct VaFsDirectoryEntry** Index;
-    // Very large directories build a secondary name index to avoid binary-search overhead.
-    hashtable_t                NameIndex;
-    size_t                     EntryCount;
-    int                        IndexDirty;
-    int                        NameIndexInitialized;
-};
-
-struct VaFsDirectoryWriter {
-    struct VaFsDirectory       Base;
-    struct VaFsDirectoryEntry* Entries;
-    // Writer mode keeps the linked list as the source of truth and rebuilds this cache on demand.
-    struct VaFsDirectoryEntry** Index;
-    size_t                     EntryCount;
-    int                        IndexDirty;
-};
 
 // Directory entries are the shared tagged-union node type used by lookup,
 // serialization, and metadata code across both read and write modes.
@@ -145,51 +92,6 @@ struct VaFsLookupCacheEntry {
 struct VaFsLookupCache {
     uint64_t                    Generation;
     struct VaFsLookupCacheEntry Entries[VAFS_LOOKUP_CACHE_CAPACITY];
-};
-
-enum VaFsFileState {
-    VaFsFileState_Open,
-    VaFsFileState_Read,
-    VaFsFileState_Write
-};
-
-struct VaFsFileHandle {
-    struct VaFsFile*   File;
-    enum VaFsFileState State;
-    struct VaFsStreamReader* Reader;
-    uint32_t           Position;
-};
-
-struct VaFsSymlink {
-    struct VaFs*            VaFs;
-    VaFsSymlinkDescriptor_t Descriptor;
-    const char*             Name;
-    const char*             Target;
-    struct VaFsMetadata     Stat;
-    struct VaFsXattrSet*    Xattrs;
-    int                     StatCached;
-    int                     XattrsLoaded;
-};
-
-struct VaFsSpecial {
-    struct VaFs*            VaFs;
-    VaFsSpecialDescriptor_t Descriptor;
-    const char*             Name;
-    struct VaFsMetadata     Stat;
-    struct VaFsXattrSet*    Xattrs;
-    int                     StatCached;
-    int                     XattrsLoaded;
-};
-
-struct VaFsHardlink {
-    struct VaFs*             VaFs;
-    VaFsHardlinkDescriptor_t Descriptor;
-    const char*              Name;
-};
-
-struct VaFsDirectoryBuilder {
-    struct VaFsDirectory* Directory;
-    int                   Index;
 };
 
 /**
@@ -268,82 +170,6 @@ extern int __vafs_file_open_internal(struct VaFs* vafs, const char* path, struct
  * @return Canonical backing entry on success, otherwise `NULL` with `errno` set.
  */
 extern struct VaFsDirectoryEntry* __vafs_resolve_hardlink(struct VaFs* vafs, struct VaFsDirectoryEntry* entry);
-
-/**
- * @brief Internal listxattr implementation with explicit symlink-follow policy.
- *
- * Tooling uses this to preserve symlink-object xattrs without changing the
- * public API contract that always follows the final symlink component.
- *
- * @param[In]  vafs         Filesystem instance to query.
- * @param[In]  path         Absolute path of the entry.
- * @param[In]  followLinks  Non-zero to resolve symlinks, zero to stop on the link itself.
- * @param[Out] buffer       Optional output buffer for the packed xattr name list.
- * @param[In]  bufferSize   Size of `buffer` in bytes.
- * @param[Out] bytesWritten Receives the required or written byte count.
- * @return 0 on success, otherwise -1 with `errno` set.
- */
-extern int __vafs_path_listxattr(struct VaFs* vafs, const char* path, int followLinks, char* buffer, size_t bufferSize, size_t* bytesWritten);
-
-/**
- * @brief Internal getxattr implementation with explicit symlink-follow policy.
- *
- * @param[In]  vafs         Filesystem instance to query.
- * @param[In]  path         Absolute path of the entry.
- * @param[In]  followLinks  Non-zero to resolve symlinks, zero to stop on the link itself.
- * @param[In]  name         Xattr name to fetch.
- * @param[Out] value        Optional destination buffer for the xattr value.
- * @param[In]  valueSize    Size of `value` in bytes.
- * @param[Out] bytesWritten Receives the required or written byte count.
- * @return 0 on success, otherwise -1 with `errno` set.
- */
-extern int __vafs_path_getxattr(struct VaFs* vafs, const char* path, int followLinks, const char* name, void* value, size_t valueSize, size_t* bytesWritten);
-
-/**
- * @brief Internal setxattr implementation with explicit symlink-follow policy.
- *
- * @param[In] vafs        Filesystem instance opened in write mode.
- * @param[In] path        Absolute path of the entry.
- * @param[In] followLinks Non-zero to resolve symlinks, zero to stop on the link itself.
- * @param[In] name        Xattr name to write.
- * @param[In] value       Optional value buffer. May be `NULL` only when `valueSize` is zero.
- * @param[In] valueSize   Size of `value` in bytes.
- * @return 0 on success, otherwise -1 with `errno` set.
- */
-extern int __vafs_path_setxattr(struct VaFs* vafs, const char* path, int followLinks, const char* name, const void* value, size_t valueSize);
-
-/**
- * @brief Assigns stable xattr-set indices before descriptors are serialized.
- *
- * The writer runs this after all entry metadata has been finalized so hot
- * descriptors can point at deduplicated cold xattr payloads.
- *
- * @param[In] vafs Filesystem instance being written.
- * @return 0 on success, otherwise -1 with `errno` set.
- */
-extern int __vafs_xattr_prepare_write(struct VaFs* vafs);
-
-/**
- * @brief Serializes the deduplicated cold xattr section into the descriptor stream.
- *
- * @param[In] vafs Filesystem instance being written.
- * @return 0 on success, otherwise -1 with `errno` set.
- */
-extern int __vafs_xattr_write_section(struct VaFs* vafs);
-
-/**
- * @brief Releases cached reader-side xattr store state for an image.
- *
- * @param[In] vafs Filesystem instance whose xattr store should be discarded.
- */
-extern void __vafs_xattr_store_destroy(struct VaFs* vafs);
-
-/**
- * @brief Destroys one deduplicated xattr set and all of its entries.
- *
- * @param[In] set Xattr set to destroy. `NULL` is ignored.
- */
-extern void __vafs_xattr_set_destroy(struct VaFsXattrSet* set);
 
 /**
  * @brief Returns the linked-list entries for a directory, loading them on demand in read mode.
