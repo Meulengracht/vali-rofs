@@ -25,7 +25,6 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#include <vafs/backend.h>
 #include <vafs/codec.h>
 
 #include "../format/format.h"
