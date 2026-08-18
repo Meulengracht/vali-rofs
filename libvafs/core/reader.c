@@ -401,7 +401,7 @@ static int __open_vafs(
 
     vafs->Mode = VaFsMode_Read;
 
-    vafs->LookupCache = malloc(sizeof(struct VaFsLookupCache));
+    vafs->LookupCache = calloc(1, sizeof(struct VaFsLookupCache));
     if (!vafs->LookupCache) {
         vafs_destroy(vafs);
         errno = ENOMEM;
