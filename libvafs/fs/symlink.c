@@ -14,16 +14,20 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  *
- * Vali Initrd Filesystem
- * - Contains the implementation of the Vali Initrd Filesystem.
+ * Vali Container Filesystem
+ * - Contains the implementation of the Vali Container Filesystem.
  *   This filesystem is used to store the initrd of the kernel.
  */
 
 #include <errno.h>
-#include "private.h"
 #include <stdlib.h>
 #include <string.h>
-#include <vafs/file.h>
+
+#include "../core/core.h"
+#include "directory.h"
+#include "object.h"
+#include "path.h"
+#include "xattr.h"
 
 struct VaFsSymlinkHandle {
     struct VaFsSymlink* Symlink;
@@ -59,15 +63,15 @@ int vafs_symlink_open(
         return -1;
     }
 
-    if (__vafs_ensure_root_open(vafs) != 0) {
-        return -1;
-    }
-
     if (__vafs_is_root_path(path)) {
         errno = EISDIR;
         return -1;
     }
 
+    // Symlink opening uses the same token-by-token walk as file open, but the
+    // only valid terminal object here is a symlink node. The branch structure is
+    // intentionally narrow so a malformed path fails before we return a handle
+    // for the wrong entry type.
     currentDirectory = vafs->RootDirectory;
     do {
         int charsConsumed = __vafs_pathtoken(remainingPath, token, sizeof(token));

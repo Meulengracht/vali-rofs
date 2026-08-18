@@ -53,8 +53,6 @@ The table below summarizes the stable Windows rerun recorded in `benchmarks/BENC
 
 Several metadata-heavy paths hit the current formatter precision floor in the benchmark output, so `0.000 ms` and `0.001 ms` here should be read as "below current reporting precision," not as literal zero-cost operations.
 
-For the full baseline, methodology notes, and reproduction commands, see [benchmarks/BENCHMARK_BASELINE.md](benchmarks/BENCHMARK_BASELINE.md) and [benchmarks/README.md](benchmarks/README.md).
-
 ## Build
 
 VaFS uses CMake and builds the core library, tools, benchmarks, and tests by default.
@@ -81,39 +79,32 @@ On non-Windows hosts, the FUSE utility is only built when the FUSE development p
 ```c
 #include <stdio.h>
 #include <vafs/vafs.h>
-#include <vafs/file.h>
+#include <vafs/reader.h>
 
 int main(void) {
 	struct VaFs* fs = NULL;
-	struct VaFsFileHandle* file = NULL;
+	struct VaFsObjectReader* file = NULL;
 	char buffer[128];
-	size_t bytesRead;
+	uint64_t bytesRead;
 
-	if (vafs_open_file("rootfs.vafs", &fs) != 0) {
+	if (vafs_reader_open_file("rootfs.vafs", NULL, &fs) != 0) {
 		return 1;
 	}
 
-	if (vafs_file_open(fs, "/etc/version.txt", &file) != 0) {
-		vafs_close(fs);
+	if (vafs_object_reader_open(fs, "/etc/version.txt", VaFsLookup_None, &file) != 0) {
+		vafs_reader_close(fs);
 		return 1;
 	}
 
-	bytesRead = vafs_file_read(file, buffer, sizeof(buffer) - 1);
+	bytesRead = vafs_object_reader_read(file, buffer, sizeof(buffer) - 1);
 	buffer[bytesRead] = '\0';
 	puts(buffer);
 
-	vafs_file_close(file);
-	vafs_close(fs);
+	vafs_object_reader_close(file);
+	vafs_reader_close(fs);
 	return 0;
 }
 ```
-
-For more detail on the API surface and internals, see:
-
-- [docs/LIBRARY_ARCHITECTURE.md](docs/LIBRARY_ARCHITECTURE.md)
-- [docs/VAFS_FORMAT_SPEC.md](docs/VAFS_FORMAT_SPEC.md)
-- [docs/VAFS_ROOTFS_METADATA_REQUIREMENTS.md](docs/VAFS_ROOTFS_METADATA_REQUIREMENTS.md)
-- [benchmarks/README.md](benchmarks/README.md)
 
 ## License
 

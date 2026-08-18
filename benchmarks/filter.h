@@ -21,6 +21,11 @@
 #define __VAFS_FILTER_H__
 
 #include <vafs/vafs.h>
+#include <vafs/builder.h>
+#include <vafs/reader.h>
+
+extern int __configure_filters(struct VaFsBuilderConfiguration* configuration, const char* descriptorFilterName, const char* dataFilterName);
+extern int __configure_reader_filters(struct VaFsReaderConfiguration* configuration);
 
 /**
  * @brief Handles filter installation for an opened VaFS image.

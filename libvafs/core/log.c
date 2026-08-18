@@ -14,18 +14,19 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  *
- * Vali Initrd Filesystem
- * - Contains the implementation of the Vali Initrd Filesystem.
+ * Vali Container Filesystem
+ * - Contains the implementation of the Vali Container Filesystem.
  *   This filesystem is used to store the initrd of the kernel.
  */
 
-#include "private.h"
 #include <stdarg.h>
 #include <stdio.h>
 
+#include <vafs/vafs.h>
+
 static enum VaFsLogLevel g_loglevel = VaFsLogLevel_Warning;
 
-void vafs_log_initalize(
+void vafs_log_initialize(
     enum VaFsLogLevel level)
 {
     g_loglevel = level;

@@ -15,21 +15,30 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  *
  * Vali Container Filesystem
- * - Contains the implementation of the Vali Container Filesystem.
+ * - Contains the implementation of the Vali Container Filesystem. maximum block size for data blocks is 1mb
  *   This filesystem is used to store the initrd of the kernel.
  */
 
-#ifndef __VAFS_H__
-#define __VAFS_H__
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
 
-#include <vafs/types.h>
+#include "crc.h"
+#include "core.h"
 
-/**
- * @brief Control the log level of the library. This is useful for debugging. The default
- * log level is set to VaFsLogLevel_Warning.
- * 
- * @param[In] level The level of log output to enable
- */
-extern void vafs_log_initialize(enum VaFsLogLevel level);
+const struct VaFsGuid g_overviewGuid  = VA_FS_FEATURE_OVERVIEW;
+const struct VaFsGuid g_filterGuid    = VA_FS_FEATURE_FILTER;
+static int            g_initialized   = 0;
 
-#endif //!__VAFS_H__
+void vafs_init(void)
+{
+    // CRC state is process-global, so initialize it lazily once.
+    if (g_initialized) {
+        return;
+    }
+
+    crc_init();
+    g_initialized = 1;
+}
+

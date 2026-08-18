@@ -14,13 +14,12 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  *
- * Vali Initrd Filesystem
- * - Contains the implementation of the Vali Initrd Filesystem.
+ * Vali Container Filesystem
+ * - Contains the implementation of the Vali Container Filesystem.
  *   This filesystem is used to store the initrd of the kernel.
  */
 
 #include <errno.h>
-#include "private.h"
 #include <stdlib.h>
 #include <string.h>
 #include <vafs/stat.h>
@@ -30,6 +29,11 @@
 #     define S_IFLNK 0
 #  endif
 #endif //!#if defined(_WIN32) || defined(_WIN64)
+
+#include "../core/core.h"
+#include "directory.h"
+#include "object.h"
+#include "path.h"
 
 int __vafs_is_root_path(
     const char* path)
@@ -217,10 +221,6 @@ int __vafs_path_stat_internal(
         return -1;
     }
 
-    if (__vafs_ensure_root_open(vafs) != 0) {
-        return -1;
-    }
-
     // Check symlink depth limit
     if (symlinkDepth > VAFS_SYMLINK_MAX_DEPTH) {
         VAFS_ERROR("__vafs_path_stat_internal: symlink depth limit exceeded (depth=%d, max=%d)\n",
@@ -241,6 +241,10 @@ int __vafs_path_stat_internal(
         );
     }
 
+    // The stat path follows the same three-phase walk as file open: peel one
+    // token, resolve it in the active directory, then either descend, resolve a
+    // symlink, or return metadata from the terminal object. Keeping that order
+    // stable avoids subtle inconsistencies between open() and stat() behavior.
     currentDirectory = vafs->RootDirectory;
     do {
         const char* previousPath = remainingPath;

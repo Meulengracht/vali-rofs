@@ -13,7 +13,7 @@ Fuzzing is a security testing technique that feeds malformed, unexpected, or ran
 **Purpose**: Fuzzes the image opening and header validation logic.
 
 **Target Functions**:
-- `vafs_open_memory()` - Opens a VaFS image from a memory buffer
+- `vafs_reader_open_memory()` - Opens a VaFS image from a memory buffer
 - `__verify_header()` - Validates header fields (magic, version, offsets, etc.)
 - `__load_features()` - Loads and parses feature headers
 - `__initialize_imagestream()` - Initializes the stream device
@@ -38,8 +38,8 @@ Fuzzing is a security testing technique that feeds malformed, unexpected, or ran
 **Purpose**: Fuzzes directory entry parsing and traversal operations.
 
 **Target Functions**:
-- `vafs_directory_open()` - Opens a directory by path
-- `vafs_directory_read()` - Reads directory entries
+- `vafs_directory_reader_open()` - Opens a directory by path
+- `vafs_directory_reader_next()` - Reads directory entries
 - `__load_directory()` - Loads directory from descriptor stream
 - `__read_descriptor()` - Reads file/directory/symlink descriptors
 - `__validate_file_descriptor()` - Validates file descriptors
@@ -65,10 +65,10 @@ Fuzzing is a security testing technique that feeds malformed, unexpected, or ran
 **Purpose**: Fuzzes file opening and reading operations.
 
 **Target Functions**:
-- `vafs_file_open()` - Opens a file by path
-- `vafs_file_read()` - Reads data from a file
-- `vafs_file_seek()` - Seeks to a position in a file
-- `__vafs_file_open_internal()` - Internal file opening with path resolution
+- `vafs_object_reader_open()` - Opens a file object by path
+- `vafs_object_reader_read()` - Reads data from a file object
+- `vafs_object_reader_seek()` - Seeks to a position in a file object
+- Reader path resolution for object readers
 
 **What It Tests**:
 - Path resolution and traversal
@@ -89,10 +89,10 @@ Fuzzing is a security testing technique that feeds malformed, unexpected, or ran
 **Purpose**: Fuzzes symlink resolution and path handling.
 
 **Target Functions**:
-- `vafs_symlink_open()` - Opens a symlink by path
-- `vafs_symlink_target()` - Reads symlink target path
+- `vafs_object_reader_open()` - Opens symlink objects by path with nofollow lookup
+- `vafs_object_reader_read()` - Reads symlink target data
 - `__vafs_resolve_symlink()` - Resolves and canonicalizes symlink paths
-- Path resolution in `vafs_file_open()` and `vafs_directory_open()`
+- Path resolution in `vafs_object_reader_open()` and `vafs_directory_reader_open()`
 
 **What It Tests**:
 - Circular symlink detection (max depth: 40)

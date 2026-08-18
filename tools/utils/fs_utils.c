@@ -20,8 +20,8 @@
 
 #include <stddef.h>
 #include <errno.h>
+#include <stdlib.h>
 #include <vafs/stat.h>
-#include <vafs/xattr.h>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <Windows.h>
@@ -32,6 +32,7 @@
 #else
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #if defined(__linux__) || defined(__APPLE__)
 #include <sys/xattr.h>
 #endif
@@ -255,9 +256,7 @@ static int __vafs_listxattr(
     size_t       bufferSize,
     size_t*      bytesWritten)
 {
-    return followLinks ?
-        vafs_path_listxattr(vafs, path, buffer, bufferSize, bytesWritten) :
-        __vafs_path_listxattr(vafs, path, 0, buffer, bufferSize, bytesWritten);
+    return __vafs_path_listxattr(vafs, path, followLinks, buffer, bufferSize, bytesWritten);
 }
 
 static int __vafs_getxattr(
@@ -269,9 +268,7 @@ static int __vafs_getxattr(
     size_t       valueSize,
     size_t*      bytesWritten)
 {
-    return followLinks ?
-        vafs_path_getxattr(vafs, path, name, value, valueSize, bytesWritten) :
-        __vafs_path_getxattr(vafs, path, 0, name, value, valueSize, bytesWritten);
+    return __vafs_path_getxattr(vafs, path, followLinks, name, value, valueSize, bytesWritten);
 }
 
 static int __vafs_setxattr(
@@ -282,9 +279,7 @@ static int __vafs_setxattr(
     const void*  value,
     size_t       valueSize)
 {
-    return followLinks ?
-        vafs_path_setxattr(vafs, path, name, value, valueSize) :
-        __vafs_path_setxattr(vafs, path, 0, name, value, valueSize);
+    return __vafs_path_setxattr(vafs, path, followLinks, name, value, valueSize);
 }
 
 int platform_fs_xattr_error_is_nonfatal(int error)

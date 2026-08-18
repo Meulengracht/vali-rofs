@@ -10,11 +10,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <vafs/vafs.h>
-#include <vafs/directory.h>
-#include <vafs/file.h>
+#include <vafs/reader.h>
+#include <vafs/builder.h>
 #include <vafs/stat.h>
-#include <vafs/xattr.h>
-#include "../../libvafs/private.h"
+#include "../../libvafs/core/core.h"
+#include "../../libvafs/fs/directory.h"
 
 #define TEST_IMAGE_PATH "test_directory_lookups.vafs"
 #define SMALL_DIR_ENTRY_COUNT 64
@@ -69,7 +69,7 @@ static int lookup_cache_has_state(
     size_t i;
 
     for (i = 0; i < VAFS_LOOKUP_CACHE_CAPACITY; i++) {
-        struct VaFsLookupCacheEntry* entry = &vafs->LookupCache.Entries[i];
+        struct VaFsLookupCacheEntry* entry = &vafs->LookupCache->Entries[i];
         if (entry->State == state && entry->Parent == parent && strcmp(entry->Name, name) == 0) {
             return 1;
         }
@@ -120,6 +120,91 @@ static int find_collision_names(
     return -1;
 }
 
+static enum VaFsLookupFlags lookup_flags_for_follow(int follow)
+{
+    return follow ? VaFsLookup_None : VaFsLookup_NoFollow;
+}
+
+static int test_path_stat(
+    struct VaFs*         vafs,
+    const char*          path,
+    int                  follow,
+    struct VaFsMetadata* metadataOut)
+{
+    struct VaFsObjectReader* object;
+    int                      status;
+
+    status = vafs_object_reader_open(vafs, path, lookup_flags_for_follow(follow), &object);
+    if (status != 0) {
+        return status;
+    }
+
+    status = vafs_object_reader_stat(object, metadataOut);
+    vafs_object_reader_close(object);
+    return status;
+}
+
+static int test_path_listxattr(
+    struct VaFs* vafs,
+    const char*  path,
+    int          follow,
+    char*        buffer,
+    size_t       bufferSize,
+    size_t*      bytesWrittenOut)
+{
+    struct VaFsObjectReader* object;
+    int                      status;
+
+    status = vafs_object_reader_open(vafs, path, lookup_flags_for_follow(follow), &object);
+    if (status != 0) {
+        return status;
+    }
+
+    status = vafs_object_reader_listxattr(object, buffer, bufferSize, bytesWrittenOut);
+    vafs_object_reader_close(object);
+    return status;
+}
+
+static int test_path_getxattr(
+    struct VaFs* vafs,
+    const char*  path,
+    int          follow,
+    const char*  name,
+    void*        value,
+    size_t       valueSize,
+    size_t*      bytesWrittenOut)
+{
+    struct VaFsObjectReader* object;
+    int                      status;
+
+    status = vafs_object_reader_open(vafs, path, lookup_flags_for_follow(follow), &object);
+    if (status != 0) {
+        return status;
+    }
+
+    status = vafs_object_reader_getxattr(object, name, value, valueSize, bytesWrittenOut);
+    vafs_object_reader_close(object);
+    return status;
+}
+
+static int write_builder_payload(
+    struct VaFsFileBuilder* file,
+    const void*             payload,
+    size_t                  size)
+{
+    size_t bytesWritten;
+
+    if (vafs_file_builder_write(file, payload, size, &bytesWritten) != 0) {
+        return -1;
+    }
+    return bytesWritten == size ? 0 : -1;
+}
+
+static struct VaFsObjectBuilder* root_builder_object(struct VaFsDirectoryBuilder* root)
+{
+    return (struct VaFsObjectBuilder*)root->Directory;
+}
+
 static int assert_repeated_path_stat(
     struct VaFs*  vafs,
     const char*   path,
@@ -132,7 +217,7 @@ static int assert_repeated_path_stat(
     int              i;
 
     for (i = 0; i < 32; i++) {
-        status = vafs_path_stat(vafs, path, 1, &stat);
+        status = test_path_stat(vafs, path, 1, &stat);
         TEST_ASSERT(status == 0, message);
         TEST_ASSERT(stat.Mode == expected_mode, "Unexpected mode returned from repeated path stat");
         TEST_ASSERT(stat.Size == expected_size, "Unexpected size returned from repeated path stat");
@@ -167,11 +252,11 @@ static int xattr_list_contains(
 static int test_metadata_roundtrip(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
-    struct VaFsDirectoryHandle* meta = NULL;
-    struct VaFsDirectoryHandle* reopened = NULL;
-    struct VaFsFileHandle* file_handle = NULL;
+    struct VaFsBuilderConfiguration config;
+    struct VaFsDirectoryBuilder* root = NULL;
+    struct VaFsDirectoryBuilder* meta = NULL;
+    struct VaFsDirectoryReader* reopened = NULL;
+    struct VaFsFileBuilder* file_handle = NULL;
     struct VaFsMetadata dirMetadata = metadata_for_mode(VaFsEntryType_Directory, 0711);
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0640);
     struct VaFsMetadata symlinkMetadata = metadata_for_mode(VaFsEntryType_Symlink, 0700);
@@ -223,38 +308,35 @@ static int test_metadata_roundtrip(void)
         VaFsMetadataMask_ObjectId |
         VaFsMetadataMask_MTime;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create metadata roundtrip image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory for metadata roundtrip");
-
-    status = vafs_directory_create_directory(root, "meta", &dirMetadata, &meta);
+    status = vafs_directory_builder_create_directory(root, "meta", &dirMetadata, &meta, NULL);
     TEST_ASSERT(status == 0, "Failed to create metadata test directory");
 
-    status = vafs_directory_create_file(meta, "payload", &fileMetadata, &file_handle);
+    status = vafs_directory_builder_create_file(meta, "payload", &fileMetadata, &file_handle, NULL);
     TEST_ASSERT(status == 0, "Failed to create metadata test file");
 
-    status = vafs_file_write(file_handle, (void*)payload, strlen(payload));
+    status = write_builder_payload(file_handle, payload, strlen(payload));
     TEST_ASSERT(status == 0, "Failed to write metadata test file payload");
-    vafs_file_close(file_handle);
+    vafs_file_builder_close(file_handle);
     file_handle = NULL;
 
-    status = vafs_directory_create_symlink(meta, "alias", "/meta/payload", &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(meta, "alias", "/meta/payload", &symlinkMetadata, NULL);
     TEST_ASSERT(status == 0, "Failed to create metadata test symlink");
 
-    vafs_directory_close(meta);
+    vafs_directory_builder_close(meta);
     meta = NULL;
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen metadata test image");
 
-    status = vafs_path_stat(vafs, "/meta", 1, &statbuf);
+    status = test_path_stat(vafs, "/meta", 1, &statbuf);
     TEST_ASSERT(status == 0, "Failed to stat metadata test directory");
     TEST_ASSERT(statbuf.Mode == dirMetadata.Mode, "Directory mode did not round-trip");
     TEST_ASSERT(statbuf.Uid == dirMetadata.Uid, "Directory uid did not round-trip");
@@ -262,7 +344,7 @@ static int test_metadata_roundtrip(void)
     TEST_ASSERT(statbuf.ObjectId == dirMetadata.ObjectId, "Directory object id did not round-trip");
     TEST_ASSERT(timestamps_equal(&statbuf.MTime, &dirMetadata.MTime), "Directory mtime did not round-trip");
 
-    status = vafs_path_stat(vafs, "/meta/payload", 1, &statbuf);
+    status = test_path_stat(vafs, "/meta/payload", 1, &statbuf);
     TEST_ASSERT(status == 0, "Failed to stat metadata test file");
     TEST_ASSERT(statbuf.Mode == fileMetadata.Mode, "File mode did not round-trip");
     TEST_ASSERT(statbuf.Uid == fileMetadata.Uid, "File uid did not round-trip");
@@ -275,7 +357,7 @@ static int test_metadata_roundtrip(void)
     TEST_ASSERT(timestamps_equal(&statbuf.CTime, &fileMetadata.CTime), "File ctime did not round-trip");
     TEST_ASSERT(timestamps_equal(&statbuf.BirthTime, &fileMetadata.BirthTime), "File birthtime did not round-trip");
 
-    status = vafs_path_stat(vafs, "/meta/alias", 0, &statbuf);
+    status = test_path_stat(vafs, "/meta/alias", 0, &statbuf);
     TEST_ASSERT(status == 0, "Failed to stat metadata test symlink");
     TEST_ASSERT(statbuf.Mode == symlinkMetadata.Mode, "Symlink mode did not round-trip");
     TEST_ASSERT(statbuf.Uid == symlinkMetadata.Uid, "Symlink uid did not round-trip");
@@ -284,10 +366,10 @@ static int test_metadata_roundtrip(void)
     TEST_ASSERT(statbuf.Size == strlen("/meta/payload"), "Symlink size did not round-trip");
     TEST_ASSERT(timestamps_equal(&statbuf.MTime, &symlinkMetadata.MTime), "Symlink mtime did not round-trip");
 
-    status = vafs_directory_open(vafs, "/meta", &reopened);
+    status = vafs_directory_reader_open(vafs, "/meta", VaFsLookup_None, &reopened);
     TEST_ASSERT(status == 0, "Failed to reopen metadata directory for enumeration");
 
-    while (vafs_directory_read(reopened, &entry) == 0) {
+    while (vafs_directory_reader_next(reopened, &entry) == 0) {
         if (strcmp(entry.Name, "payload") == 0) {
             TEST_ASSERT(entry.ObjectId == fileMetadata.ObjectId, "Enumerated file object id did not round-trip");
             TEST_ASSERT((entry.MetadataMask & VaFsMetadataMask_MTime) != 0, "Enumerated file metadata mask lost mtime");
@@ -302,9 +384,9 @@ static int test_metadata_roundtrip(void)
     TEST_ASSERT(saw_payload, "Enumerated directory did not include payload entry");
     TEST_ASSERT(saw_alias, "Enumerated directory did not include alias entry");
 
-    vafs_directory_close(reopened);
+    vafs_directory_reader_close(reopened);
     reopened = NULL;
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Metadata survives descriptor-stream round-trip");
@@ -313,10 +395,10 @@ static int test_metadata_roundtrip(void)
 static int test_special_roundtrip(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
-    struct VaFsDirectoryHandle* specials = NULL;
-    struct VaFsDirectoryHandle* reopened = NULL;
+    struct VaFsBuilderConfiguration config;
+    struct VaFsDirectoryBuilder* root = NULL;
+    struct VaFsDirectoryBuilder* specials = NULL;
+    struct VaFsDirectoryReader* reopened = NULL;
     struct VaFsMetadata dirMetadata = metadata_for_mode(VaFsEntryType_Directory, 0755);
     struct VaFsMetadata invalidMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     struct VaFsMetadata charMetadata = metadata_for_mode(VaFsEntryType_CharacterDevice, 0600);
@@ -357,39 +439,36 @@ static int test_special_roundtrip(void)
     fifoMetadata.Mask |= VaFsMetadataMask_ObjectId |
         VaFsMetadataMask_MTime;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create special-file test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory for special-file test");
-
-    status = vafs_directory_create_directory(root, "specials", &dirMetadata, &specials);
+    status = vafs_directory_builder_create_directory(root, "specials", &dirMetadata, &specials, NULL);
     TEST_ASSERT(status == 0, "Failed to create special-file test directory");
 
-    status = vafs_directory_create_special(specials, "invalid", &invalidMetadata);
+    status = vafs_directory_builder_create_special(specials, "invalid", invalidMetadata.Type, &invalidMetadata, NULL, NULL);
     TEST_ASSERT(status != 0 && errno == EINVAL, "Regular file metadata should be rejected for special entries");
 
-    status = vafs_directory_create_special(specials, "null", &charMetadata);
+    status = vafs_directory_builder_create_special(specials, "null", charMetadata.Type, &charMetadata, &charMetadata.Device, NULL);
     TEST_ASSERT(status == 0, "Failed to create character device entry");
 
-    status = vafs_directory_create_special(specials, "loop", &blockMetadata);
+    status = vafs_directory_builder_create_special(specials, "loop", blockMetadata.Type, &blockMetadata, &blockMetadata.Device, NULL);
     TEST_ASSERT(status == 0, "Failed to create block device entry");
 
-    status = vafs_directory_create_special(specials, "pipe", &fifoMetadata);
+    status = vafs_directory_builder_create_special(specials, "pipe", fifoMetadata.Type, &fifoMetadata, NULL, NULL);
     TEST_ASSERT(status == 0, "Failed to create fifo entry");
 
-    vafs_directory_close(specials);
+    vafs_directory_builder_close(specials);
     specials = NULL;
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen special-file test image");
 
-    status = vafs_path_stat(vafs, "/specials/null", 1, &statbuf);
+    status = test_path_stat(vafs, "/specials/null", 1, &statbuf);
     TEST_ASSERT(status == 0, "Failed to stat character device entry");
     TEST_ASSERT(statbuf.Type == VaFsEntryType_CharacterDevice, "Character device type did not round-trip");
     TEST_ASSERT(statbuf.Mode == charMetadata.Mode, "Character device mode did not round-trip");
@@ -398,7 +477,7 @@ static int test_special_roundtrip(void)
     TEST_ASSERT(statbuf.ObjectId == charMetadata.ObjectId, "Character device object id did not round-trip");
     TEST_ASSERT(timestamps_equal(&statbuf.MTime, &charMetadata.MTime), "Character device mtime did not round-trip");
 
-    status = vafs_path_stat(vafs, "/specials/loop", 1, &statbuf);
+    status = test_path_stat(vafs, "/specials/loop", 1, &statbuf);
     TEST_ASSERT(status == 0, "Failed to stat block device entry");
     TEST_ASSERT(statbuf.Type == VaFsEntryType_BlockDevice, "Block device type did not round-trip");
     TEST_ASSERT(statbuf.Mode == blockMetadata.Mode, "Block device mode did not round-trip");
@@ -407,17 +486,17 @@ static int test_special_roundtrip(void)
     TEST_ASSERT(statbuf.ObjectId == blockMetadata.ObjectId, "Block device object id did not round-trip");
     TEST_ASSERT(timestamps_equal(&statbuf.MTime, &blockMetadata.MTime), "Block device mtime did not round-trip");
 
-    status = vafs_path_stat(vafs, "/specials/pipe", 1, &statbuf);
+    status = test_path_stat(vafs, "/specials/pipe", 1, &statbuf);
     TEST_ASSERT(status == 0, "Failed to stat fifo entry");
     TEST_ASSERT(statbuf.Type == VaFsEntryType_Fifo, "Fifo type did not round-trip");
     TEST_ASSERT(statbuf.Mode == fifoMetadata.Mode, "Fifo mode did not round-trip");
     TEST_ASSERT(statbuf.ObjectId == fifoMetadata.ObjectId, "Fifo object id did not round-trip");
     TEST_ASSERT(timestamps_equal(&statbuf.MTime, &fifoMetadata.MTime), "Fifo mtime did not round-trip");
 
-    status = vafs_directory_open(vafs, "/specials", &reopened);
+    status = vafs_directory_reader_open(vafs, "/specials", VaFsLookup_None, &reopened);
     TEST_ASSERT(status == 0, "Failed to reopen special-file directory");
 
-    while (vafs_directory_read(reopened, &entry) == 0) {
+    while (vafs_directory_reader_next(reopened, &entry) == 0) {
         if (strcmp(entry.Name, "null") == 0) {
             TEST_ASSERT(entry.Type == VaFsEntryType_CharacterDevice, "Enumerated character device type did not round-trip");
             TEST_ASSERT((entry.MetadataMask & VaFsMetadataMask_Device) != 0, "Enumerated character device lost device metadata");
@@ -437,9 +516,9 @@ static int test_special_roundtrip(void)
     TEST_ASSERT(saw_loop, "Enumerated directory did not include block device entry");
     TEST_ASSERT(saw_pipe, "Enumerated directory did not include fifo entry");
 
-    vafs_directory_close(reopened);
+    vafs_directory_reader_close(reopened);
     reopened = NULL;
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Special files survive descriptor-stream round-trip");
@@ -448,18 +527,20 @@ static int test_special_roundtrip(void)
 static int test_hardlink_roundtrip(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
-    struct VaFsDirectoryHandle* links = NULL;
-    struct VaFsDirectoryHandle* reopened = NULL;
-    struct VaFsFileHandle* file_handle = NULL;
+    struct VaFsBuilderConfiguration config;
+    struct VaFsDirectoryBuilder* root = NULL;
+    struct VaFsDirectoryBuilder* links = NULL;
+    struct VaFsDirectoryReader* reopened = NULL;
+    struct VaFsFileBuilder* file_handle = NULL;
+    struct VaFsObjectBuilder* file_object = NULL;
+    struct VaFsObjectReader* alias_reader = NULL;
     struct VaFsMetadata dirMetadata = metadata_for_mode(VaFsEntryType_Directory, 0755);
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     struct VaFsMetadata statbuf;
     struct VaFsEntry entry;
     const char* payload = "hardlink-roundtrip";
     char buffer[32];
-    size_t read;
+    uint64_t read;
     int saw_payload = 0;
     int saw_alias = 0;
     int status;
@@ -467,66 +548,63 @@ static int test_hardlink_roundtrip(void)
     fileMetadata.ObjectId = 0x70010002ULL;
     fileMetadata.Mask |= VaFsMetadataMask_ObjectId;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create hardlink test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory for hardlink test");
-
-    status = vafs_directory_create_directory(root, "links", &dirMetadata, &links);
+    status = vafs_directory_builder_create_directory(root, "links", &dirMetadata, &links, NULL);
     TEST_ASSERT(status == 0, "Failed to create hardlink test directory");
 
-    status = vafs_directory_create_file(links, "payload", &fileMetadata, &file_handle);
+    status = vafs_directory_builder_create_file(links, "payload", &fileMetadata, &file_handle, &file_object);
     TEST_ASSERT(status == 0, "Failed to create hardlink target file");
 
-    status = vafs_file_write(file_handle, (void*)payload, strlen(payload));
+    status = write_builder_payload(file_handle, payload, strlen(payload));
     TEST_ASSERT(status == 0, "Failed to write hardlink test payload");
-    vafs_file_close(file_handle);
+    vafs_file_builder_close(file_handle);
     file_handle = NULL;
 
-    status = vafs_directory_create_hardlink(links, "payload_alias", fileMetadata.ObjectId);
+    status = vafs_directory_builder_link(links, "payload_alias", file_object);
     TEST_ASSERT(status == 0, "Failed to create hardlink alias");
 
-    vafs_directory_close(links);
+    vafs_directory_builder_close(links);
     links = NULL;
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen hardlink test image");
 
-    status = vafs_path_stat(vafs, "/links/payload", 1, &statbuf);
+    status = test_path_stat(vafs, "/links/payload", 1, &statbuf);
     TEST_ASSERT(status == 0, "Failed to stat hardlink target file");
     TEST_ASSERT(statbuf.Type == VaFsEntryType_File, "Hardlink target type should remain a file");
     TEST_ASSERT(statbuf.ObjectId == fileMetadata.ObjectId, "Hardlink target object id did not round-trip");
     TEST_ASSERT(statbuf.LinkCount == 2, "Hardlink target link count should be incremented");
     TEST_ASSERT(statbuf.Size == strlen(payload), "Hardlink target size did not round-trip");
 
-    status = vafs_path_stat(vafs, "/links/payload_alias", 1, &statbuf);
+    status = test_path_stat(vafs, "/links/payload_alias", 1, &statbuf);
     TEST_ASSERT(status == 0, "Failed to stat hardlink alias path");
     TEST_ASSERT(statbuf.Type == VaFsEntryType_File, "Hardlink alias path should resolve to file metadata");
     TEST_ASSERT(statbuf.ObjectId == fileMetadata.ObjectId, "Hardlink alias object id did not round-trip");
     TEST_ASSERT(statbuf.LinkCount == 2, "Hardlink alias link count should match shared target");
     TEST_ASSERT(statbuf.Size == strlen(payload), "Hardlink alias size did not round-trip");
 
-    status = vafs_directory_open(vafs, "/links", &reopened);
+    status = vafs_directory_reader_open(vafs, "/links", VaFsLookup_None, &reopened);
     TEST_ASSERT(status == 0, "Failed to reopen hardlink directory");
 
-    status = vafs_directory_open_file(reopened, "payload_alias", &file_handle);
+    status = vafs_directory_reader_open_object_in(reopened, "payload_alias", &alias_reader);
     TEST_ASSERT(status == 0, "Failed to open hardlink alias through directory lookup");
 
-    TEST_ASSERT(vafs_file_length(file_handle) == strlen(payload), "Hardlink alias length did not resolve to target file length");
+    TEST_ASSERT(vafs_object_reader_length(alias_reader) == strlen(payload), "Hardlink alias length did not resolve to target file length");
     memset(buffer, 0, sizeof(buffer));
-    read = vafs_file_read(file_handle, buffer, sizeof(buffer) - 1);
+    read = vafs_object_reader_read(alias_reader, buffer, sizeof(buffer) - 1);
     TEST_ASSERT(read == strlen(payload), "Hardlink alias read returned unexpected length");
     TEST_ASSERT(strcmp(buffer, payload) == 0, "Hardlink alias read returned unexpected payload");
-    vafs_file_close(file_handle);
-    file_handle = NULL;
+    vafs_object_reader_close(alias_reader);
+    alias_reader = NULL;
 
-    while (vafs_directory_read(reopened, &entry) == 0) {
+    while (vafs_directory_reader_next(reopened, &entry) == 0) {
         if (strcmp(entry.Name, "payload") == 0) {
             TEST_ASSERT(entry.Type == VaFsEntryType_File, "Enumerated hardlink target should remain a file entry");
             TEST_ASSERT(entry.ObjectId == fileMetadata.ObjectId, "Enumerated hardlink target object id did not round-trip");
@@ -541,9 +619,9 @@ static int test_hardlink_roundtrip(void)
     TEST_ASSERT(saw_payload, "Enumerated hardlink directory did not include target file");
     TEST_ASSERT(saw_alias, "Enumerated hardlink directory did not include alias entry");
 
-    vafs_directory_close(reopened);
+    vafs_directory_reader_close(reopened);
     reopened = NULL;
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Hardlinks resolve shared metadata while preserving alias entry type");
@@ -552,10 +630,13 @@ static int test_hardlink_roundtrip(void)
 static int test_xattr_roundtrip(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
-    struct VaFsDirectoryHandle* meta = NULL;
-    struct VaFsFileHandle* file_handle = NULL;
+    struct VaFsBuilderConfiguration config;
+    struct VaFsDirectoryBuilder* root = NULL;
+    struct VaFsDirectoryBuilder* meta = NULL;
+    struct VaFsFileBuilder* file_handle = NULL;
+    struct VaFsObjectBuilder* meta_object = NULL;
+    struct VaFsObjectBuilder* file_object = NULL;
+    struct VaFsObjectBuilder* peer_object = NULL;
     struct VaFsMetadata dirMetadata = metadata_for_mode(VaFsEntryType_Directory, 0755);
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     struct VaFsMetadata peerMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
@@ -572,100 +653,97 @@ static int test_xattr_roundtrip(void)
     peerMetadata.ObjectId = 0x73000012ULL;
     peerMetadata.Mask |= VaFsMetadataMask_ObjectId;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create xattr test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory for xattr test");
-
-    status = vafs_directory_create_directory(root, "meta", &dirMetadata, &meta);
+    status = vafs_directory_builder_create_directory(root, "meta", &dirMetadata, &meta, &meta_object);
     TEST_ASSERT(status == 0, "Failed to create xattr test directory");
 
-    status = vafs_directory_create_file(meta, "xattr_target", &fileMetadata, &file_handle);
+    status = vafs_directory_builder_create_file(meta, "xattr_target", &fileMetadata, &file_handle, &file_object);
     TEST_ASSERT(status == 0, "Failed to create xattr target file");
-    status = vafs_file_write(file_handle, (void*)"payload", strlen("payload"));
+    status = write_builder_payload(file_handle, "payload", strlen("payload"));
     TEST_ASSERT(status == 0, "Failed to write xattr target payload");
-    vafs_file_close(file_handle);
+    vafs_file_builder_close(file_handle);
     file_handle = NULL;
 
-    status = vafs_directory_create_file(meta, "xattr_peer", &peerMetadata, &file_handle);
+    status = vafs_directory_builder_create_file(meta, "xattr_peer", &peerMetadata, &file_handle, &peer_object);
     TEST_ASSERT(status == 0, "Failed to create xattr peer file");
-    vafs_file_close(file_handle);
+    vafs_file_builder_close(file_handle);
     file_handle = NULL;
 
-    status = vafs_directory_create_hardlink(meta, "xattr_alias", fileMetadata.ObjectId);
+    status = vafs_directory_builder_link(meta, "xattr_alias", file_object);
     TEST_ASSERT(status == 0, "Failed to create xattr hardlink alias");
 
-    status = vafs_path_setxattr(vafs, "/meta", "user.kind", "meta", strlen("meta"));
+    status = vafs_object_builder_setxattr(meta_object, "user.kind", "meta", strlen("meta"));
     TEST_ASSERT(status == 0, "Failed to set directory xattr");
 
-    status = vafs_path_setxattr(vafs, "/meta/xattr_target", "user.mime", "text/plain", strlen("text/plain"));
+    status = vafs_object_builder_setxattr(file_object, "user.mime", "text/plain", strlen("text/plain"));
     TEST_ASSERT(status == 0, "Failed to set file mime xattr");
-    status = vafs_path_setxattr(vafs, "/meta/xattr_target", "user.empty", NULL, 0);
+    status = vafs_object_builder_setxattr(file_object, "user.empty", NULL, 0);
     TEST_ASSERT(status == 0, "Failed to set empty file xattr");
 
-    status = vafs_path_setxattr(vafs, "/meta/xattr_peer", "user.mime", "text/plain", strlen("text/plain"));
+    status = vafs_object_builder_setxattr(peer_object, "user.mime", "text/plain", strlen("text/plain"));
     TEST_ASSERT(status == 0, "Failed to set peer mime xattr");
-    status = vafs_path_setxattr(vafs, "/meta/xattr_peer", "user.empty", NULL, 0);
+    status = vafs_object_builder_setxattr(peer_object, "user.empty", NULL, 0);
     TEST_ASSERT(status == 0, "Failed to set peer empty xattr");
 
-    vafs_directory_close(meta);
+    vafs_directory_builder_close(meta);
     meta = NULL;
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen xattr test image");
 
-    status = vafs_feature_query(vafs, &xattrGuid, &feature);
+    status = vafs_reader_query_feature(vafs, &xattrGuid, &feature);
     TEST_ASSERT(status == 0, "Failed to query xattr feature");
     TEST_ASSERT(((VaFsFeatureXattrs_t*)feature)->Count == 2, "Expected deduplicated xattr set count");
 
-    status = vafs_path_stat(vafs, "/meta", 1, &statbuf);
+    status = test_path_stat(vafs, "/meta", 1, &statbuf);
     TEST_ASSERT(status == 0, "Failed to stat xattr directory");
     TEST_ASSERT(statbuf.XattrCount == 1, "Directory xattr count did not round-trip");
 
-    status = vafs_path_stat(vafs, "/meta/xattr_target", 1, &statbuf);
+    status = test_path_stat(vafs, "/meta/xattr_target", 1, &statbuf);
     TEST_ASSERT(status == 0, "Failed to stat xattr target");
     TEST_ASSERT(statbuf.XattrCount == 2, "Target xattr count did not round-trip");
 
-    status = vafs_path_stat(vafs, "/meta/xattr_alias", 1, &statbuf);
+    status = test_path_stat(vafs, "/meta/xattr_alias", 1, &statbuf);
     TEST_ASSERT(status == 0, "Failed to stat xattr alias");
     TEST_ASSERT(statbuf.XattrCount == 2, "Hardlink alias should expose target xattr count");
 
-    status = vafs_path_listxattr(vafs, "/meta/xattr_target", NULL, 0, &bytesWritten);
+    status = test_path_listxattr(vafs, "/meta/xattr_target", 1, NULL, 0, &bytesWritten);
     TEST_ASSERT(status == 0, "Failed to query xattr list size");
     TEST_ASSERT(bytesWritten != 0, "Expected non-empty xattr list");
 
     memset(xattrList, 0, sizeof(xattrList));
-    status = vafs_path_listxattr(vafs, "/meta/xattr_target", xattrList, sizeof(xattrList), &bytesWritten);
+    status = test_path_listxattr(vafs, "/meta/xattr_target", 1, xattrList, sizeof(xattrList), &bytesWritten);
     TEST_ASSERT(status == 0, "Failed to list xattrs for target");
     TEST_ASSERT(xattr_list_contains(xattrList, bytesWritten, "user.mime"), "Target xattr list missing user.mime");
     TEST_ASSERT(xattr_list_contains(xattrList, bytesWritten, "user.empty"), "Target xattr list missing user.empty");
 
-    status = vafs_path_getxattr(vafs, "/meta/xattr_target", "user.mime", NULL, 0, &bytesWritten);
+    status = test_path_getxattr(vafs, "/meta/xattr_target", 1, "user.mime", NULL, 0, &bytesWritten);
     TEST_ASSERT(status == 0, "Failed to query mime xattr size");
     TEST_ASSERT(bytesWritten == strlen("text/plain"), "Mime xattr size did not round-trip");
 
     memset(valueBuffer, 0, sizeof(valueBuffer));
-    status = vafs_path_getxattr(vafs, "/meta/xattr_alias", "user.mime", valueBuffer, sizeof(valueBuffer), &bytesWritten);
+    status = test_path_getxattr(vafs, "/meta/xattr_alias", 1, "user.mime", valueBuffer, sizeof(valueBuffer), &bytesWritten);
     TEST_ASSERT(status == 0, "Failed to get mime xattr through hardlink alias");
     TEST_ASSERT(bytesWritten == strlen("text/plain"), "Alias mime xattr size did not round-trip");
     TEST_ASSERT(strcmp(valueBuffer, "text/plain") == 0, "Alias mime xattr value did not round-trip");
 
-    status = vafs_path_getxattr(vafs, "/meta/xattr_target", "user.empty", NULL, 0, &bytesWritten);
+    status = test_path_getxattr(vafs, "/meta/xattr_target", 1, "user.empty", NULL, 0, &bytesWritten);
     TEST_ASSERT(status == 0, "Failed to query empty xattr size");
     TEST_ASSERT(bytesWritten == 0, "Empty xattr size should round-trip as zero");
 
-    status = vafs_path_getxattr(vafs, "/meta", "user.kind", valueBuffer, sizeof(valueBuffer), &bytesWritten);
+    status = test_path_getxattr(vafs, "/meta", 1, "user.kind", valueBuffer, sizeof(valueBuffer), &bytesWritten);
     TEST_ASSERT(status == 0, "Failed to get directory xattr");
     TEST_ASSERT(bytesWritten == strlen("meta"), "Directory xattr size did not round-trip");
     TEST_ASSERT(memcmp(valueBuffer, "meta", bytesWritten) == 0, "Directory xattr value did not round-trip");
 
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Xattrs survive descriptor-stream sidecar round-trip");
@@ -674,9 +752,9 @@ static int test_xattr_roundtrip(void)
 static int test_root_xattr_roundtrip(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
-    struct VaFsFileHandle* file_handle = NULL;
+    struct VaFsBuilderConfiguration config;
+    struct VaFsDirectoryBuilder* root = NULL;
+    struct VaFsFileBuilder* file_handle = NULL;
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     struct VaFsMetadata statbuf;
     struct VaFsFeatureHeader* feature;
@@ -686,67 +764,54 @@ static int test_root_xattr_roundtrip(void)
     size_t bytesWritten = 0;
     int status;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create root xattr test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory for root xattr test");
-
-    status = vafs_directory_create_file(root, "child", &fileMetadata, &file_handle);
+    status = vafs_directory_builder_create_file(root, "child", &fileMetadata, &file_handle, NULL);
     TEST_ASSERT(status == 0, "Failed to create root child file");
-    status = vafs_file_write(file_handle, (void*)"root-child", strlen("root-child"));
+    status = write_builder_payload(file_handle, "root-child", strlen("root-child"));
     TEST_ASSERT(status == 0, "Failed to write root child payload");
-    vafs_file_close(file_handle);
+    vafs_file_builder_close(file_handle);
     file_handle = NULL;
 
-    status = vafs_path_setxattr(vafs, "/", "user.root", "init", strlen("init"));
+    status = vafs_object_builder_setxattr(root_builder_object(root), "user.root", "init", strlen("init"));
     TEST_ASSERT(status == 0, "Failed to set root xattr");
 
-    status = vafs_path_stat(vafs, "/", 1, &statbuf);
-    TEST_ASSERT(status == 0, "Failed to stat root while writing");
-    TEST_ASSERT(statbuf.XattrCount == 1, "Root xattr count should update immediately in write mode");
+    TEST_ASSERT(root->Directory->Stat.XattrCount == 1, "Root xattr count should update immediately in write mode");
 
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen root xattr test image");
 
-    status = vafs_feature_query(vafs, &xattrGuid, &feature);
+    status = vafs_reader_query_feature(vafs, &xattrGuid, &feature);
     TEST_ASSERT(status == 0, "Failed to query root xattr feature");
     TEST_ASSERT(((VaFsFeatureXattrs_t*)feature)->Count == 1, "Expected one root xattr set in feature table");
 
-    status = vafs_path_stat(vafs, "/", 1, &statbuf);
+    status = test_path_stat(vafs, "/", 1, &statbuf);
     TEST_ASSERT(status == 0, "Failed to stat root after reopen");
     TEST_ASSERT(statbuf.XattrCount == 1, "Root xattr count did not round-trip");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to reopen root directory handle");
-    status = vafs_directory_stat(root, &statbuf);
-    TEST_ASSERT(status == 0, "Failed to stat root through directory handle");
-    TEST_ASSERT(statbuf.XattrCount == 1, "Root handle stat should expose persisted xattr count");
-
-    status = vafs_path_listxattr(vafs, "/", NULL, 0, &bytesWritten);
+    status = test_path_listxattr(vafs, "/", 1, NULL, 0, &bytesWritten);
     TEST_ASSERT(status == 0, "Failed to query root xattr list size");
     TEST_ASSERT(bytesWritten != 0, "Expected non-empty root xattr list");
 
     memset(xattrList, 0, sizeof(xattrList));
-    status = vafs_path_listxattr(vafs, "/", xattrList, sizeof(xattrList), &bytesWritten);
+    status = test_path_listxattr(vafs, "/", 1, xattrList, sizeof(xattrList), &bytesWritten);
     TEST_ASSERT(status == 0, "Failed to list root xattrs");
     TEST_ASSERT(xattr_list_contains(xattrList, bytesWritten, "user.root"), "Root xattr list missing user.root");
 
     memset(valueBuffer, 0, sizeof(valueBuffer));
-    status = vafs_path_getxattr(vafs, "/", "user.root", valueBuffer, sizeof(valueBuffer), &bytesWritten);
+    status = test_path_getxattr(vafs, "/", 1, "user.root", valueBuffer, sizeof(valueBuffer), &bytesWritten);
     TEST_ASSERT(status == 0, "Failed to get root xattr");
     TEST_ASSERT(bytesWritten == strlen("init"), "Root xattr size did not round-trip");
     TEST_ASSERT(memcmp(valueBuffer, "init", bytesWritten) == 0, "Root xattr value did not round-trip");
 
-    vafs_directory_close(root);
-    root = NULL;
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Root xattrs survive a real persisted root descriptor");
@@ -755,10 +820,12 @@ static int test_root_xattr_roundtrip(void)
 static int test_symlink_xattr_nofollow_roundtrip(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
-    struct VaFsDirectoryHandle* meta = NULL;
-    struct VaFsFileHandle* file_handle = NULL;
+    struct VaFsBuilderConfiguration config;
+    struct VaFsDirectoryBuilder* root = NULL;
+    struct VaFsDirectoryBuilder* meta = NULL;
+    struct VaFsFileBuilder* file_handle = NULL;
+    struct VaFsObjectBuilder* target_object = NULL;
+    struct VaFsObjectBuilder* symlink_object = NULL;
     struct VaFsMetadata dirMetadata = metadata_for_mode(VaFsEntryType_Directory, 0755);
     struct VaFsMetadata fileMetadata = metadata_for_mode(VaFsEntryType_File, 0644);
     struct VaFsMetadata symlinkMetadata = metadata_for_mode(VaFsEntryType_Symlink, 0777);
@@ -768,66 +835,63 @@ static int test_symlink_xattr_nofollow_roundtrip(void)
     size_t bytesWritten = 0;
     int status;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &root);
     TEST_ASSERT(status == 0, "Failed to create symlink xattr test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory for symlink xattr test");
-
-    status = vafs_directory_create_directory(root, "meta", &dirMetadata, &meta);
+    status = vafs_directory_builder_create_directory(root, "meta", &dirMetadata, &meta, NULL);
     TEST_ASSERT(status == 0, "Failed to create symlink xattr test directory");
 
-    status = vafs_directory_create_file(meta, "target", &fileMetadata, &file_handle);
+    status = vafs_directory_builder_create_file(meta, "target", &fileMetadata, &file_handle, &target_object);
     TEST_ASSERT(status == 0, "Failed to create symlink xattr target file");
-    status = vafs_file_write(file_handle, (void*)"payload", strlen("payload"));
+    status = write_builder_payload(file_handle, "payload", strlen("payload"));
     TEST_ASSERT(status == 0, "Failed to write symlink xattr target payload");
-    vafs_file_close(file_handle);
+    vafs_file_builder_close(file_handle);
     file_handle = NULL;
 
-    status = vafs_directory_create_symlink(meta, "link", "/meta/target", &symlinkMetadata);
+    status = vafs_directory_builder_create_symlink(meta, "link", "/meta/target", &symlinkMetadata, &symlink_object);
     TEST_ASSERT(status == 0, "Failed to create symlink xattr test link");
 
-    status = vafs_path_setxattr(vafs, "/meta/target", "user.target", "file", strlen("file"));
+    status = vafs_object_builder_setxattr(target_object, "user.target", "file", strlen("file"));
     TEST_ASSERT(status == 0, "Failed to set target xattr");
 
-    status = __vafs_path_setxattr(vafs, "/meta/link", 0, "user.link", "symlink", strlen("symlink"));
+    status = vafs_object_builder_setxattr(symlink_object, "user.link", "symlink", strlen("symlink"));
     TEST_ASSERT(status == 0, "Failed to set symlink-object xattr");
 
-    vafs_directory_close(meta);
+    vafs_directory_builder_close(meta);
     meta = NULL;
-    vafs_directory_close(root);
+    vafs_directory_builder_close(root);
     root = NULL;
-    vafs_close(vafs);
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen symlink xattr test image");
 
-    status = vafs_path_stat(vafs, "/meta/link", 0, &statbuf);
+    status = test_path_stat(vafs, "/meta/link", 0, &statbuf);
     TEST_ASSERT(status == 0, "Failed to stat symlink path in nofollow mode");
     TEST_ASSERT(statbuf.Type == VaFsEntryType_Symlink, "Nofollow stat should preserve the symlink entry type");
     TEST_ASSERT(statbuf.XattrCount == 1, "Nofollow stat should expose symlink-object xattrs");
 
     memset(valueBuffer, 0, sizeof(valueBuffer));
-    status = vafs_path_getxattr(vafs, "/meta/link", "user.target", valueBuffer, sizeof(valueBuffer), &bytesWritten);
+    status = test_path_getxattr(vafs, "/meta/link", 1, "user.target", valueBuffer, sizeof(valueBuffer), &bytesWritten);
     TEST_ASSERT(status == 0, "Failed to resolve target xattr through public symlink path");
     TEST_ASSERT(bytesWritten == strlen("file"), "Follow-mode symlink xattr size did not round-trip");
     TEST_ASSERT(memcmp(valueBuffer, "file", bytesWritten) == 0, "Follow-mode symlink xattr value did not round-trip");
 
     memset(xattrList, 0, sizeof(xattrList));
-    status = __vafs_path_listxattr(vafs, "/meta/link", 0, xattrList, sizeof(xattrList), &bytesWritten);
+    status = test_path_listxattr(vafs, "/meta/link", 0, xattrList, sizeof(xattrList), &bytesWritten);
     TEST_ASSERT(status == 0, "Failed to list symlink-object xattrs in nofollow mode");
     TEST_ASSERT(xattr_list_contains(xattrList, bytesWritten, "user.link"), "Nofollow xattr list missing symlink-object entry");
     TEST_ASSERT(!xattr_list_contains(xattrList, bytesWritten, "user.target"), "Nofollow xattr list should not include target xattrs");
 
     memset(valueBuffer, 0, sizeof(valueBuffer));
-    status = __vafs_path_getxattr(vafs, "/meta/link", 0, "user.link", valueBuffer, sizeof(valueBuffer), &bytesWritten);
+    status = test_path_getxattr(vafs, "/meta/link", 0, "user.link", valueBuffer, sizeof(valueBuffer), &bytesWritten);
     TEST_ASSERT(status == 0, "Failed to read symlink-object xattr in nofollow mode");
     TEST_ASSERT(bytesWritten == strlen("symlink"), "Nofollow symlink xattr size did not round-trip");
     TEST_ASSERT(memcmp(valueBuffer, "symlink", bytesWritten) == 0, "Nofollow symlink xattr value did not round-trip");
 
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Symlink-object xattrs stay distinct from target xattrs in nofollow mode");
@@ -836,12 +900,17 @@ static int test_symlink_xattr_nofollow_roundtrip(void)
 static int test_wide_directory_lookup(void)
 {
     struct VaFs* vafs = NULL;
-    struct VaFsConfiguration config;
-    struct VaFsDirectoryHandle* root = NULL;
-    struct VaFsDirectoryHandle* small_dir = NULL;
-    struct VaFsDirectoryHandle* large_dir = NULL;
-    struct VaFsDirectoryHandle* nested = NULL;
-    struct VaFsFileHandle* file_handle = NULL;
+    struct VaFsBuilderConfiguration config;
+    struct VaFsDirectoryBuilder* rootBuilder = NULL;
+    struct VaFsDirectoryBuilder* smallBuilder = NULL;
+    struct VaFsDirectoryBuilder* largeBuilder = NULL;
+    struct VaFsDirectoryBuilder* nestedBuilder = NULL;
+    struct VaFsDirectoryReader* root = NULL;
+    struct VaFsDirectoryReader* small_dir = NULL;
+    struct VaFsDirectoryReader* large_dir = NULL;
+    struct VaFsDirectoryReader* nested = NULL;
+    struct VaFsFileBuilder* file_builder = NULL;
+    struct VaFsObjectReader* object_reader = NULL;
     struct VaFsDirectoryEntry* small_dir_entry = NULL;
     struct VaFsDirectoryEntry* large_dir_entry = NULL;
     struct VaFsMetadata statbuf;
@@ -862,77 +931,74 @@ static int test_wide_directory_lookup(void)
     int status;
     int i;
 
-    vafs_config_initialize(&config);
-    status = vafs_create(TEST_IMAGE_PATH, &config, &vafs);
+    vafs_builder_config_initialize(&config);
+    status = vafs_builder_new(TEST_IMAGE_PATH, &config, &vafs, &rootBuilder);
     TEST_ASSERT(status == 0, "Failed to create test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
-    TEST_ASSERT(status == 0, "Failed to open root directory");
-
-    status = vafs_directory_create_directory(root, "small_dir", &dirMetadata, &small_dir);
+    status = vafs_directory_builder_create_directory(rootBuilder, "small_dir", &dirMetadata, &smallBuilder, NULL);
     TEST_ASSERT(status == 0, "Failed to create small directory");
 
-    status = vafs_directory_create_directory(root, "large_dir", &dirMetadata, &large_dir);
+    status = vafs_directory_builder_create_directory(rootBuilder, "large_dir", &dirMetadata, &largeBuilder, NULL);
     TEST_ASSERT(status == 0, "Failed to create large directory");
 
     // Insert names in reverse order so lookup correctness does not depend on insertion order.
     for (i = SMALL_DIR_ENTRY_COUNT - 1; i >= 0; i--) {
         make_prefixed_entry_name(name, sizeof(name), "small", i);
-        status = vafs_directory_create_file(small_dir, name, &fileMetadata, &file_handle);
+        status = vafs_directory_builder_create_file(smallBuilder, name, &fileMetadata, &file_builder, NULL);
         TEST_ASSERT(status == 0, "Failed to create small-directory file entry");
 
         if (i == 0) {
             const char* content = "small-directory-data";
-            status = vafs_file_write(file_handle, (void*)content, strlen(content));
+            status = write_builder_payload(file_builder, content, strlen(content));
             TEST_ASSERT(status == 0, "Failed to write small-directory file payload");
         }
 
-        vafs_file_close(file_handle);
-        file_handle = NULL;
+        vafs_file_builder_close(file_builder);
+        file_builder = NULL;
     }
 
     for (i = LARGE_DIR_ENTRY_COUNT - 1; i >= 0; i--) {
         make_entry_name(name, sizeof(name), i);
-        status = vafs_directory_create_file(large_dir, name, &fileMetadata, &file_handle);
+        status = vafs_directory_builder_create_file(largeBuilder, name, &fileMetadata, &file_builder, NULL);
         TEST_ASSERT(status == 0, "Failed to create file entry");
 
         if (i == 0) {
             // Keep one file non-empty so the test image produces a valid data stream on close.
             const char* content = "wide-directory-data";
-            status = vafs_file_write(file_handle, (void*)content, strlen(content));
+            status = write_builder_payload(file_builder, content, strlen(content));
             TEST_ASSERT(status == 0, "Failed to write file payload");
         }
 
-        vafs_file_close(file_handle);
-        file_handle = NULL;
+        vafs_file_builder_close(file_builder);
+        file_builder = NULL;
     }
 
-    status = vafs_directory_create_directory(root, "nested_dir", &dirMetadata, &nested);
+    status = vafs_directory_builder_create_directory(rootBuilder, "nested_dir", &dirMetadata, &nestedBuilder, NULL);
     TEST_ASSERT(status == 0, "Failed to create nested directory");
 
-    status = vafs_directory_create_file(nested, "inner_file", &fileMetadata, &file_handle);
+    status = vafs_directory_builder_create_file(nestedBuilder, "inner_file", &fileMetadata, &file_builder, NULL);
     TEST_ASSERT(status == 0, "Failed to create nested file");
-    vafs_file_close(file_handle);
-    file_handle = NULL;
+    vafs_file_builder_close(file_builder);
+    file_builder = NULL;
 
-    vafs_directory_close(large_dir);
-    large_dir = NULL;
-    vafs_directory_close(small_dir);
-    small_dir = NULL;
-    vafs_directory_close(nested);
-    nested = NULL;
-    vafs_directory_close(root);
-    root = NULL;
-    vafs_close(vafs);
+    vafs_directory_builder_close(largeBuilder);
+    largeBuilder = NULL;
+    vafs_directory_builder_close(smallBuilder);
+    smallBuilder = NULL;
+    vafs_directory_builder_close(nestedBuilder);
+    nestedBuilder = NULL;
+    vafs_directory_builder_close(rootBuilder);
+    rootBuilder = NULL;
+    vafs_builder_close(vafs);
     vafs = NULL;
 
-    status = vafs_open_file(TEST_IMAGE_PATH, &vafs);
+    status = vafs_reader_open_file(TEST_IMAGE_PATH, NULL, &vafs);
     TEST_ASSERT(status == 0, "Failed to reopen test image");
 
-    status = vafs_directory_open(vafs, "/", &root);
+    status = vafs_directory_reader_open(vafs, "/", VaFsLookup_None, &root);
     TEST_ASSERT(status == 0, "Failed to reopen root directory");
 
-    while (vafs_directory_read(root, &entry) == 0) {
+    while (vafs_directory_reader_next(root, &entry) == 0) {
         if (strcmp(entry.Name, "small_dir") == 0 || strcmp(entry.Name, "large_dir") == 0 || strcmp(entry.Name, "nested_dir") == 0) {
             saw_nested = 1;
         }
@@ -942,7 +1008,7 @@ static int test_wide_directory_lookup(void)
     TEST_ASSERT(read_count == 3, "Unexpected root directory entry count");
     TEST_ASSERT(saw_nested, "Missing expected root directories during enumeration");
 
-    status = vafs_directory_open(vafs, "/small_dir", &small_dir);
+    status = vafs_directory_reader_open(vafs, "/small_dir", VaFsLookup_None, &small_dir);
     TEST_ASSERT(status == 0, "Failed to reopen small directory");
 
     status = assert_repeated_path_stat(vafs, "/small_dir", S_IFDIR | 0755, 0, "Failed to stat small directory through path lookup");
@@ -956,7 +1022,7 @@ static int test_wide_directory_lookup(void)
     TEST_ASSERT(lookup_cache_has_state(vafs, vafs->RootDirectory, "small_dir", VaFsLookupCacheState_Hit), "Small directory lookup should be cached as a hit");
     TEST_ASSERT(lookup_cache_has_state(vafs, small_dir_entry->Directory, "small_0000", VaFsLookupCacheState_Hit), "Small directory file lookup should be cached as a hit");
 
-    while (vafs_directory_read(small_dir, &entry) == 0) {
+    while (vafs_directory_reader_next(small_dir, &entry) == 0) {
         if (strcmp(entry.Name, "small_0000") == 0) {
             saw_small_first = 1;
         } else if (strcmp(entry.Name, "small_0032") == 0) {
@@ -970,25 +1036,25 @@ static int test_wide_directory_lookup(void)
     TEST_ASSERT(saw_small_middle, "Missing middle small-directory entry during enumeration");
     TEST_ASSERT(saw_small_last, "Missing last small-directory entry during enumeration");
 
-    status = vafs_directory_open_file(small_dir, "small_0000", &file_handle);
+    status = vafs_directory_reader_open_object_in(small_dir, "small_0000", &object_reader);
     TEST_ASSERT(status == 0, "Failed to open first small-directory entry through lookup");
-    vafs_file_close(file_handle);
-    file_handle = NULL;
+    vafs_object_reader_close(object_reader);
+    object_reader = NULL;
 
-    status = vafs_directory_open_file(small_dir, "small_0032", &file_handle);
+    status = vafs_directory_reader_open_object_in(small_dir, "small_0032", &object_reader);
     TEST_ASSERT(status == 0, "Failed to open middle small-directory entry through lookup");
-    vafs_file_close(file_handle);
-    file_handle = NULL;
+    vafs_object_reader_close(object_reader);
+    object_reader = NULL;
 
-    status = vafs_directory_open_file(small_dir, "small_0063", &file_handle);
+    status = vafs_directory_reader_open_object_in(small_dir, "small_0063", &object_reader);
     TEST_ASSERT(status == 0, "Failed to open last small-directory entry through lookup");
-    vafs_file_close(file_handle);
-    file_handle = NULL;
+    vafs_object_reader_close(object_reader);
+    object_reader = NULL;
 
-    vafs_directory_close(small_dir);
+    vafs_directory_reader_close(small_dir);
     small_dir = NULL;
 
-    status = vafs_directory_open(vafs, "/large_dir", &large_dir);
+    status = vafs_directory_reader_open(vafs, "/large_dir", VaFsLookup_None, &large_dir);
     TEST_ASSERT(status == 0, "Failed to reopen large directory");
 
     status = assert_repeated_path_stat(vafs, "/large_dir", S_IFDIR | 0755, 0, "Failed to stat large directory through path lookup");
@@ -1000,9 +1066,9 @@ static int test_wide_directory_lookup(void)
     large_dir_entry = __vafs_directory_find_entry(vafs->RootDirectory, "large_dir");
     TEST_ASSERT(large_dir_entry != NULL, "Failed to resolve large directory for cache assertions");
 
-    status = vafs_path_stat(vafs, "/large_dir/missing_entry", 1, &statbuf);
+    status = test_path_stat(vafs, "/large_dir/missing_entry", 1, &statbuf);
     TEST_ASSERT(status != 0 && errno == ENOENT, "Missing large-directory entry should return ENOENT");
-    status = vafs_path_stat(vafs, "/large_dir/missing_entry", 1, &statbuf);
+    status = test_path_stat(vafs, "/large_dir/missing_entry", 1, &statbuf);
     TEST_ASSERT(status != 0 && errno == ENOENT, "Repeated missing large-directory entry should return ENOENT");
     TEST_ASSERT(lookup_cache_has_state(vafs, large_dir_entry->Directory, "missing_entry", VaFsLookupCacheState_Miss), "Missing entry should be cached as a miss");
 
@@ -1011,23 +1077,23 @@ static int test_wide_directory_lookup(void)
 
     for (i = 0; i < VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY; i++) {
         snprintf(path_buffer, sizeof(path_buffer), "/large_dir/%s", collision_names[i]);
-        status = vafs_path_stat(vafs, path_buffer, 1, &statbuf);
+        status = test_path_stat(vafs, path_buffer, 1, &statbuf);
         TEST_ASSERT(status == 0, "Failed to warm lookup-cache eviction test entry");
     }
 
     snprintf(path_buffer, sizeof(path_buffer), "/large_dir/%s", collision_names[0]);
-    status = vafs_path_stat(vafs, path_buffer, 1, &statbuf);
+    status = test_path_stat(vafs, path_buffer, 1, &statbuf);
     TEST_ASSERT(status == 0, "Failed to refresh most-recent lookup-cache entry");
 
     snprintf(path_buffer, sizeof(path_buffer), "/large_dir/%s", collision_names[VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY]);
-    status = vafs_path_stat(vafs, path_buffer, 1, &statbuf);
+    status = test_path_stat(vafs, path_buffer, 1, &statbuf);
     TEST_ASSERT(status == 0, "Failed to trigger lookup-cache eviction");
 
     TEST_ASSERT(lookup_cache_has_state(vafs, large_dir_entry->Directory, collision_names[0], VaFsLookupCacheState_Hit), "Most-recent lookup-cache entry should remain resident after eviction");
     TEST_ASSERT(!lookup_cache_has_name(vafs, large_dir_entry->Directory, collision_names[1]), "Least-recent lookup-cache entry should be evicted");
     TEST_ASSERT(lookup_cache_has_state(vafs, large_dir_entry->Directory, collision_names[VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY], VaFsLookupCacheState_Hit), "Newest lookup-cache entry should be resident after eviction");
 
-    while (vafs_directory_read(large_dir, &entry) == 0) {
+    while (vafs_directory_reader_next(large_dir, &entry) == 0) {
         if (strcmp(entry.Name, "entry_0000") == 0) {
             saw_large_first = 1;
         } else if (strcmp(entry.Name, "entry_0512") == 0) {
@@ -1041,41 +1107,41 @@ static int test_wide_directory_lookup(void)
     TEST_ASSERT(saw_large_middle, "Missing middle large-directory entry during enumeration");
     TEST_ASSERT(saw_large_last, "Missing last large-directory entry during enumeration");
 
-    status = vafs_directory_open_file(large_dir, "entry_0000", &file_handle);
+    status = vafs_directory_reader_open_object_in(large_dir, "entry_0000", &object_reader);
     TEST_ASSERT(status == 0, "Failed to open first large-directory entry through lookup");
-    vafs_file_close(file_handle);
-    file_handle = NULL;
+    vafs_object_reader_close(object_reader);
+    object_reader = NULL;
 
-    status = vafs_directory_open_file(large_dir, "entry_0512", &file_handle);
+    status = vafs_directory_reader_open_object_in(large_dir, "entry_0512", &object_reader);
     TEST_ASSERT(status == 0, "Failed to open middle large-directory entry through lookup");
-    vafs_file_close(file_handle);
-    file_handle = NULL;
+    vafs_object_reader_close(object_reader);
+    object_reader = NULL;
 
-    status = vafs_directory_open_file(large_dir, "entry_1023", &file_handle);
+    status = vafs_directory_reader_open_object_in(large_dir, "entry_1023", &object_reader);
     TEST_ASSERT(status == 0, "Failed to open last large-directory entry through lookup");
-    vafs_file_close(file_handle);
-    file_handle = NULL;
+    vafs_object_reader_close(object_reader);
+    object_reader = NULL;
 
-    status = vafs_file_open(vafs, "/nested_dir/inner_file", &file_handle);
+    status = vafs_object_reader_open(vafs, "/nested_dir/inner_file", VaFsLookup_None, &object_reader);
     TEST_ASSERT(status == 0, "Failed to open nested file through path lookup");
-    vafs_file_close(file_handle);
-    file_handle = NULL;
+    vafs_object_reader_close(object_reader);
+    object_reader = NULL;
 
     status = assert_repeated_path_stat(vafs, "/nested_dir/inner_file", S_IFREG | 0644, 0, "Failed to stat nested file through path lookup");
     TEST_ASSERT(status == 0, "Repeated nested-file path stat failed");
 
-    status = vafs_directory_open(vafs, "/nested_dir", &nested);
+    status = vafs_directory_reader_open(vafs, "/nested_dir", VaFsLookup_None, &nested);
     TEST_ASSERT(status == 0, "Failed to open nested directory through path lookup");
-    vafs_directory_close(nested);
+    vafs_directory_reader_close(nested);
     nested = NULL;
 
-    status = vafs_directory_open_file(large_dir, "missing_entry", &file_handle);
+    status = vafs_directory_reader_open_object_in(large_dir, "missing_entry", &object_reader);
     TEST_ASSERT(status != 0 && errno == ENOENT, "Missing entry should return ENOENT");
 
-    vafs_directory_close(large_dir);
+    vafs_directory_reader_close(large_dir);
     large_dir = NULL;
-    vafs_directory_close(root);
-    vafs_close(vafs);
+    vafs_directory_reader_close(root);
+    vafs_reader_close(vafs);
     remove(TEST_IMAGE_PATH);
 
     TEST_PASS("Directory lookup handles both threshold fallback paths correctly");

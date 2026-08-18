@@ -14,29 +14,23 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  *
- * Vali Initrd Filesystem
- * - Contains the implementation of the Vali Initrd Filesystem.
+ * Vali Container Filesystem
+ * - Contains the implementation of the Vali Container Filesystem.
  *   This filesystem is used to store the initrd of the kernel.
  */
 
 #include <errno.h>
-#include "private.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <vafs/file.h>
 
-enum VaFsFileState {
-    VaFsFileState_Open,
-    VaFsFileState_Read,
-    VaFsFileState_Write
-};
+#include "../core/core.h"
+#include "../stream/stream.h"
+#include "directory.h"
+#include "object.h"
+#include "path.h"
+#include "xattr.h"
 
-struct VaFsFileHandle {
-    struct VaFsFile*   File;
-    enum VaFsFileState State;
-    struct VaFsStreamReader* Reader;
-    uint32_t           Position;
-};
 
 static int __ensure_file_reader(
     struct VaFsFileHandle* handle)
@@ -73,10 +67,6 @@ int __vafs_file_open_internal(
         return -1;
     }
 
-    if (__vafs_ensure_root_open(vafs) != 0) {
-        return -1;
-    }
-
     // Resolve the path one token at a time until it terminates in a file.
     // Directory edges advance traversal, symlinks recurse with a depth budget,
     // and regular files must be the final component.
@@ -94,6 +84,11 @@ int __vafs_file_open_internal(
         return -1;
     }
 
+    // Path resolution walks one directory boundary at a time. Each iteration
+    // resolves a single token, then either descends, follows a symlink, or
+    // terminates on the final file object. Keeping these phases explicit makes
+    // the hardlink/symlink semantics easier to review than a single monolithic
+    // block of nested conditionals.
     currentDirectory = vafs->RootDirectory;
     do {
         const char* previousPath = remainingPath;
@@ -105,6 +100,12 @@ int __vafs_file_open_internal(
         }
         remainingPath += charsConsumed;
 
+        // Flow for each path component:
+        //   1. Look up the name in the current directory.
+        //   2. Normalize hardlink aliases to their canonical object.
+        //   3. If we are descending, advance the directory pointer.
+        //   4. If we hit a symlink, rebuild the remaining path and recurse.
+        //   5. If the remaining path is exhausted, the object must be the file.
         entry = __vafs_directory_find_entry(currentDirectory, token);
         if (entry == NULL) {
             // Path resolution stops on the first missing component.

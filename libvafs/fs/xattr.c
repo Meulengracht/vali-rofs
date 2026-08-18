@@ -14,16 +14,26 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  *
- * Vali Initrd Filesystem
- * - Contains the implementation of the Vali Initrd Filesystem.
+ * Vali Container Filesystem
+ * - Contains the implementation of the Vali Container Filesystem.
  *   This filesystem is used to store the initrd of the kernel.
  */
 
 #include <errno.h>
-#include "private.h"
 #include <stdlib.h>
 #include <string.h>
-#include <vafs/xattr.h>
+
+// Both reader and builder code is in this file, so we include
+// both here.
+#include <vafs/reader.h>
+#include <vafs/builder.h>
+
+#include "../core/core.h"
+#include "../stream/stream.h"
+#include "directory.h"
+#include "object.h"
+#include "path.h"
+#include "xattr.h"
 
 static struct VaFsGuid g_xattrGuid = VA_FS_FEATURE_XATTRS;
 
@@ -69,6 +79,38 @@ void __vafs_xattr_set_destroy(
     free(set);
 }
 
+int __vafs_xattr_store_create(
+    struct VaFs* vafs)
+{
+    if (vafs == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (vafs->XattrStore != NULL) {
+        return 0;
+    }
+
+    vafs->XattrStore = calloc(1, sizeof(struct VaFsXattrStore));
+    if (vafs->XattrStore == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    return 0;
+}
+
+void __vafs_xattr_store_reset(
+    struct VaFs* vafs)
+{
+    if (vafs == NULL || vafs->XattrStore == NULL) {
+        return;
+    }
+
+    free(vafs->XattrStore->Positions);
+    free(vafs->XattrStore->Sets);
+    memset(vafs->XattrStore, 0, sizeof(struct VaFsXattrStore));
+}
+
 void __vafs_xattr_store_destroy(
     struct VaFs* vafs)
 {
@@ -76,9 +118,9 @@ void __vafs_xattr_store_destroy(
         return;
     }
 
-    free(vafs->XattrStore.Positions);
-    free(vafs->XattrStore.Sets);
-    memset(&vafs->XattrStore, 0, sizeof(struct VaFsXattrStore));
+    __vafs_xattr_store_reset(vafs);
+    free(vafs->XattrStore);
+    vafs->XattrStore = NULL;
 }
 
 // Xattr operations follow resolved objects instead of path spellings, so the
@@ -185,10 +227,6 @@ static int __resolve_xattr_entry(
         return -1;
     }
 
-    if (__vafs_ensure_root_open(vafs) != 0) {
-        return -1;
-    }
-
     if (__vafs_is_root_path(path)) {
         // Xattr helpers are entry-centric, so root gets a transient directory
         // entry wrapper instead of a separate root-only access path.
@@ -230,6 +268,10 @@ static int __resolve_xattr_entry_internal(
         return -1;
     }
 
+    // xattr resolution follows the same tree walk as regular file access, but
+    // it has one extra rule: a symlink can be treated as the link object itself
+    // when callers request non-following semantics. That distinction is why the
+    // traversal here keeps the final "terminal object" decision explicit.
     currentDirectory = vafs->RootDirectory;
     do {
         const char* previousPath = remainingPath;
@@ -451,25 +493,25 @@ static int __xattr_registry_add(
 
     // The cold section stores unique sets rather than per-entry copies so the
     // hot descriptors only need a compact index and repeated metadata stays shared.
-    for (index = 0; index < vafs->XattrStore.Count; index++) {
-        if (__xattr_sets_equal(vafs->XattrStore.Sets[index], set)) {
+    for (index = 0; index < vafs->XattrStore->Count; index++) {
+        if (__xattr_sets_equal(vafs->XattrStore->Sets[index], set)) {
             set->Index = index;
             return 0;
         }
     }
 
     sets = realloc(
-        vafs->XattrStore.Sets,
-        sizeof(struct VaFsXattrSet*) * (vafs->XattrStore.Count + 1)
+        vafs->XattrStore->Sets,
+        sizeof(struct VaFsXattrSet*) * (vafs->XattrStore->Count + 1)
     );
     if (sets == NULL) {
         errno = ENOMEM;
         return -1;
     }
 
-    vafs->XattrStore.Sets = sets;
-    set->Index = vafs->XattrStore.Count;
-    vafs->XattrStore.Sets[vafs->XattrStore.Count++] = set;
+    vafs->XattrStore->Sets = sets;
+    set->Index = vafs->XattrStore->Count;
+    vafs->XattrStore->Sets[vafs->XattrStore->Count++] = set;
     return 0;
 }
 
@@ -534,7 +576,7 @@ int __vafs_xattr_prepare_write(
         return -1;
     }
 
-    __vafs_xattr_store_destroy(vafs);
+    __vafs_xattr_store_reset(vafs);
 
     // Xattr sets are assigned stable section-local indices up front so the hot
     // descriptors can point at them before the colder section is serialized.
@@ -602,7 +644,7 @@ int __vafs_xattr_write_section(
         return -1;
     }
 
-    if (vafs->XattrStore.Count == 0) {
+    if (vafs->XattrStore->Count == 0) {
         return 0;
     }
 
@@ -613,12 +655,12 @@ int __vafs_xattr_write_section(
         return status;
     }
 
-    vafs->XattrStore.Present = 1;
-    vafs->XattrStore.Start.Index = block;
-    vafs->XattrStore.Start.Offset = offset;
+    vafs->XattrStore->Present = 1;
+    vafs->XattrStore->Start.Index = block;
+    vafs->XattrStore->Start.Offset = offset;
 
-    for (index = 0; index < vafs->XattrStore.Count; index++) {
-        status = __write_xattr_set(vafs, vafs->XattrStore.Sets[index]);
+    for (index = 0; index < vafs->XattrStore->Count; index++) {
+        status = __write_xattr_set(vafs, vafs->XattrStore->Sets[index]);
         if (status != 0) {
             return status;
         }
@@ -628,10 +670,10 @@ int __vafs_xattr_write_section(
     // of truth that tells readers where the indexed cold records begin.
     memcpy(&feature.Header.Guid, &g_xattrGuid, sizeof(struct VaFsGuid));
     feature.Header.Length = sizeof(VaFsFeatureXattrs_t);
-    feature.DescriptorIndex = vafs->XattrStore.Start.Index;
-    feature.DescriptorOffset = vafs->XattrStore.Start.Offset;
-    feature.Count = vafs->XattrStore.Count;
-    return vafs_feature_add(vafs, &feature.Header);
+    feature.DescriptorIndex = vafs->XattrStore->Start.Index;
+    feature.DescriptorOffset = vafs->XattrStore->Start.Offset;
+    feature.Count = vafs->XattrStore->Count;
+    return vafs_builder_add_feature(vafs, &feature.Header);
 }
 
 static int __ensure_xattr_feature(
@@ -641,11 +683,11 @@ static int __ensure_xattr_feature(
     VaFsFeatureXattrs_t*      xattrFeature;
     int                       status;
 
-    if (vafs->XattrStore.Present || vafs->XattrStore.Count != 0) {
+    if (vafs->XattrStore->Present || vafs->XattrStore->Count != 0) {
         return 0;
     }
 
-    status = vafs_feature_query(vafs, &g_xattrGuid, &feature);
+    status = vafs_reader_query_feature(vafs, &g_xattrGuid, &feature);
     if (status != 0) {
         // Images that predate the feature simply have no persisted xattrs.
         if (errno == ENOENT) {
@@ -660,10 +702,10 @@ static int __ensure_xattr_feature(
     }
 
     xattrFeature = (VaFsFeatureXattrs_t*)feature;
-    vafs->XattrStore.Present = 1;
-    vafs->XattrStore.Start.Index = xattrFeature->DescriptorIndex;
-    vafs->XattrStore.Start.Offset = xattrFeature->DescriptorOffset;
-    vafs->XattrStore.Count = xattrFeature->Count;
+    vafs->XattrStore->Present = 1;
+    vafs->XattrStore->Start.Index = xattrFeature->DescriptorIndex;
+    vafs->XattrStore->Start.Offset = xattrFeature->DescriptorOffset;
+    vafs->XattrStore->Count = xattrFeature->Count;
     return 0;
 }
 
@@ -682,14 +724,14 @@ static int __ensure_xattr_positions(
         return status;
     }
 
-    if (!vafs->XattrStore.Present || vafs->XattrStore.Count == 0 || vafs->XattrStore.PositionsLoaded) {
+    if (!vafs->XattrStore->Present || vafs->XattrStore->Count == 0 || vafs->XattrStore->PositionsLoaded) {
         return 0;
     }
 
     // Position indexing is deferred until the first real xattr lookup so the
     // common open/stat path does not pay to walk a section it never touches.
-    vafs->XattrStore.Positions = calloc(vafs->XattrStore.Count, sizeof(VaFsBlockPosition_t));
-    if (vafs->XattrStore.Positions == NULL) {
+    vafs->XattrStore->Positions = calloc(vafs->XattrStore->Count, sizeof(VaFsBlockPosition_t));
+    if (vafs->XattrStore->Positions == NULL) {
         errno = ENOMEM;
         return -1;
     }
@@ -705,12 +747,12 @@ static int __ensure_xattr_positions(
         return status;
     }
 
-    current = vafs->XattrStore.Start;
-    for (index = 0; index < vafs->XattrStore.Count; index++) {
+    current = vafs->XattrStore->Start;
+    for (index = 0; index < vafs->XattrStore->Count; index++) {
         VaFsXattrSetDescriptor_t setDescriptor;
         uint32_t                 entryIndex;
 
-        vafs->XattrStore.Positions[index] = current;
+        vafs->XattrStore->Positions[index] = current;
         status = vafs_stream_reader_seek(reader, current.Index, current.Offset);
         if (status != 0) {
             vafs_stream_reader_close(reader);
@@ -750,7 +792,7 @@ static int __ensure_xattr_positions(
     }
 
     vafs_stream_reader_close(reader);
-    vafs->XattrStore.PositionsLoaded = 1;
+    vafs->XattrStore->PositionsLoaded = 1;
     return 0;
 }
 
@@ -765,7 +807,7 @@ static int __load_xattr_set(
     int                      status;
     size_t                   read;
 
-    if (index >= vafs->XattrStore.Count) {
+    if (index >= vafs->XattrStore->Count) {
         errno = EINVAL;
         return -1;
     }
@@ -782,8 +824,8 @@ static int __load_xattr_set(
 
     status = vafs_stream_reader_seek(
         reader,
-        vafs->XattrStore.Positions[index].Index,
-        vafs->XattrStore.Positions[index].Offset
+        vafs->XattrStore->Positions[index].Index,
+        vafs->XattrStore->Positions[index].Offset
     );
     if (status != 0) {
         vafs_stream_reader_close(reader);
@@ -955,7 +997,7 @@ static int __ensure_entry_xattrs_loaded(
         return status;
     }
 
-    if (!vafs->XattrStore.Present || descriptorMetadata->XattrIndex >= vafs->XattrStore.Count) {
+    if (!vafs->XattrStore->Present || descriptorMetadata->XattrIndex >= vafs->XattrStore->Count) {
         *loadedSlot = 0;
         errno = EINVAL;
         return -1;

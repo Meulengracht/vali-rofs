@@ -21,13 +21,16 @@
 
 #include <errno.h>
 #include <vafs/vafs.h>
+#include <vafs/builder.h>
+#include <vafs/reader.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
 static struct VaFsGuid g_filterGuid    = VA_FS_FEATURE_FILTER;
-static struct VaFsGuid g_filterOpsGuid = VA_FS_FEATURE_FILTER_OPS;
+static struct VaFsCodec g_supportedCodecs[2];
+static int              g_supportedCodecCount;
 
 #if defined(__VAFS_FILTER_APLIB)
 #include <aplib.h>
@@ -51,7 +54,7 @@ static int CB_CALLCONV callback(unsigned int insize, unsigned int inpos,
 	return 1;
 }
 
-static int __aplib_encode(void* Input, uint32_t InputLength, void** Output, uint32_t* OutputLength)
+static int __aplib_encode(const void* Input, size_t InputLength, void** Output, size_t* OutputLength)
 {
     void*    compressed;
     uint32_t compressedSize;
@@ -84,7 +87,7 @@ static int __aplib_encode(void* Input, uint32_t InputLength, void** Output, uint
     return 0;
 }
 
-static int __aplib_decode(void* Input, uint32_t InputLength, void* Output, uint32_t* OutputLength)
+static int __aplib_decode(const void* Input, size_t InputLength, void* Output, size_t OutputLength, size_t* BytesWrittenOut)
 {
     uint32_t decompressedSize;
 
@@ -94,13 +97,13 @@ static int __aplib_decode(void* Input, uint32_t InputLength, void* Output, uint3
         return -1;
     }
 
-    if (decompressedSize > *OutputLength) {
+    if (decompressedSize > OutputLength) {
         errno = ENOSPC;
         return -1;
     }
 
     decompressedSize = aPsafe_depack(Input, InputLength, Output, decompressedSize);
-    *OutputLength = decompressedSize;
+    *BytesWrittenOut = decompressedSize;
     return 0;
 }
 #endif
@@ -122,7 +125,7 @@ struct __brieflz_block {
     char     payload[];
 };
 
-static int __brieflz_encode(void* source, uint32_t sourceLength, void** output, uint32_t* outputLength)
+static int __brieflz_encode(const void* source, size_t sourceLength, void** output, size_t* outputLength)
 {
     struct __brieflz_block* block;
     uint32_t                compressedSize;
@@ -160,12 +163,12 @@ error:
     return -1;
 }
 
-static int __brieflz_decode(void* source, uint32_t sourceLength, void* output, uint32_t* outputLength)
+static int __brieflz_decode(const void* source, size_t sourceLength, void* output, size_t outputLength, size_t* bytesWrittenOut)
 {
     uint64_t                decompressedSize;
-    struct __brieflz_block* block = source;
+    const struct __brieflz_block* block = source;
 
-    if (block->usize > *outputLength) {
+    if (block->usize > outputLength) {
         errno = ENOSPC;
         return -1;
     }
@@ -176,115 +179,37 @@ static int __brieflz_decode(void* source, uint32_t sourceLength, void* output, u
         return -1;
     }
 
-    *outputLength = (uint32_t)decompressedSize;
+    *bytesWrittenOut = decompressedSize;
     return 0;
 }
 #endif
 
-static int __set_filter_ops(
-    struct VaFs*              vafs,
-    struct VaFsFeatureFilter* filter)
+static int __codec_from_name(
+    const char*         filterName,
+    struct VaFsCodec*   codecOut)
 {
-    struct VaFsFeatureFilterOps filterOps;
-
-    // Resolve descriptor and data filters independently so metadata can keep a
-    // cheaper policy without forcing the same codec on file data.
-
-    memcpy(&filterOps.Header.Guid, &g_filterOpsGuid, sizeof(struct VaFsGuid));
-    filterOps.Header.Length = sizeof(struct VaFsFeatureFilterOps);
-
-    filterOps.DescriptorEncode = NULL;
-    filterOps.DescriptorDecode = NULL;
-    switch (filter->DescriptorType) {
-        case VaFsFilterType_None:
-            break;
-#if defined(__VAFS_FILTER_APLIB)
-        case VaFsFilterType_APLIB: {
-            filterOps.DescriptorEncode = __aplib_encode;
-            filterOps.DescriptorDecode = __aplib_decode;
-        } break;
-#endif
-#if defined(__VAFS_FILTER_BRIEFLZ)
-        case VaFsFilterType_BRIEFLZ: {
-            filterOps.DescriptorEncode = __brieflz_encode;
-            filterOps.DescriptorDecode = __brieflz_decode;
-        } break;
-#endif
-        default: {
-            fprintf(stderr, "unsupported descriptor filter type %u\n", filter->DescriptorType);
-            return -1;
-        }
-    }
-
-    filterOps.DataEncode = NULL;
-    filterOps.DataDecode = NULL;
-    switch (filter->DataType) {
-        case VaFsFilterType_None:
-            break;
-#if defined(__VAFS_FILTER_APLIB)
-        case VaFsFilterType_APLIB: {
-            filterOps.DataEncode = __aplib_encode;
-            filterOps.DataDecode = __aplib_decode;
-        } break;
-#endif
-#if defined(__VAFS_FILTER_BRIEFLZ)
-        case VaFsFilterType_BRIEFLZ: {
-            filterOps.DataEncode = __brieflz_encode;
-            filterOps.DataDecode = __brieflz_decode;
-        } break;
-#endif
-        default: {
-            fprintf(stderr, "unsupported data filter type %u\n", filter->DataType);
-            return -1;
-        }
-    }
-
-    return vafs_feature_add(vafs, &filterOps.Header);
-}
-
-int __handle_filter(
-    struct VaFs* vafs)
-{
-    struct VaFsFeatureFilter* filter;
-    int                       status;
-
-    // Opening an image only installs runtime callbacks when persisted filter
-    // metadata exists and is large enough for the split-stream layout.
-
-    status = vafs_feature_query(vafs, &g_filterGuid, (struct VaFsFeatureHeader**)&filter);
-    if (status) {
-        // Images without a filter feature leave both streams unfiltered.
-        return 0;
-    }
-
-    if (filter->Header.Length < sizeof(struct VaFsFeatureFilter)) {
-        // Reject truncated metadata before reading descriptor/data type fields.
-        errno = EINVAL;
-        return -1;
-    }
-    return __set_filter_ops(vafs, filter);
-}
-
-static int __get_filter_from_name(
-    const char* filterName,
-    uint32_t*   typeOut)
-{
-    // Treat NULL the same as "none" so callers can configure just one stream
-    // and leave the other raw.
     if (filterName == NULL || !strcmp(filterName, "none")) {
-        *typeOut = VaFsFilterType_None;
+        memset(codecOut, 0, sizeof(*codecOut));
         return 0;
     }
 
 #if defined(__VAFS_FILTER_APLIB)
     if (!strcmp(filterName, "aplib")) {
-        *typeOut = VaFsFilterType_APLIB;
+        *codecOut = (struct VaFsCodec) {
+            .ID = "aplib",
+            .Encode = __aplib_encode,
+            .Decode = __aplib_decode
+        };
         return 0;
     }
 #endif
 #if defined(__VAFS_FILTER_BRIEFLZ)
     if (!strcmp(filterName, "brieflz")) {
-        *typeOut = VaFsFilterType_BRIEFLZ;
+        *codecOut = (struct VaFsCodec) {
+            .ID = "brieflz",
+            .Encode = __brieflz_encode,
+            .Decode = __brieflz_decode
+        };
         return 0;
     }
 #endif
@@ -293,42 +218,104 @@ static int __get_filter_from_name(
     return -1;
 }
 
+int __handle_filter(
+    struct VaFs* vafs)
+{
+    (void)vafs;
+    return 0;
+}
+
+int __configure_reader_filters(struct VaFsReaderConfiguration* configuration)
+{
+    int count = 0;
+
+#if defined(__VAFS_FILTER_APLIB)
+    g_supportedCodecs[count++] = (struct VaFsCodec) {
+        .ID = "aplib",
+        .Encode = __aplib_encode,
+        .Decode = __aplib_decode
+    };
+#endif
+#if defined(__VAFS_FILTER_BRIEFLZ)
+    g_supportedCodecs[count++] = (struct VaFsCodec) {
+        .ID = "brieflz",
+        .Encode = __brieflz_encode,
+        .Decode = __brieflz_decode
+    };
+#endif
+
+    g_supportedCodecCount = count;
+    vafs_reader_config_initialize(configuration);
+    vafs_reader_config_set_codecs(configuration, g_supportedCodecs, g_supportedCodecCount);
+    return 0;
+}
+
+int __configure_filters(
+    struct VaFsBuilderConfiguration* configuration,
+    const char*               descriptorFilterName,
+    const char*               dataFilterName)
+{
+    struct VaFsCodec descriptorCodec;
+    struct VaFsCodec dataCodec;
+
+    if (__codec_from_name(descriptorFilterName, &descriptorCodec) != 0) {
+        return -1;
+    }
+    if (__codec_from_name(dataFilterName, &dataCodec) != 0) {
+        return -1;
+    }
+
+    configuration->Codecs[0] = descriptorCodec;
+    configuration->Codecs[1] = dataCodec;
+    return 0;
+}
+
 int __install_filters(
     struct VaFs* vafs,
     const char*  descriptorFilterName,
     const char*  dataFilterName)
 {
-    struct VaFsFeatureFilter filter;
-    int                      status;
+    struct VaFsFeatureEncoding filter;
+    struct VaFsCodec          descriptorCodec;
+    struct VaFsCodec          dataCodec;
+    int                       status;
 
     // Resolve both stream policies up front so persisted metadata and runtime
     // callbacks stay aligned.
 
+    memset(&filter, 0, sizeof(filter));
     memcpy(&filter.Header.Guid, &g_filterGuid, sizeof(struct VaFsGuid));
-    filter.Header.Length = sizeof(struct VaFsFeatureFilter);
+    filter.Header.Length = sizeof(struct VaFsFeatureEncoding);
 
-    status = __get_filter_from_name(descriptorFilterName, &filter.DescriptorType);
+    status = __codec_from_name(descriptorFilterName, &descriptorCodec);
     if (status != 0) {
         return -1;
     }
 
-    status = __get_filter_from_name(dataFilterName, &filter.DataType);
+    status = __codec_from_name(dataFilterName, &dataCodec);
     if (status != 0) {
         return -1;
     }
 
-    if (filter.DescriptorType == VaFsFilterType_None && filter.DataType == VaFsFilterType_None) {
+    if (descriptorCodec.ID == NULL && dataCodec.ID == NULL) {
         // Skip feature emission entirely when neither stream requests a filter.
         return 0;
     }
 
-    status = vafs_feature_add(vafs, &filter.Header);
+    if (descriptorCodec.ID != NULL) {
+        strncpy(filter.DescriptorEncoding, descriptorCodec.ID, sizeof(filter.DescriptorEncoding) - 1);
+    }
+    if (dataCodec.ID != NULL) {
+        strncpy(filter.DataEncoding, dataCodec.ID, sizeof(filter.DataEncoding) - 1);
+    }
+
+    status = vafs_builder_add_feature(vafs, &filter.Header);
     if (status) {
         // Stop here if the persisted policy could not be recorded so we do not
         // install runtime callbacks that the image metadata does not describe.
         return 0;
     }
-    return __set_filter_ops(vafs, &filter);
+    return 0;
 }
 
 int __install_filter(

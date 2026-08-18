@@ -156,12 +156,44 @@ Additional wide-directory spot checks were rerun with the same stable settings t
 - **256 entries**: 0.001 ms avg with `--warmup=50 --iterations=1000`
 - **5000 entries**: 0.001 ms avg with `--warmup=50 --iterations=1000`
 
+### 2026-08-17 Linux Reader/Builder API Rerun
+
+This rerun was executed after migrating the tools, benchmarks, fuzz harnesses, and unit tests to the opaque reader/builder API. The deterministic Linux generator and current `build/bin/mkvafs` binary were used to regenerate the benchmark image before measuring.
+
+- **Platform**: Linux
+- **Kernel**: 6.18.44-1-lts
+- **CPU**: AMD Ryzen 7 7735HS with Radeon Graphics
+- **Compression**: BriefLZ
+- **Test Image**: `/tmp/vafs-benchmark-data/benchmark.vafs`
+- **Test Image Size**: 6.79 MiB (7,115,254 bytes)
+- **Source Corpus Size**: 63 MiB across 617 regular files, plus one symlink entry
+- **Methodology**: 3 full-suite runs, each with `--warmup=50 --iterations=1000`, summarized as the median of per-suite averages
+- **API Surface**: read benchmarks now use `vafs_object_reader_open`, `vafs_object_reader_read`, `vafs_object_reader_stat`, and directory reader traversal
+
+| Benchmark | Median avg | Avg range across 3 runs | Median throughput | Throughput range |
+| --- | ---: | ---: | ---: | ---: |
+| Mount Latency | 0.008165 ms | 0.007884-0.008289 ms | - | - |
+| Metadata Traversal | 0.000441 ms | 0.000439-0.000448 ms | - | - |
+| Small File Read (4KB) | 0.002186 ms | 0.002130-0.002313 ms | 1787.07 MB/s | 1688.64-1833.97 MB/s |
+| Large File Sequential Read | 7.025924 ms | 7.018499-7.048333 ms | 711.65 MB/s | 709.39-712.40 MB/s |
+| Repeated Path Lookup | 0.000102 ms | 0.000099-0.000107 ms | - | - |
+| Deep Path Stat | 0.000368 ms | 0.000366-0.000377 ms | - | - |
+| Wide Directory Stat | 0.000401 ms | 0.000387-0.000499 ms | - | - |
+| Repeated Xattr Get | 0.000256 ms | 0.000251-0.000264 ms | 59.68 MB/s | 57.90-60.83 MB/s |
+| Repeated Xattr List | 0.000284 ms | 0.000271-0.000286 ms | 154.49 MB/s | 153.63-161.87 MB/s |
+
+Additional wide-directory spot checks were rerun with the same stable settings:
+
+- **256 entries**: 0.000339 ms avg with `--warmup=50 --iterations=1000`
+- **5000 entries**: 0.000534 ms avg with `--warmup=50 --iterations=1000`
+
 ### Updated Observations
 
 - The new warmup and higher iteration counts materially reduced noise on the expensive path. Large sequential read throughput stayed in a tight `456.78-460.73 MB/s` band across the three stable reruns.
 - The deterministic corpus changed the shape of the benchmark in an expected way: the compressed image dropped to `6.73 MiB`, so large sequential reads are much faster than they were on the earlier mostly-random corpus. Cross-run comparisons only make sense when the corpus profile is held constant.
 - Small-file and metadata-heavy paths are now so cheap that several of them hit the formatter's `0.001 ms` precision floor. They are still non-zero operations, but the current output precision no longer distinguishes the smallest steady-state differences.
 - Directory scaling still does not look like the limiting factor. The 256-entry and 5000-entry wide-directory spot checks both stayed at `0.001 ms` average with the stable settings, which suggests the current sorted-index/hash-index and bounded lookup-cache strategy is already doing its job.
+- The 2026-08-17 Linux object-reader rerun keeps lookup-heavy operations well below a microsecond on this host. Wide-directory spot checks remained flat enough that directory size is still not the visible bottleneck in this corpus.
 - Large sequential reads remain the dominant absolute cost even on the more compressible deterministic corpus, so the highest-value runtime optimization target is still the read/decompression pipeline rather than directory lookup.
 
 ### What Could Be Improved

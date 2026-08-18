@@ -16,9 +16,9 @@ The benchmark suite measures nine core workload categories:
 8. **Repeated Xattr Get** - Repeated `getxattr` against a file with persisted xattrs
 9. **Repeated Xattr List** - Repeated `listxattr` against the same xattr-bearing file
 
-The `deepstat` and `wide` benchmarks are the closest stand-ins for hot FUSE `getattr` and `access` workloads because they repeatedly call `vafs_path_stat()` against already-open images.
+The `deepstat` and `wide` benchmarks are the closest stand-ins for hot FUSE `getattr` and `access` workloads because they repeatedly open object readers and stat them against already-open images.
 
-The `lookup` benchmark is the closest stand-in for repeated open/lookup traffic because it repeatedly resolves the same file path through `vafs_file_open()`.
+The `lookup` benchmark is the closest stand-in for repeated open/lookup traffic because it repeatedly resolves the same file path through `vafs_object_reader_open()`.
 
 The xattr benchmarks synthesize their own temporary VaFS image with persisted xattrs during setup so they stay reproducible on hosts, including Windows, where the local filesystem may not expose xattrs at all.
 
@@ -215,7 +215,7 @@ BUILD_DIR=$PWD/build FILE_COUNT=5000 tests/lib/generate_wide_directory_image.sh
 
 The first command exercises the small-directory fallback path. The second exercises the large-directory secondary index path.
 
-Both runs also cover the read-mode `vafs_path_stat()` fast path, which now reuses the same cached directory lookup structures and cached entry stat metadata used by direct directory operations.
+Both runs also cover the read-mode object stat path, which now reuses the same cached directory lookup structures and cached entry stat metadata used by direct directory operations.
 
 ## Readonly Lookup Cache Notes
 

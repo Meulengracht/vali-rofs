@@ -14,8 +14,8 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  *
- * Vali Initrd Filesystem
- * - Contains the implementation of the Vali Initrd Filesystem.
+ * Vali Container Filesystem
+ * - Contains the implementation of the Vali Container Filesystem.
  *   This filesystem is used to store the initrd of the kernel.
  */
 
@@ -152,58 +152,5 @@ static inline void vafs_metadata_set_mode(
     metadata->Mode = typeBits | (mode & 07777u);
     metadata->Mask |= VaFsMetadataMask_Type | VaFsMetadataMask_Mode;
 }
-
-/**
- * @brief Retrieves POSIX-like metadata for a filesystem entry.
- *
- * The returned mode field contains both the entry type bits and the stored permission bits. When
- * followLinks is non-zero, symbolic links in the path are resolved up to the library's symlink
- * depth limit; otherwise the metadata of the link itself is returned.
- *
- * @param vafs        Filesystem handle to query.
- * @param path        Absolute path of the entry.
- * @param followLinks Non-zero to follow symbolic links, 0 to stat the link itself.
- * @param metadata    Receives the resulting metadata.
- * @return int Returns 0 on success, -1 on failure. See errno for details such as EINVAL,
- *             ENOENT, ENOTDIR, or ELOOP.
- */
-extern int vafs_path_stat(
-    struct VaFs*         vafs,
-    const char*          path,
-    int                  followLinks,
-    struct VaFsMetadata* metadata);
-
-/**
- * @brief Retrieves metadata for an already opened file handle.
- *
- * @param handle   File handle to query.
- * @param metadata Receives the resulting metadata.
- * @return int Returns 0 on success, -1 on failure.
- */
-extern int vafs_file_stat(
-    struct VaFsFileHandle* handle,
-    struct VaFsMetadata*   metadata);
-
-/**
- * @brief Retrieves metadata for an already opened directory handle.
- *
- * @param handle   Directory handle to query.
- * @param metadata Receives the resulting metadata.
- * @return int Returns 0 on success, -1 on failure.
- */
-extern int vafs_directory_stat(
-    struct VaFsDirectoryHandle* handle,
-    struct VaFsMetadata*        metadata);
-
-/**
- * @brief Retrieves metadata for an already opened symbolic link handle.
- *
- * @param handle   Symbolic link handle to query.
- * @param metadata Receives the resulting metadata.
- * @return int Returns 0 on success, -1 on failure.
- */
-extern int vafs_symlink_stat(
-    struct VaFsSymlinkHandle* handle,
-    struct VaFsMetadata*      metadata);
 
 #endif //!__VAFS_STAT_H__

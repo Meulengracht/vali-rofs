@@ -25,10 +25,9 @@
 #include "filter.h"
 #include "benchmark.h"
 #include <vafs/vafs.h>
-#include <vafs/file.h>
-#include <vafs/directory.h>
+#include <vafs/reader.h>
+#include <vafs/builder.h>
 #include <vafs/stat.h>
-#include <vafs/xattr.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,6 +59,16 @@
 #define PATH_MAX 4096
 #endif
 
+static int open_benchmark_image(
+    const char*    imagePath,
+    struct VaFs**  vafsOut)
+{
+    struct VaFsReaderConfiguration readerConfiguration;
+
+    __configure_reader_filters(&readerConfiguration);
+    return vafs_reader_open_file(imagePath, &readerConfiguration, vafsOut);
+}
+
 // ============================
 // Benchmark Context Structures
 // ============================
@@ -80,7 +89,7 @@ typedef struct {
     const char* image_path;
     const char* file_path;
     struct VaFs* vafs;
-    struct VaFsFileHandle* handle;
+    struct VaFsObjectReader* handle;
     char* buffer;
     size_t buffer_size;
     size_t bytes_read;
@@ -116,6 +125,78 @@ typedef struct {
     size_t       buffer_size;
     size_t       bytes_processed;
 } XattrBenchmarkContext;
+
+static int benchmark_path_stat(
+    struct VaFs*         vafs,
+    const char*          path,
+    struct VaFsMetadata* metadataOut)
+{
+    struct VaFsObjectReader* object;
+    int                      status;
+
+    status = vafs_object_reader_open(vafs, path, VaFsLookup_None, &object);
+    if (status != 0) {
+        return status;
+    }
+
+    status = vafs_object_reader_stat(object, metadataOut);
+    vafs_object_reader_close(object);
+    return status;
+}
+
+static int benchmark_path_getxattr(
+    struct VaFs* vafs,
+    const char*  path,
+    const char*  name,
+    void*        value,
+    size_t       valueSize,
+    size_t*      bytesWrittenOut)
+{
+    struct VaFsObjectReader* object;
+    int                      status;
+
+    status = vafs_object_reader_open(vafs, path, VaFsLookup_None, &object);
+    if (status != 0) {
+        return status;
+    }
+
+    status = vafs_object_reader_getxattr(object, name, value, valueSize, bytesWrittenOut);
+    vafs_object_reader_close(object);
+    return status;
+}
+
+static int benchmark_path_listxattr(
+    struct VaFs* vafs,
+    const char*  path,
+    char*        buffer,
+    size_t       bufferSize,
+    size_t*      bytesWrittenOut)
+{
+    struct VaFsObjectReader* object;
+    int                      status;
+
+    status = vafs_object_reader_open(vafs, path, VaFsLookup_None, &object);
+    if (status != 0) {
+        return status;
+    }
+
+    status = vafs_object_reader_listxattr(object, buffer, bufferSize, bytesWrittenOut);
+    vafs_object_reader_close(object);
+    return status;
+}
+
+static int benchmark_write_payload(
+    struct VaFsFileBuilder* file,
+    const void*             payload,
+    size_t                  size)
+{
+    size_t bytesWritten;
+
+    if (vafs_file_builder_write(file, payload, size, &bytesWritten) != 0) {
+        return -1;
+    }
+    return bytesWritten == size ? 0 : -1;
+}
 
 typedef struct {
     uint64_t iteration_override;
@@ -236,9 +317,10 @@ static int create_xattr_benchmark_image(
 {
     static const char payload[] = "Synthetic xattr benchmark payload\n";
     struct VaFs*                vafs = NULL;
-    struct VaFsConfiguration    config;
-    struct VaFsDirectoryHandle* root = NULL;
-    struct VaFsFileHandle*      file_handle = NULL;
+    struct VaFsBuilderConfiguration    config;
+    struct VaFsDirectoryBuilder* root = NULL;
+    struct VaFsFileBuilder*      file_handle = NULL;
+    struct VaFsObjectBuilder*    file_object = NULL;
     struct VaFsMetadata         file_metadata = make_metadata(VaFsEntryType_File, 0644);
     int                         status = -1;
 
@@ -248,24 +330,20 @@ static int create_xattr_benchmark_image(
     }
 
     remove(image_path);
-    vafs_config_initialize(&config);
-    if (vafs_create(image_path, &config, &vafs) != 0) {
+    vafs_builder_config_initialize(&config);
+    if (vafs_builder_new(image_path, &config, &vafs, &root) != 0) {
         goto cleanup;
     }
 
-    if (vafs_directory_open(vafs, "/", &root) != 0) {
+    if (vafs_directory_builder_create_file(root, "xattr_target", &file_metadata, &file_handle, &file_object) != 0) {
         goto cleanup;
     }
 
-    if (vafs_directory_create_file(root, "xattr_target", &file_metadata, &file_handle) != 0) {
+    if (benchmark_write_payload(file_handle, payload, strlen(payload)) != 0) {
         goto cleanup;
     }
 
-    if (vafs_file_write(file_handle, (void*)payload, strlen(payload)) != 0) {
-        goto cleanup;
-    }
-
-    if (vafs_file_close(file_handle) != 0) {
+    if (vafs_file_builder_close(file_handle) != 0) {
         file_handle = NULL;
         goto cleanup;
     }
@@ -273,10 +351,10 @@ static int create_xattr_benchmark_image(
 
     // Create the xattr-bearing image in-process so the benchmark stays
     // reproducible even on hosts whose filesystem APIs cannot store xattrs.
-    if (vafs_path_setxattr(vafs, "/xattr_target", "user.mime", "text/plain", strlen("text/plain")) != 0 ||
-        vafs_path_setxattr(vafs, "/xattr_target", "user.owner", "root", strlen("root")) != 0 ||
-        vafs_path_setxattr(vafs, "/xattr_target", "user.checksum", "0123456789abcdef", strlen("0123456789abcdef")) != 0 ||
-        vafs_path_setxattr(vafs, "/xattr_target", "user.empty", NULL, 0) != 0) {
+    if (vafs_object_builder_setxattr(file_object, "user.mime", "text/plain", strlen("text/plain")) != 0 ||
+        vafs_object_builder_setxattr(file_object, "user.owner", "root", strlen("root")) != 0 ||
+        vafs_object_builder_setxattr(file_object, "user.checksum", "0123456789abcdef", strlen("0123456789abcdef")) != 0 ||
+        vafs_object_builder_setxattr(file_object, "user.empty", NULL, 0) != 0) {
         goto cleanup;
     }
 
@@ -284,13 +362,13 @@ static int create_xattr_benchmark_image(
 
 cleanup:
     if (file_handle != NULL) {
-        vafs_file_close(file_handle);
+        vafs_file_builder_close(file_handle);
     }
     if (root != NULL) {
-        vafs_directory_close(root);
+        vafs_directory_builder_close(root);
     }
     if (vafs != NULL) {
-        vafs_close(vafs);
+        vafs_builder_close(vafs);
     }
     if (status != 0) {
         remove(image_path);
@@ -316,7 +394,7 @@ static int xattr_benchmark_open(
         return -1;
     }
 
-    status = vafs_open_file(ctx->generated_image_path, &ctx->vafs);
+    status = open_benchmark_image(ctx->generated_image_path, &ctx->vafs);
     if (status != 0) {
         remove(ctx->generated_image_path);
         ctx->generated_image_path[0] = '\0';
@@ -325,7 +403,7 @@ static int xattr_benchmark_open(
 
     status = __handle_filter(ctx->vafs);
     if (status != 0) {
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
         ctx->vafs = NULL;
         remove(ctx->generated_image_path);
         ctx->generated_image_path[0] = '\0';
@@ -345,7 +423,7 @@ static void xattr_benchmark_teardown_common(
     ctx->buffer = NULL;
 
     if (ctx->vafs != NULL) {
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
         ctx->vafs = NULL;
     }
 
@@ -372,7 +450,7 @@ static int mount_benchmark_run(void* user_data)
     struct VaFs* vafs = NULL;
     int status;
 
-    status = vafs_open_file(ctx->image_path, &vafs);
+    status = open_benchmark_image(ctx->image_path, &vafs);
     if (status != 0) {
         fprintf(stderr, "Failed to open VaFS image: %s\n", strerror(errno));
         return -1;
@@ -382,11 +460,11 @@ static int mount_benchmark_run(void* user_data)
     status = __handle_filter(vafs);
     if (status != 0) {
         fprintf(stderr, "Failed to install filters: %s\n", strerror(errno));
-        vafs_close(vafs);
+        vafs_reader_close(vafs);
         return -1;
     }
 
-    vafs_close(vafs);
+    vafs_reader_close(vafs);
     return 0;
 }
 
@@ -422,7 +500,7 @@ static int traversal_benchmark_setup(void* user_data)
     TraversalBenchmarkContext* ctx = (TraversalBenchmarkContext*)user_data;
     int status;
 
-    status = vafs_open_file(ctx->image_path, &ctx->vafs);
+    status = open_benchmark_image(ctx->image_path, &ctx->vafs);
     if (status != 0) {
         fprintf(stderr, "Failed to open VaFS image: %s\n", strerror(errno));
         return -1;
@@ -432,7 +510,7 @@ static int traversal_benchmark_setup(void* user_data)
     status = __handle_filter(ctx->vafs);
     if (status != 0) {
         fprintf(stderr, "Failed to install filters: %s\n", strerror(errno));
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
         return -1;
     }
 
@@ -442,23 +520,23 @@ static int traversal_benchmark_setup(void* user_data)
 static int traversal_benchmark_run(void* user_data)
 {
     TraversalBenchmarkContext* ctx = (TraversalBenchmarkContext*)user_data;
-    struct VaFsDirectoryHandle* dir = NULL;
+    struct VaFsDirectoryReader* dir = NULL;
     struct VaFsEntry entry;
     int status;
     int count = 0;
 
-    status = vafs_directory_open(ctx->vafs, ctx->directory_path, &dir);
+    status = vafs_directory_reader_open(ctx->vafs, ctx->directory_path, VaFsLookup_None, &dir);
     if (status != 0) {
         fprintf(stderr, "Failed to open directory: %s\n", strerror(errno));
         return -1;
     }
 
-    while (vafs_directory_read(dir, &entry) == 0) {
+    while (vafs_directory_reader_next(dir, &entry) == 0) {
         count++;
     }
 
     ctx->entry_count = count;
-    vafs_directory_close(dir);
+    vafs_directory_reader_close(dir);
     return 0;
 }
 
@@ -466,7 +544,7 @@ static void traversal_benchmark_teardown(void* user_data)
 {
     TraversalBenchmarkContext* ctx = (TraversalBenchmarkContext*)user_data;
     if (ctx->vafs) {
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
     }
 }
 
@@ -500,7 +578,7 @@ static int small_file_read_setup(void* user_data)
     FileReadBenchmarkContext* ctx = (FileReadBenchmarkContext*)user_data;
     int status;
 
-    status = vafs_open_file(ctx->image_path, &ctx->vafs);
+    status = open_benchmark_image(ctx->image_path, &ctx->vafs);
     if (status != 0) {
         fprintf(stderr, "Failed to open VaFS image: %s\n", strerror(errno));
         return -1;
@@ -510,14 +588,14 @@ static int small_file_read_setup(void* user_data)
     status = __handle_filter(ctx->vafs);
     if (status != 0) {
         fprintf(stderr, "Failed to install filters: %s\n", strerror(errno));
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
         return -1;
     }
 
     ctx->buffer = (char*)malloc(ctx->buffer_size);
     if (!ctx->buffer) {
         fprintf(stderr, "Failed to allocate read buffer\n");
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
         return -1;
     }
 
@@ -527,20 +605,20 @@ static int small_file_read_setup(void* user_data)
 static int small_file_read_run(void* user_data)
 {
     FileReadBenchmarkContext* ctx = (FileReadBenchmarkContext*)user_data;
-    struct VaFsFileHandle* handle = NULL;
-    size_t bytes_read;
+    struct VaFsObjectReader* handle = NULL;
+    uint64_t bytes_read;
     int status;
 
-    status = vafs_file_open(ctx->vafs, ctx->file_path, &handle);
+    status = vafs_object_reader_open(ctx->vafs, ctx->file_path, VaFsLookup_None, &handle);
     if (status != 0) {
         fprintf(stderr, "Failed to open file: %s\n", strerror(errno));
         return -1;
     }
 
-    bytes_read = vafs_file_read(handle, ctx->buffer, ctx->buffer_size);
-    ctx->bytes_read = bytes_read;
+    bytes_read = vafs_object_reader_read(handle, ctx->buffer, ctx->buffer_size);
+    ctx->bytes_read = (size_t)bytes_read;
 
-    vafs_file_close(handle);
+    vafs_object_reader_close(handle);
     return 0;
 }
 
@@ -551,7 +629,7 @@ static void small_file_read_teardown(void* user_data)
         free(ctx->buffer);
     }
     if (ctx->vafs) {
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
     }
 }
 
@@ -592,7 +670,7 @@ static int large_file_read_setup(void* user_data)
     FileReadBenchmarkContext* ctx = (FileReadBenchmarkContext*)user_data;
     int status;
 
-    status = vafs_open_file(ctx->image_path, &ctx->vafs);
+    status = open_benchmark_image(ctx->image_path, &ctx->vafs);
     if (status != 0) {
         fprintf(stderr, "Failed to open VaFS image: %s\n", strerror(errno));
         return -1;
@@ -602,22 +680,22 @@ static int large_file_read_setup(void* user_data)
     status = __handle_filter(ctx->vafs);
     if (status != 0) {
         fprintf(stderr, "Failed to install filters: %s\n", strerror(errno));
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
         return -1;
     }
 
-    status = vafs_file_open(ctx->vafs, ctx->file_path, &ctx->handle);
+    status = vafs_object_reader_open(ctx->vafs, ctx->file_path, VaFsLookup_None, &ctx->handle);
     if (status != 0) {
         fprintf(stderr, "Failed to open file: %s\n", strerror(errno));
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
         return -1;
     }
 
     ctx->buffer = (char*)malloc(ctx->buffer_size);
     if (!ctx->buffer) {
         fprintf(stderr, "Failed to allocate read buffer\n");
-        vafs_file_close(ctx->handle);
-        vafs_close(ctx->vafs);
+        vafs_object_reader_close(ctx->handle);
+        vafs_reader_close(ctx->vafs);
         return -1;
     }
 
@@ -628,14 +706,14 @@ static int large_file_read_run(void* user_data)
 {
     FileReadBenchmarkContext* ctx = (FileReadBenchmarkContext*)user_data;
     size_t total_read = 0;
-    size_t bytes_read;
+    uint64_t bytes_read;
 
     // Reset file position to beginning
-    vafs_file_seek(ctx->handle, 0, SEEK_SET);
+    vafs_object_reader_seek(ctx->handle, 0, SEEK_SET);
 
     // Read entire file in chunks
-    while ((bytes_read = vafs_file_read(ctx->handle, ctx->buffer, ctx->buffer_size)) > 0) {
-        total_read += bytes_read;
+    while ((bytes_read = vafs_object_reader_read(ctx->handle, ctx->buffer, ctx->buffer_size)) > 0) {
+        total_read += (size_t)bytes_read;
     }
 
     ctx->bytes_read = total_read;
@@ -649,10 +727,10 @@ static void large_file_read_teardown(void* user_data)
         free(ctx->buffer);
     }
     if (ctx->handle) {
-        vafs_file_close(ctx->handle);
+        vafs_object_reader_close(ctx->handle);
     }
     if (ctx->vafs) {
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
     }
 }
 
@@ -691,10 +769,10 @@ static BenchmarkResult run_large_file_read_benchmark(const char* image_path, con
 static int path_lookup_setup(void* user_data)
 {
     PathLookupBenchmarkContext* ctx = (PathLookupBenchmarkContext*)user_data;
-    struct VaFsFileHandle*      handle = NULL;
+    struct VaFsObjectReader*    handle = NULL;
     int status;
 
-    status = vafs_open_file(ctx->image_path, &ctx->vafs);
+    status = open_benchmark_image(ctx->image_path, &ctx->vafs);
     if (status != 0) {
         fprintf(stderr, "Failed to open VaFS image: %s\n", strerror(errno));
         return -1;
@@ -704,19 +782,19 @@ static int path_lookup_setup(void* user_data)
     status = __handle_filter(ctx->vafs);
     if (status != 0) {
         fprintf(stderr, "Failed to install filters: %s\n", strerror(errno));
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
         return -1;
     }
 
     // Warm the path once so the measured iterations reflect repeated lookup cost
     // rather than one-time directory loading and cache priming.
-    status = vafs_file_open(ctx->vafs, ctx->path, &handle);
+    status = vafs_object_reader_open(ctx->vafs, ctx->path, VaFsLookup_None, &handle);
     if (status != 0) {
         fprintf(stderr, "Failed to warm lookup path: %s\n", strerror(errno));
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
         return -1;
     }
-    vafs_file_close(handle);
+    vafs_object_reader_close(handle);
 
     return 0;
 }
@@ -724,15 +802,15 @@ static int path_lookup_setup(void* user_data)
 static int path_lookup_run(void* user_data)
 {
     PathLookupBenchmarkContext* ctx = (PathLookupBenchmarkContext*)user_data;
-    struct VaFsFileHandle* handle = NULL;
+    struct VaFsObjectReader* handle = NULL;
     int status;
 
-    status = vafs_file_open(ctx->vafs, ctx->path, &handle);
+    status = vafs_object_reader_open(ctx->vafs, ctx->path, VaFsLookup_None, &handle);
     if (status != 0) {
         return -1;
     }
 
-    vafs_file_close(handle);
+    vafs_object_reader_close(handle);
     return 0;
 }
 
@@ -740,7 +818,7 @@ static void path_lookup_teardown(void* user_data)
 {
     PathLookupBenchmarkContext* ctx = (PathLookupBenchmarkContext*)user_data;
     if (ctx->vafs) {
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
     }
 }
 
@@ -772,7 +850,7 @@ static int path_stat_setup(void* user_data)
     struct VaFsMetadata       statbuf;
     int status;
 
-    status = vafs_open_file(ctx->image_path, &ctx->vafs);
+    status = open_benchmark_image(ctx->image_path, &ctx->vafs);
     if (status != 0) {
         fprintf(stderr, "Failed to open VaFS image: %s\n", strerror(errno));
         return -1;
@@ -781,16 +859,16 @@ static int path_stat_setup(void* user_data)
     status = __handle_filter(ctx->vafs);
     if (status != 0) {
         fprintf(stderr, "Failed to install filters: %s\n", strerror(errno));
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
         return -1;
     }
 
     // Warm the path once so repeated-stat measurements are not dominated by the
     // first directory load or initial lookup cache population.
-    status = vafs_path_stat(ctx->vafs, ctx->path, 1, &statbuf);
+    status = benchmark_path_stat(ctx->vafs, ctx->path, &statbuf);
     if (status != 0) {
         fprintf(stderr, "Failed to warm stat path: %s\n", strerror(errno));
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
         return -1;
     }
 
@@ -803,7 +881,7 @@ static int path_stat_run(void* user_data)
     struct VaFsMetadata statbuf;
     int status;
 
-    status = vafs_path_stat(ctx->vafs, ctx->path, 1, &statbuf);
+    status = benchmark_path_stat(ctx->vafs, ctx->path, &statbuf);
     if (status != 0) {
         return -1;
     }
@@ -815,7 +893,7 @@ static void path_stat_teardown(void* user_data)
 {
     PathStatBenchmarkContext* ctx = (PathStatBenchmarkContext*)user_data;
     if (ctx->vafs) {
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
     }
 }
 
@@ -844,12 +922,12 @@ static BenchmarkResult run_deep_path_stat_benchmark(const char* image_path, cons
 static int wide_lookup_setup(void* user_data)
 {
     WideLookupBenchmarkContext* ctx = (WideLookupBenchmarkContext*)user_data;
-    struct VaFsDirectoryHandle* dir = NULL;
+    struct VaFsDirectoryReader* dir = NULL;
     struct VaFsEntry entry;
     int status;
     size_t capacity = 0;
 
-    status = vafs_open_file(ctx->image_path, &ctx->vafs);
+    status = open_benchmark_image(ctx->image_path, &ctx->vafs);
     if (status != 0) {
         fprintf(stderr, "Failed to open VaFS image: %s\n", strerror(errno));
         return -1;
@@ -858,18 +936,18 @@ static int wide_lookup_setup(void* user_data)
     status = __handle_filter(ctx->vafs);
     if (status != 0) {
         fprintf(stderr, "Failed to install filters: %s\n", strerror(errno));
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
         return -1;
     }
 
-    status = vafs_directory_open(ctx->vafs, ctx->directory_path, &dir);
+    status = vafs_directory_reader_open(ctx->vafs, ctx->directory_path, VaFsLookup_None, &dir);
     if (status != 0) {
         fprintf(stderr, "Failed to open directory: %s\n", strerror(errno));
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
         return -1;
     }
 
-    while (vafs_directory_read(dir, &entry) == 0) {
+    while (vafs_directory_reader_next(dir, &entry) == 0) {
         size_t name_length;
 
         if (entry.Name == NULL) {
@@ -886,8 +964,8 @@ static int wide_lookup_setup(void* user_data)
             char** new_entries = realloc(ctx->entries, new_capacity * sizeof(char*));
             if (!new_entries) {
                 fprintf(stderr, "Failed to grow entry list\n");
-                vafs_directory_close(dir);
-                vafs_close(ctx->vafs);
+                vafs_directory_reader_close(dir);
+                vafs_reader_close(ctx->vafs);
                 return -1;
             }
             ctx->entries = new_entries;
@@ -897,17 +975,17 @@ static int wide_lookup_setup(void* user_data)
         ctx->entries[ctx->entry_count] = strdup(entry.Name);
         if (!ctx->entries[ctx->entry_count]) {
             fprintf(stderr, "Failed to store entry name\n");
-            vafs_directory_close(dir);
-            vafs_close(ctx->vafs);
+            vafs_directory_reader_close(dir);
+            vafs_reader_close(ctx->vafs);
             return -1;
         }
         ctx->entry_count++;
     }
 
-    vafs_directory_close(dir);
+    vafs_directory_reader_close(dir);
     if (ctx->entry_count == 0) {
         fprintf(stderr, "No entries found in directory %s\n", ctx->directory_path);
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
         return -1;
     }
 
@@ -930,7 +1008,7 @@ static int wide_lookup_run(void* user_data)
         return -1;
     }
 
-    status = vafs_path_stat(ctx->vafs, path_buffer, 1, &statbuf);
+    status = benchmark_path_stat(ctx->vafs, path_buffer, &statbuf);
     if (status != 0) {
         return -1;
     }
@@ -951,7 +1029,7 @@ static void wide_lookup_teardown(void* user_data)
     }
 
     if (ctx->vafs) {
-        vafs_close(ctx->vafs);
+        vafs_reader_close(ctx->vafs);
     }
 }
 
@@ -990,7 +1068,7 @@ static int xattr_get_setup(void* user_data)
         return -1;
     }
 
-    status = vafs_path_getxattr(ctx->vafs, ctx->path, ctx->name, NULL, 0, &ctx->buffer_size);
+    status = benchmark_path_getxattr(ctx->vafs, ctx->path, ctx->name, NULL, 0, &ctx->buffer_size);
     if (status != 0) {
         xattr_benchmark_teardown_common(ctx);
         return -1;
@@ -1005,7 +1083,7 @@ static int xattr_get_setup(void* user_data)
 
     // Warm the first xattr read once so timed iterations measure steady-state
     // lookup cost instead of first-use xattr-set materialization.
-    status = vafs_path_getxattr(ctx->vafs, ctx->path, ctx->name, ctx->buffer, ctx->buffer_size, &ctx->bytes_processed);
+    status = benchmark_path_getxattr(ctx->vafs, ctx->path, ctx->name, ctx->buffer, ctx->buffer_size, &ctx->bytes_processed);
     if (status != 0) {
         xattr_benchmark_teardown_common(ctx);
         return -1;
@@ -1018,7 +1096,7 @@ static int xattr_get_run(void* user_data)
     XattrBenchmarkContext* ctx = (XattrBenchmarkContext*)user_data;
     int                    status;
 
-    status = vafs_path_getxattr(ctx->vafs, ctx->path, ctx->name, ctx->buffer, ctx->buffer_size, &ctx->bytes_processed);
+    status = benchmark_path_getxattr(ctx->vafs, ctx->path, ctx->name, ctx->buffer, ctx->buffer_size, &ctx->bytes_processed);
     if (status != 0) {
         return -1;
     }
@@ -1065,7 +1143,7 @@ static int xattr_list_setup(void* user_data)
         return -1;
     }
 
-    status = vafs_path_listxattr(ctx->vafs, ctx->path, NULL, 0, &ctx->buffer_size);
+    status = benchmark_path_listxattr(ctx->vafs, ctx->path, NULL, 0, &ctx->buffer_size);
     if (status != 0) {
         xattr_benchmark_teardown_common(ctx);
         return -1;
@@ -1078,7 +1156,7 @@ static int xattr_list_setup(void* user_data)
         return -1;
     }
 
-    status = vafs_path_listxattr(ctx->vafs, ctx->path, ctx->buffer, ctx->buffer_size, &ctx->bytes_processed);
+    status = benchmark_path_listxattr(ctx->vafs, ctx->path, ctx->buffer, ctx->buffer_size, &ctx->bytes_processed);
     if (status != 0) {
         xattr_benchmark_teardown_common(ctx);
         return -1;
@@ -1091,7 +1169,7 @@ static int xattr_list_run(void* user_data)
     XattrBenchmarkContext* ctx = (XattrBenchmarkContext*)user_data;
     int                    status;
 
-    status = vafs_path_listxattr(ctx->vafs, ctx->path, ctx->buffer, ctx->buffer_size, &ctx->bytes_processed);
+    status = benchmark_path_listxattr(ctx->vafs, ctx->path, ctx->buffer, ctx->buffer_size, &ctx->bytes_processed);
     if (status != 0) {
         return -1;
     }

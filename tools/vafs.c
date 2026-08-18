@@ -29,11 +29,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <vafs/vafs.h>
-#include <vafs/file.h>
-#include <vafs/symlink.h>
-#include <vafs/directory.h>
+#include <vafs/builder.h>
+#include <vafs/reader.h>
 #include <vafs/stat.h>
 
+extern int __configure_reader_filters(struct VaFsReaderConfiguration* configuration);
 extern int __handle_filter(struct VaFs* vafs);
 
 /** Open a file
@@ -87,7 +87,7 @@ int __vafs_open(const char* path, struct fuse_file_info* fi)
 {
     struct fuse_context*   context = fuse_get_context();
     struct VaFs*           vafs    = context->private_data;
-    struct VaFsFileHandle* handle;
+    struct VaFsObjectReader* handle;
     int                    status;
 
 	if ((fi->flags & O_ACCMODE) != O_RDONLY) {
@@ -95,7 +95,7 @@ int __vafs_open(const char* path, struct fuse_file_info* fi)
 		return -1;
     }
 
-    status = vafs_file_open(vafs, path, &handle);
+    status = vafs_object_reader_open(vafs, path, VaFsLookup_None, &handle);
     if (status) {
         return status;
     }
@@ -117,10 +117,17 @@ int __vafs_access(const char* path, int permissions)
 {
     struct fuse_context* context = fuse_get_context();
     struct VaFs*         vafs    = context->private_data;
+    struct VaFsObjectReader* handle;
     struct VaFsMetadata  metadata;
     int                  status;
 
-    status = vafs_path_stat(vafs, path, 1, &metadata);
+    status = vafs_object_reader_open(vafs, path, VaFsLookup_None, &handle);
+    if (status) {
+        return status;
+    }
+
+    status = vafs_object_reader_stat(handle, &metadata);
+    vafs_object_reader_close(handle);
     if (status) {
         return status;
     }
@@ -145,7 +152,7 @@ int __vafs_read(const char* path, char* buffer, size_t count, off_t offset, stru
 {
     struct fuse_context*   context = fuse_get_context();
     struct VaFs*           vafs    = context->private_data;
-    struct VaFsFileHandle* handle  = (struct VaFsFileHandle*)fi->fh;
+    struct VaFsObjectReader* handle  = (struct VaFsObjectReader*)fi->fh;
     int                    status;
 
     if (handle == NULL) {
@@ -154,17 +161,17 @@ int __vafs_read(const char* path, char* buffer, size_t count, off_t offset, stru
     }
 
     if (offset != 0) {
-        status = vafs_file_seek(handle, offset, SEEK_SET);
+        status = vafs_object_reader_seek(handle, offset, SEEK_SET);
         if (status) {
             return status;
         }
     }
 
-    status = (int)vafs_file_read(handle, buffer, count);
-    if (status) {
-        return status;
+    status = (int)vafs_object_reader_read(handle, buffer, count);
+    if (status < 0) {
+        return -1;
     }
-    return (int)count;
+    return status;
 }
 
 /** Get file attributes.
@@ -188,9 +195,9 @@ int __vafs_getattr(const char* path, struct stat* stat, struct fuse_file_info *f
 
     memset(stat, 0, sizeof(struct stat));
     if (fi != NULL && fi->fh != 0) {
-        struct VaFsFileHandle* handle = (struct VaFsFileHandle*)fi->fh;
+        struct VaFsObjectReader* handle = (struct VaFsObjectReader*)fi->fh;
 
-        status = vafs_file_stat(handle, &metadata);
+        status = vafs_object_reader_stat(handle, &metadata);
         if (status) {
             return status;
         }
@@ -202,7 +209,13 @@ int __vafs_getattr(const char* path, struct stat* stat, struct fuse_file_info *f
         return 0;
     }
 
-    status = vafs_path_stat(vafs, path, 0, &metadata);
+    struct VaFsObjectReader* handle;
+    status = vafs_object_reader_open(vafs, path, VaFsLookup_NoFollow, &handle);
+    if (status) {
+        return status;
+    }
+    status = vafs_object_reader_stat(handle, &metadata);
+    vafs_object_reader_close(handle);
     if (status) {
         return status;
     }
@@ -229,17 +242,28 @@ int __vafs_readlink(const char* path, char* linkBuffer, size_t bufferSize)
 {
     struct fuse_context*      context = fuse_get_context();
     struct VaFs*              vafs    = context->private_data;
-    struct VaFsSymlinkHandle* handle;
+    struct VaFsObjectReader*  handle;
+    uint64_t                  bytesRead;
     int                       status;
 
-    status = vafs_symlink_open(vafs, path, &handle);
+    status = vafs_object_reader_open(vafs, path, VaFsLookup_NoFollow, &handle);
     if (status) {
         return status;
     }
 
-    status = vafs_symlink_target(handle, linkBuffer, bufferSize);
-    vafs_symlink_close(handle);
-    return status;
+    if (bufferSize == 0) {
+        vafs_object_reader_close(handle);
+        return 0;
+    }
+
+    bytesRead = vafs_object_reader_read(handle, linkBuffer, bufferSize - 1);
+    vafs_object_reader_close(handle);
+    if (bytesRead == UINT64_MAX) {
+        return -1;
+    }
+
+    linkBuffer[bytesRead] = '\0';
+    return 0;
 }
 
 /**
@@ -249,14 +273,14 @@ off_t __vafs_lseek(const char* path, off_t off, int whence, struct fuse_file_inf
 {
     struct fuse_context*   context = fuse_get_context();
     struct VaFs*           vafs    = context->private_data;
-    struct VaFsFileHandle* handle  = (struct VaFsFileHandle*)fi->fh;
+    struct VaFsObjectReader* handle  = (struct VaFsObjectReader*)fi->fh;
 
     if (handle == NULL) {
         errno = EINVAL;
         return -1;
     }
     
-    vafs_file_seek(handle, off, whence);
+    vafs_object_reader_seek(handle, off, whence);
     return off;
 }
 
@@ -276,17 +300,16 @@ int __vafs_release(const char* path, struct fuse_file_info* fi)
 {
     struct fuse_context*   context = fuse_get_context();
     struct VaFs*           vafs    = context->private_data;
-    struct VaFsFileHandle* handle  = (struct VaFsFileHandle*)fi->fh;
-    int                    status;
+    struct VaFsObjectReader* handle  = (struct VaFsObjectReader*)fi->fh;
 
     if (handle == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    status = vafs_file_close(handle);
+    vafs_object_reader_close(handle);
     fi->fh = 0;
-    return status;
+    return 0;
 }
 
 /** Open directory
@@ -301,10 +324,10 @@ int __vafs_opendir(const char* path, struct fuse_file_info* fi)
 {
     struct fuse_context*        context = fuse_get_context();
     struct VaFs*                vafs    = context->private_data;
-    struct VaFsDirectoryHandle* handle;
+    struct VaFsDirectoryReader* handle;
     int                         status;
 
-    status = vafs_directory_open(vafs, path, &handle);
+    status = vafs_directory_reader_open(vafs, path, VaFsLookup_None, &handle);
     if (status) {
         return status;
     }
@@ -338,7 +361,7 @@ int __vafs_readdir(
 {
     struct fuse_context*        context = fuse_get_context();
     struct VaFs*                vafs    = context->private_data;
-    struct VaFsDirectoryHandle* handle  = (struct VaFsDirectoryHandle*)fi->fh;
+    struct VaFsDirectoryReader* handle  = (struct VaFsDirectoryReader*)fi->fh;
     int                         status;
 
     if (handle == NULL) {
@@ -353,7 +376,7 @@ int __vafs_readdir(
     while (1) {
         struct VaFsEntry entry;
         //struct stat      stat;
-        status = vafs_directory_read(handle, &entry);
+        status = vafs_directory_reader_next(handle, &entry);
         if (status) {
             if (errno != ENOENT) {
                 return status;
@@ -384,7 +407,7 @@ int __vafs_releasedir(const char* path, struct fuse_file_info* fi)
 {
     struct fuse_context*        context = fuse_get_context();
     struct VaFs*                vafs    = context->private_data;
-    struct VaFsDirectoryHandle* handle  = (struct VaFsDirectoryHandle*)fi->fh;
+    struct VaFsDirectoryReader* handle  = (struct VaFsDirectoryReader*)fi->fh;
     int                         status;
 
     if (handle == NULL) {
@@ -396,7 +419,7 @@ int __vafs_releasedir(const char* path, struct fuse_file_info* fi)
         return -1;
     }
 
-    status = vafs_directory_close(handle);
+    status = vafs_directory_reader_close(handle);
     fi->fh = 0;
     return status;
 }
@@ -504,7 +527,9 @@ int main(int argc, char *argv[])
         goto run_main;
 	}
 
-    status = vafs_open_file(g_options.filename, &vafs);
+    struct VaFsReaderConfiguration readerConfiguration;
+    __configure_reader_filters(&readerConfiguration);
+    status = vafs_reader_open_file(g_options.filename, &readerConfiguration, &vafs);
     if (status != 0) {
         fprintf(stderr, "failed to open %s\n", g_options.filename);
 		__show_help(argv[0]);
@@ -520,7 +545,7 @@ int main(int argc, char *argv[])
 run_main:
 	status = fuse_main(args.argc, args.argv, &operations, vafs);
     if (vafs != NULL) {
-        vafs_close(vafs);
+        vafs_reader_close(vafs);
     }
     fuse_opt_free_args(&args);
     return status;

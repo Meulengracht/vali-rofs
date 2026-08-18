@@ -351,6 +351,7 @@ static int __readlink(const char* path, char* linkBuffer, size_t maxLength)
     status = __readlink_handle(handle, &linkBufferResult, &targetLength);
     if (!status) {
         strncpy(linkBuffer, linkBufferResult, maxLength);
+        linkBuffer[maxLength - 1] = '\0';
         free(linkBufferResult);
     }
     CloseHandle(handle);

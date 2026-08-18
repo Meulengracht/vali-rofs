@@ -29,9 +29,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+
 #include <vafs/vafs.h>
-#include <vafs/directory.h>
-#include <vafs/file.h>
+#include <vafs/reader.h>
 #include "utils/utils.h"
 
 struct __options {
@@ -70,7 +70,27 @@ struct pending_hardlink {
     char*            path;
 };
 
+extern int __configure_reader_filters(struct VaFsReaderConfiguration* configuration);
 extern int __handle_filter(struct VaFs* vafs);
+
+static int __object_stat_path(
+    struct VaFs*         vafs,
+    const char*          path,
+    enum VaFsLookupFlags flags,
+    struct VaFsMetadata* metadata)
+{
+    struct VaFsObjectReader* reader;
+    int                      status;
+
+    status = vafs_object_reader_open(vafs, path, flags, &reader);
+    if (status != 0) {
+        return status;
+    }
+
+    status = vafs_object_reader_stat(reader, metadata);
+    vafs_object_reader_close(reader);
+    return status;
+}
 
 static struct VaFsGuid g_overviewGuid = VA_FS_FEATURE_OVERVIEW;
 
@@ -241,7 +261,7 @@ static int __register_extracted_file(
 {
     struct VaFsMetadata metadata;
 
-    if (vafs_path_stat(vafsHandle, imagePath, 1, &metadata) != 0) {
+    if (__object_stat_path(vafsHandle, imagePath, VaFsLookup_None, &metadata) != 0) {
         return -1;
     }
 
@@ -322,12 +342,13 @@ static void __destroy_extraction_state(
 }
 
 static int __extract_file(
-    struct VaFsFileHandle* fileHandle,
+    struct VaFsObjectReader* fileHandle,
     const char*            path)
 {
     struct VaFsMetadata metadata;
     FILE*  file;
-    size_t fileSize;
+    uint64_t fileSize;
+    uint64_t bytesRead;
     void*  fileBuffer;
 
     if ((file = fopen(path, "wb+")) == NULL) {
@@ -335,22 +356,32 @@ static int __extract_file(
         return -1;
     }
 
-    fileSize = vafs_file_length(fileHandle);
+    fileSize = vafs_object_reader_length(fileHandle);
+    if (fileSize == UINT64_MAX || fileSize > SIZE_MAX) {
+        fclose(file);
+        return -1;
+    }
     if (fileSize) {
-        fileBuffer = malloc(fileSize);
+        fileBuffer = malloc((size_t)fileSize);
         if (fileBuffer == NULL) {
             fprintf(stderr, "unmkvafs: unable to allocate memory for file %s\n", path);
+            fclose(file);
             return -1;
         }
 
-        vafs_file_read(fileHandle, fileBuffer, fileSize);
-        fwrite(fileBuffer, 1, fileSize, file);
+        bytesRead = vafs_object_reader_read(fileHandle, fileBuffer, fileSize);
+        if (bytesRead != fileSize) {
+            free(fileBuffer);
+            fclose(file);
+            return -1;
+        }
+        fwrite(fileBuffer, 1, (size_t)fileSize, file);
         
         free(fileBuffer);
     }
     fclose(file);
 
-    if (vafs_file_stat(fileHandle, &metadata) != 0) {
+    if (vafs_object_reader_stat(fileHandle, &metadata) != 0) {
         return -1;
     }
 
@@ -389,7 +420,7 @@ static void __write_progress(const char* prefix, struct progress_context* contex
 static int __extract_directory(
     struct VaFs*                vafsHandle,
     struct progress_context*    progress,
-    struct VaFsDirectoryHandle* directoryHandle,
+    struct VaFsDirectoryReader* directoryHandle,
     const char*                 root,
     const char*                 path,
     const char*                 imagePath)
@@ -407,7 +438,7 @@ static int __extract_directory(
             return status;
         }
 
-        if (vafs_directory_stat(directoryHandle, &metadata) != 0) {
+        if (__object_stat_path(vafsHandle, imagePath, VaFsLookup_None, &metadata) != 0) {
             fprintf(stderr, "unmkvafs: failed to read directory metadata for '%s'\n", path);
             return -1;
         }
@@ -426,7 +457,7 @@ static int __extract_directory(
     }
 
     do {
-        status = vafs_directory_read(directoryHandle, &dp);
+        status = vafs_directory_reader_next(directoryHandle, &dp);
         if (status) {
             if (errno != ENOENT) {
                 fprintf(stderr, "unmkvafs: failed to read directory '%s' - %i\n",
@@ -452,8 +483,8 @@ static int __extract_directory(
 
         __write_progress(dp.Name, progress);
         if (dp.Type == VaFsEntryType_Directory) {
-            struct VaFsDirectoryHandle* subdirectoryHandle;
-            status = vafs_directory_open_directory(directoryHandle, dp.Name, &subdirectoryHandle);
+            struct VaFsDirectoryReader* subdirectoryHandle;
+            status = vafs_directory_reader_open_directory_in(directoryHandle, dp.Name, &subdirectoryHandle);
             if (status) {
                 fprintf(stderr, "unmkvafs: failed to open directory '%s'\n", __get_relative_path(root, filepathBuffer));
                 free(imagePathBuffer);
@@ -469,7 +500,7 @@ static int __extract_directory(
                 return -1;
             }
 
-            status = vafs_directory_close(subdirectoryHandle);
+            status = vafs_directory_reader_close(subdirectoryHandle);
             if (status) {
                 fprintf(stderr, "unmkvafs: failed to close directory '%s'\n", __get_relative_path(root, filepathBuffer));
                 free(imagePathBuffer);
@@ -495,9 +526,12 @@ static int __extract_directory(
                 return -1;
             }
         } else if (dp.Type == VaFsEntryType_Symlink) {
-            const char* symlinkTarget;
+            struct VaFsObjectReader* symlinkReader;
+            char*                    symlinkTarget;
+            uint64_t                 targetLength;
+            uint64_t                 bytesRead;
             
-            status = vafs_directory_read_symlink(directoryHandle, dp.Name, &symlinkTarget);
+            status = vafs_directory_reader_open_object_in(directoryHandle, dp.Name, &symlinkReader);
             if (status) {
                 fprintf(stderr, "unmkvafs: failed to read symlink '%s' - %i\n",
                     __get_relative_path(root, filepathBuffer), status);
@@ -506,7 +540,34 @@ static int __extract_directory(
                 return -1;
             }
 
+            targetLength = vafs_object_reader_length(symlinkReader);
+            if (targetLength == UINT64_MAX || targetLength > SIZE_MAX) {
+                vafs_object_reader_close(symlinkReader);
+                free(imagePathBuffer);
+                free(filepathBuffer);
+                return -1;
+            }
+
+            symlinkTarget = malloc((size_t)targetLength + 1);
+            if (symlinkTarget == NULL) {
+                vafs_object_reader_close(symlinkReader);
+                free(imagePathBuffer);
+                free(filepathBuffer);
+                return -1;
+            }
+
+            bytesRead = vafs_object_reader_read(symlinkReader, symlinkTarget, targetLength);
+            vafs_object_reader_close(symlinkReader);
+            if (bytesRead != targetLength) {
+                free(symlinkTarget);
+                free(imagePathBuffer);
+                free(filepathBuffer);
+                return -1;
+            }
+            symlinkTarget[targetLength] = '\0';
+
             status = symlink_utils_create(symlinkTarget, filepathBuffer);
+            free(symlinkTarget);
             if (status) {
                 fprintf(stderr, "unmkvafs: failed to create symlink '%s' - %i\n",
                     __get_relative_path(root, filepathBuffer), status);
@@ -527,7 +588,7 @@ static int __extract_directory(
         } else if (dp.Type == VaFsEntryType_CharacterDevice ||
             dp.Type == VaFsEntryType_BlockDevice ||
             dp.Type == VaFsEntryType_Fifo) {
-            status = vafs_path_stat(vafsHandle, imagePathBuffer, 0, &metadata);
+            status = __object_stat_path(vafsHandle, imagePathBuffer, VaFsLookup_NoFollow, &metadata);
             if (status) {
                 fprintf(stderr, "unmkvafs: failed to stat special entry '%s'\n",
                     __get_relative_path(root, filepathBuffer));
@@ -565,8 +626,8 @@ static int __extract_directory(
                 }
             }
         } else {
-            struct VaFsFileHandle* fileHandle;
-            status = vafs_directory_open_file(directoryHandle, dp.Name, &fileHandle);
+            struct VaFsObjectReader* fileHandle;
+            status = vafs_directory_reader_open_object_in(directoryHandle, dp.Name, &fileHandle);
             if (status) {
                 fprintf(stderr, "unmkvafs: failed to open file '%s' - %i\n",
                     __get_relative_path(root, filepathBuffer), status);
@@ -583,13 +644,7 @@ static int __extract_directory(
                 return -1;
             }
 
-            status = vafs_file_close(fileHandle);
-            if (status) {
-                fprintf(stderr, "unmkvafs: failed to close file '%s'\n", __get_relative_path(root, filepathBuffer));
-                free(imagePathBuffer);
-                free(filepathBuffer);
-                return -1;
-            }
+            vafs_object_reader_close(fileHandle);
 
             // Restore xattrs before registering the path as the concrete source
             // for later hardlink aliases so the first extracted inode carries
@@ -624,7 +679,7 @@ static int __handle_overview(struct VaFs* vafsHandle, struct progress_context* p
     struct VaFsFeatureOverview* overview;
     int                         status;
 
-    status = vafs_feature_query(vafsHandle, &g_overviewGuid, (struct VaFsFeatureHeader**)&overview);
+    status = vafs_reader_query_feature(vafsHandle, &g_overviewGuid, (struct VaFsFeatureHeader**)&overview);
     if (status) {
         fprintf(stderr, "unmkvafs: failed to query feature overview - %i\n", errno);
         return -1;
@@ -659,7 +714,7 @@ static int __parse_options(struct __options* opts, int argc, char *argv[])
 
 int main(int argc, char *argv[])
 {
-    struct VaFsDirectoryHandle* directoryHandle = NULL;
+    struct VaFsDirectoryReader* directoryHandle = NULL;
     struct VaFs*                vafsHandle;
     int                         status;
     struct progress_context     progressContext = { 0 };
@@ -688,7 +743,9 @@ int main(int argc, char *argv[])
     list_init(&progressContext.extracted_objects);
     list_init(&progressContext.pending_hardlinks);
 
-    status = vafs_open_file(opts.image_path, &vafsHandle);
+    struct VaFsReaderConfiguration readerConfiguration;
+    __configure_reader_filters(&readerConfiguration);
+    status = vafs_reader_open_file(opts.image_path, &readerConfiguration, &vafsHandle);
     if (status) {
         fprintf(stderr, "unmkvafs: cannot open vafs image: %s\n", opts.image_path);
         return -1;
@@ -706,7 +763,7 @@ int main(int argc, char *argv[])
         goto error;
     }
 
-    status = vafs_directory_open(vafsHandle, "/", &directoryHandle);
+    status = vafs_directory_reader_open(vafsHandle, "/", VaFsLookup_None, &directoryHandle);
     if (status) {
         fprintf(stderr, "unmkvafs: cannot open root directory: /\n");
         goto error;
@@ -734,13 +791,13 @@ error:
 
 exit:
     if (directoryHandle) {
-        status = vafs_directory_close(directoryHandle);
+        status = vafs_directory_reader_close(directoryHandle);
         if (status) {
             fprintf(stderr, "unmkvafs: failed to close root directory handle\n");
         }
     }
     __destroy_extraction_state(&progressContext);
-    status = vafs_close(vafsHandle);
+    status = vafs_reader_close(vafsHandle);
     if (status) {
         fprintf(stderr, "unmkvafs: failed to close image handle\n");
     }
