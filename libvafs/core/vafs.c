@@ -19,12 +19,13 @@
  *   This filesystem is used to store the initrd of the kernel.
  */
 
-#include "crc.h"
 #include <errno.h>
-#include "private.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+#include "crc.h"
+#include "core.h"
 
 const struct VaFsGuid g_overviewGuid  = VA_FS_FEATURE_OVERVIEW;
 const struct VaFsGuid g_filterGuid    = VA_FS_FEATURE_FILTER;

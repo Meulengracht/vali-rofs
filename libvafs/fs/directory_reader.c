@@ -24,7 +24,7 @@
 #include <string.h>
 
 #include <vafs/reader.h>
-#include "private.h"
+#include "fs.h"
 
 struct VaFsDirectoryReaderHandle {
     struct VaFsDirectory* Directory;

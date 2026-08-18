@@ -24,9 +24,8 @@
 #include <string.h>
 #include <stdio.h>
 
-#include "cache/blockcache.h"
-#include "crc.h"
-#include "private.h"
+#include "../cache/blockcache.h"
+#include "../core/crc.h"
 
 #define STREAM_TYPE_FILE   0
 #define STREAM_TYPE_MEMORY 1

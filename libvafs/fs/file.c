@@ -23,7 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "private.h"
+#include "fs.h"
 
 enum VaFsFileState {
     VaFsFileState_Open,

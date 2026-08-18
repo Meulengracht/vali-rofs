@@ -23,7 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "private.h"
+#include "fs.h"
 
 static void __copy_timestamp_to_descriptor(
     VaFsDescriptorTimestamp_t*  destination,

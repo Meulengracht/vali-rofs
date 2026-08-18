@@ -4,21 +4,21 @@ add_subdirectory(cache)
 
 # add primary library target
 add_library(vafs STATIC
-    builder.c
-    crc.c
-    directory_builder.c
-    directory_cache.c
-    directory_descriptor.c
-    directory_reader.c
-    file.c
-    log.c
-    reader.c
-    stream.c
-    streamdevice.c
-    symlink.c
-    utils.c
-    vafs.c
-    xattr.c
+    core/builder.c
+    core/crc.c
+    core/log.c
+    core/reader.c
+    core/vafs.c
+    fs/directory_builder.c
+    fs/directory_cache.c
+    fs/directory_descriptor.c
+    fs/directory_reader.c
+    fs/file.c
+    fs/symlink.c
+    fs/utils.c
+    fs/xattr.c
+    stream/core.c
+    stream/device.c
 )
 target_include_directories(vafs PRIVATE include/vafs)
 target_include_directories(vafs PUBLIC include)

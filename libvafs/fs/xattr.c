@@ -28,7 +28,7 @@
 #include <vafs/reader.h>
 #include <vafs/builder.h>
 
-#include "private.h"
+#include "fs.h"
 
 static struct VaFsGuid g_xattrGuid = VA_FS_FEATURE_XATTRS;
 

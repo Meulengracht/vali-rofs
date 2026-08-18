@@ -21,9 +21,10 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include <vafs/builder.h>
 
-#include "private.h"
+#include <vafs/builder.h>
+#include "core.h"
+#include "../fs/fs.h"
 
 static void vafs_destroy(
     struct VaFs* vafs);

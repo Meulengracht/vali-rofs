@@ -20,7 +20,6 @@
  */
 
 #include <errno.h>
-#include "private.h"
 #include <stdlib.h>
 #include <string.h>
 #include <vafs/stat.h>
@@ -30,6 +29,8 @@
 #     define S_IFLNK 0
 #  endif
 #endif //!#if defined(_WIN32) || defined(_WIN64)
+
+#include "fs.h"
 
 int __vafs_is_root_path(
     const char* path)

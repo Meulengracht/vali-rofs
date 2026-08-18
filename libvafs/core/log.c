@@ -22,7 +22,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-#include "private.h"
+#include <vafs/vafs.h>
 
 static enum VaFsLogLevel g_loglevel = VaFsLogLevel_Warning;
 

@@ -24,7 +24,7 @@
 #include <string.h>
 
 #include <vafs/builder.h>
-#include "private.h"
+#include "fs.h"
 
 struct VaFsObjectBuilder {
     struct VaFs*     VaFs;

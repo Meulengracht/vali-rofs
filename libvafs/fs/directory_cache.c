@@ -24,7 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "private.h"
+#include "fs.h"
 
 struct __directory_name_index_entry {
     const char*                Name;
@@ -119,7 +119,7 @@ static struct VaFsLookupCacheEntry* __directory_lookup_cache_entries(
     struct VaFs* vafs,
     size_t       setIndex)
 {
-    return &vafs->LookupCache.Entries[setIndex * VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY];
+    return &vafs->LookupCache->Entries[setIndex * VAFS_LOOKUP_CACHE_SET_ASSOCIATIVITY];
 }
 
 static int __directory_lookup_cache_get(
@@ -137,7 +137,7 @@ static int __directory_lookup_cache_get(
         return 0;
     }
 
-    cache = &directory->VaFs->LookupCache;
+    cache = directory->VaFs->LookupCache;
     setIndex = __vafs_directory_lookup_cache_set(directory, token);
     entries = __directory_lookup_cache_entries(directory->VaFs, setIndex);
 
@@ -183,7 +183,7 @@ static void __directory_lookup_cache_store(
         return;
     }
 
-    cache = &directory->VaFs->LookupCache;
+    cache = directory->VaFs->LookupCache;
     setIndex = __vafs_directory_lookup_cache_set(directory, token);
     entries = __directory_lookup_cache_entries(directory->VaFs, setIndex);
     target = &entries[0];

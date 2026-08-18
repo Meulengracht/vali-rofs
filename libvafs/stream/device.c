@@ -33,7 +33,8 @@
 #include <unistd.h>
 #endif
 
-#include "private.h"
+#include <vafs/backend.h>
+#include <vafs/platform.h>
 
 #define __TRANSFER_BUFFER_SIZE 1024*1024
 

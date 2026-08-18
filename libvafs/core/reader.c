@@ -23,7 +23,8 @@
 #include <string.h>
 #include <vafs/reader.h>
 
-#include "private.h"
+#include "core.h"
+#include "../fs/fs.h"
 
 static inline int __compare_guids(
     const struct VaFsGuid* lh,
@@ -399,6 +400,13 @@ static int __open_vafs(
 
     vafs->Mode = VaFsMode_Read;
 
+    vafs->LookupCache = malloc(sizeof(struct VaFsLookupCache));
+    if (!vafs->LookupCache) {
+        vafs_destroy(vafs);
+        errno = ENOMEM;
+        return -1;
+    }
+
     vafs->Features = malloc(sizeof(struct VaFsFeatureHeader*) * VA_FS_MAX_FEATURES);
     if (!vafs->Features) {
         vafs_destroy(vafs);
@@ -511,6 +519,7 @@ static void vafs_destroy(
         free(vafs->Features[i]);
     }
     free(vafs->Features);
+    free(vafs->LookupCache);
 
     // cleanup directory instances
     vafs_directory_destroy(vafs->RootDirectory);
