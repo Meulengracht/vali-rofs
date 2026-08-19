@@ -215,17 +215,15 @@ static int __new_vafs(
     }
 
     if (configuration->Codecs[0].ID != NULL) {
-        vafs_stream_set_filter(
+        vafs_stream_set_codec(
             vafs->DescriptorStream,
-            configuration->Codecs[0].Encode,
-            configuration->Codecs[0].Decode
+            &configuration->Codecs[0]
         );
     }
     if (configuration->Codecs[1].ID != NULL) {
-        vafs_stream_set_filter(
+        vafs_stream_set_codec(
             vafs->DataStream,
-            configuration->Codecs[1].Encode,
-            configuration->Codecs[1].Decode
+            &configuration->Codecs[1]
         );
     }
 

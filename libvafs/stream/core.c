@@ -61,8 +61,7 @@ struct VaFsStream {
     VaFsStreamLayout_t            Layout;
     struct VaFsStreamDevice*      Device;
     mtx_t                         Lock;
-    VaFsCodecEncodeFunc           Encode;
-    VaFsCodecDecodeFunc           Decode;
+    struct VaFsCodec              Codec;
     struct VaFsBlockCache*        BlockCache;
     struct VaFsStreamBlockHeaders BlockHeaders;
 
@@ -365,18 +364,16 @@ int vafs_stream_open(
     return 0;
 }
 
-int vafs_stream_set_filter(
-    struct VaFsStream*   stream,
-    VaFsCodecEncodeFunc  encode,
-    VaFsCodecDecodeFunc  decode)
+int vafs_stream_set_codec(
+    struct VaFsStream* stream,
+    struct VaFsCodec*  codec)
 {
-    if (stream == NULL) {
+    if (stream == NULL || codec == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    stream->Encode = encode;
-    stream->Decode = decode;
+    stream->Codec = *codec;
     return 0;
 }
 
@@ -520,11 +517,15 @@ static int __load_blockbuffer(
 
     // Only decode blocks that were actually written in filtered form. Blocks
     // marked BLOCK_FLAG_STORED were persisted raw specifically to skip decode.
-    if ((blockHeader->Flags & BLOCK_FLAG_STORED) == 0 && stream->Decode) {
+    if ((blockHeader->Flags & BLOCK_FLAG_STORED) == 0 && stream->Codec.Decode) {
         size_t bytesDecoded = 0;
 
         VAFS_DEBUG("__load_blockbuffer decoding buffer of size %zu\n", blockSize);
-        status = stream->Decode(blockData, blockSize, reader->BlockBuffer, stream->Layout.BlockSize, &bytesDecoded);
+        status = stream->Codec.Decode(
+            blockData, blockSize,
+            reader->BlockBuffer, stream->Layout.BlockSize, 
+            &bytesDecoded, stream->Codec.UserData
+        );
         if (status) {
             VAFS_ERROR("__load_blockbuffer: failed to decode block, %i\n", errno);
             free(blockData);
@@ -752,10 +753,14 @@ static int __flush_block(
     
     // Per-stream filtering is optional. When enabled, avoid paying future
     // decode cost unless the filtered form actually shrinks the payload.
-    if (stream->Encode) {
+    if (stream->Codec.Encode) {
         size_t compressedSize;
 
-        status = stream->Encode(stream->BlockBuffer, stream->BlockBufferOffset, &compressedData, &compressedSize);
+        status = stream->Codec.Encode(
+            stream->BlockBuffer, stream->BlockBufferOffset, 
+            &compressedData, &compressedSize,
+            stream->Codec.UserData
+        );
         if (status) {
             return status;
         }

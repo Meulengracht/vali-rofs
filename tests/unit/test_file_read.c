@@ -93,42 +93,54 @@ static void fill_pattern(char* buffer, size_t length)
     }
 }
 
-static int expanding_encode(const void* input, size_t inputLength, void** output, size_t* outputLength)
+static int expanding_encode(
+    const void* source,
+    size_t      sourceLength, 
+    void**      output,
+    size_t*     outputLength,
+    void*       userData)
 {
-    uint8_t* encoded = malloc(inputLength + 1);
+    uint8_t* encoded = malloc(sourceLength + 1);
     if (encoded == NULL) {
         errno = ENOMEM;
         return -1;
     }
 
     encoded[0] = 0xA5;
-    memcpy(&encoded[1], input, inputLength);
+    memcpy(&encoded[1], source, sourceLength);
     *output = encoded;
-    *outputLength = inputLength + 1;
+    *outputLength = sourceLength + 1;
     return 0;
 }
 
-static int fail_decode(const void* input, size_t inputLength, void* output, size_t outputLength, size_t* bytesWrittenOut)
+static int fail_decode(
+    const void* source,
+    size_t      sourceLength,
+    void*       output,
+    size_t      outputLength,
+    void*       userData,
+    size_t*     bytesWrittenOut)
 {
-    (void)input;
-    (void)inputLength;
+    (void)source;
+    (void)sourceLength;
     (void)output;
     (void)outputLength;
+    (void)userData;
     (void)bytesWrittenOut;
     errno = ENOTSUP;
     return -1;
 }
 
-static int descriptor_expanding_encode(const void* input, size_t inputLength, void** output, size_t* outputLength)
+static int descriptor_expanding_encode(const void* source, size_t sourceLength, void** output, size_t* outputLength, void* userData)
 {
     g_descriptor_encode_calls++;
-    return expanding_encode(input, inputLength, output, outputLength);
+    return expanding_encode(source, sourceLength, output, outputLength, userData);
 }
 
-static int data_expanding_encode(const void* input, size_t inputLength, void** output, size_t* outputLength)
+static int data_expanding_encode(const void* source, size_t sourceLength, void** output, size_t* outputLength, void* userData)
 {
     g_data_encode_calls++;
-    return expanding_encode(input, inputLength, output, outputLength);
+    return expanding_encode(source, sourceLength, output, outputLength, userData);
 }
 
 static int install_expanding_filter(struct VaFs* vafs)
@@ -164,7 +176,7 @@ static void configure_split_stream_codecs(struct VaFsBuilderConfiguration* confi
     };
 }
 
-static int custom_descriptor_encode(const void* input, size_t inputLength, void** output, size_t* outputLength)
+static int custom_descriptor_encode(const void* source, size_t sourceLength, void** output, size_t* outputLength, void* userData)
 {
     uint8_t* encoded;
     size_t   readOffset = 0;
@@ -173,17 +185,17 @@ static int custom_descriptor_encode(const void* input, size_t inputLength, void*
     // This simple zero-run codec is intentionally custom to the test: it is
     // good enough to shrink descriptor blocks that contain many zero-filled
     // metadata fields, but libvafs must not know anything about how it works.
-    encoded = malloc((inputLength * 2u) + 2u);
+    encoded = malloc((sourceLength * 2u) + 2u);
     if (encoded == NULL) {
         errno = ENOMEM;
         return -1;
     }
 
-    while (readOffset < inputLength) {
+    while (readOffset < sourceLength) {
         size_t zeroRun = 0;
 
-        while ((readOffset + zeroRun) < inputLength &&
-               ((const uint8_t*)input)[readOffset + zeroRun] == 0 &&
+        while ((readOffset + zeroRun) < sourceLength &&
+               ((const uint8_t*)source)[readOffset + zeroRun] == 0 &&
                zeroRun < 255u) {
             zeroRun++;
         }
@@ -198,10 +210,10 @@ static int custom_descriptor_encode(const void* input, size_t inputLength, void*
         size_t literalStart = readOffset;
         size_t literalLength = 0;
 
-        while (readOffset < inputLength && literalLength < 255u) {
+        while (readOffset < sourceLength && literalLength < 255u) {
             zeroRun = 0;
-            while ((readOffset + zeroRun) < inputLength &&
-                   ((const uint8_t*)input)[readOffset + zeroRun] == 0 &&
+            while ((readOffset + zeroRun) < sourceLength &&
+                   ((const uint8_t*)source)[readOffset + zeroRun] == 0 &&
                    zeroRun < 4u) {
                 zeroRun++;
             }
@@ -216,7 +228,7 @@ static int custom_descriptor_encode(const void* input, size_t inputLength, void*
 
         encoded[writeOffset++] = 1;
         encoded[writeOffset++] = (uint8_t)literalLength;
-        memcpy(encoded + writeOffset, ((const uint8_t*)input) + literalStart, literalLength);
+        memcpy(encoded + writeOffset, ((const uint8_t*)source) + literalStart, literalLength);
         writeOffset += literalLength;
     }
 
@@ -225,24 +237,24 @@ static int custom_descriptor_encode(const void* input, size_t inputLength, void*
     return 0;
 }
 
-static int custom_descriptor_decode(const void* input, size_t inputLength, void* output, size_t outputLength, size_t* bytesWrittenOut)
+static int custom_descriptor_decode(const void* source, size_t sourceLength, void* output, size_t outputLength, void* userData, size_t* bytesWrittenOut)
 {
     size_t readOffset = 0;
     size_t writeOffset = 0;
 
     g_custom_descriptor_decode_calls++;
 
-    while (readOffset < inputLength) {
+    while (readOffset < sourceLength) {
         uint8_t tag;
         uint8_t length;
 
-        if ((inputLength - readOffset) < 2u) {
+        if ((sourceLength - readOffset) < 2u) {
             errno = EINVAL;
             return -1;
         }
 
-        tag = ((uint8_t*)input)[readOffset++];
-        length = ((uint8_t*)input)[readOffset++];
+        tag = ((uint8_t*)source)[readOffset++];
+        length = ((uint8_t*)source)[readOffset++];
 
         if ((size_t)length > (outputLength - writeOffset)) {
             errno = ENOSPC;
@@ -255,12 +267,12 @@ static int custom_descriptor_decode(const void* input, size_t inputLength, void*
             continue;
         }
 
-        if (tag != 1 || (inputLength - readOffset) < length) {
+        if (tag != 1 || (sourceLength - readOffset) < length) {
             errno = EINVAL;
             return -1;
         }
 
-        memcpy(((uint8_t*)output) + writeOffset, ((uint8_t*)input) + readOffset, length);
+        memcpy(((uint8_t*)output) + writeOffset, ((const uint8_t*)source) + readOffset, length);
         readOffset += length;
         writeOffset += length;
     }

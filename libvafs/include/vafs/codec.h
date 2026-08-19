@@ -29,7 +29,12 @@
  *
  * The encoder allocates the output buffer and returns ownership to the caller on success.
  */
-typedef int(*VaFsCodecEncodeFunc)(const void* input, size_t inputLength, void** output, size_t* outputLength);
+typedef int(*VaFsCodecEncodeFunc)(
+    const void* input,
+    size_t      inputLength,
+    void**      output,
+    size_t*     outputLength,
+    void*       userData);
 
 /**
  * @brief Decodes one stored payload buffer.
@@ -37,7 +42,13 @@ typedef int(*VaFsCodecEncodeFunc)(const void* input, size_t inputLength, void** 
  * The decoder writes into a caller-provided destination buffer and reports the number of decoded
  * bytes that were produced.
  */
-typedef int(*VaFsCodecDecodeFunc)(const void* input, size_t inputLength, void* output, size_t outputLength, size_t* bytesWrittenOut);
+typedef int(*VaFsCodecDecodeFunc)(
+    const void* input, 
+    size_t      inputLength, 
+    void*       output, 
+    size_t      outputLength,
+    void*       userData,
+    size_t*     bytesWrittenOut);
 
 /**
  * @brief Stable codec descriptor used by readers and builders.
@@ -46,11 +57,13 @@ typedef int(*VaFsCodecDecodeFunc)(const void* input, size_t inputLength, void* o
  * `Encode` may be NULL for read-only registries. 
  * `Decode` may be NULL for write-only registries, but readers must reject 
  *          images whose required codecs do not provide decode support.
+ * `UserData` is an opaque pointer that is passed to the encode and decode functions.
  */
 struct VaFsCodec {
     const char*         ID;
     VaFsCodecEncodeFunc Encode;
     VaFsCodecDecodeFunc Decode;
+    void*               UserData;
 };
 
 #endif //!__VAFS_CODEC_H__

@@ -63,20 +63,18 @@ extern int vafs_stream_open(
     struct VaFsStream**       streamOut);
 
 /**
- * @brief Installs encode and decode callbacks for a stream.
+ * @brief Installs codec for a stream.
  *
  * These callbacks are used when blocks are written to or read from the
  * backing device.
  *
  * @param[In] stream The stream to update.
- * @param[In] encode Optional block encoder used on writes.
- * @param[In] decode Optional block decoder used on reads.
+ * @param[In] codec Optional block codec used on reads/writes.
  * @return 0 on success, otherwise -1 with `errno` set.
  */
-extern int vafs_stream_set_filter(
-    struct VaFsStream*   stream,
-    VaFsCodecEncodeFunc  encode,
-    VaFsCodecDecodeFunc  decode);
+extern int vafs_stream_set_codec(
+    struct VaFsStream* stream,
+    struct VaFsCodec*  codec);
 
 /**
  * @brief Retrieves the current logical write position inside a stream.

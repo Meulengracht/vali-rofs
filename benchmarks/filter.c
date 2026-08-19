@@ -54,26 +54,31 @@ static int CB_CALLCONV callback(unsigned int insize, unsigned int inpos,
 	return 1;
 }
 
-static int __aplib_encode(const void* Input, size_t InputLength, void** Output, size_t* OutputLength)
+static int __aplib_encode(
+    const void* source,
+    size_t      sourceLength, 
+    void**      output,
+    size_t*     outputLength,
+    void*       userData)
 {
     void*    compressed;
     uint32_t compressedSize;
     void*    workmemory;
 
-    compressed = malloc(aP_max_packed_size(InputLength));
+    compressed = malloc(aP_max_packed_size(sourceLength));
     if (!compressed) {
         errno = ENOMEM;
         return -1;
     }
 
-    workmemory = malloc(aP_workmem_size(InputLength));
+    workmemory = malloc(aP_workmem_size(sourceLength));
     if (!workmemory) {
         free(compressed);
         errno = ENOMEM;
         return -1;
     }
 
-    compressedSize = aPsafe_pack(Input, compressed, InputLength, workmemory, callback, NULL);
+    compressedSize = aPsafe_pack(source, compressed, sourceLength, workmemory, callback, NULL);
     if (compressedSize == APLIB_ERROR) {
         free(compressed);
         free(workmemory);
@@ -82,28 +87,34 @@ static int __aplib_encode(const void* Input, size_t InputLength, void** Output, 
     }
     free(workmemory);
 
-    *Output = compressed;
-    *OutputLength = compressedSize;
+    *output = compressed;
+    *outputLength = compressedSize;
     return 0;
 }
 
-static int __aplib_decode(const void* Input, size_t InputLength, void* Output, size_t OutputLength, size_t* BytesWrittenOut)
+static int __aplib_decode(
+    const void* source,
+    size_t      sourceLength,
+    void*       output,
+    size_t      outputLength,
+    void*       userData,
+    size_t*     bytesWrittenOut)
 {
     uint32_t decompressedSize;
 
-    decompressedSize = aPsafe_get_orig_size(Input);
+    decompressedSize = aPsafe_get_orig_size(source);
     if (decompressedSize == APLIB_ERROR) {
         errno = EINVAL;
         return -1;
     }
 
-    if (decompressedSize > OutputLength) {
+    if (decompressedSize > outputLength) {
         errno = ENOSPC;
         return -1;
     }
 
-    decompressedSize = aPsafe_depack(Input, InputLength, Output, decompressedSize);
-    *BytesWrittenOut = decompressedSize;
+    decompressedSize = aPsafe_depack(source, sourceLength, output, decompressedSize);
+    *bytesWrittenOut = decompressedSize;
     return 0;
 }
 #endif
@@ -125,7 +136,12 @@ struct __brieflz_block {
     char     payload[];
 };
 
-static int __brieflz_encode(const void* source, size_t sourceLength, void** output, size_t* outputLength)
+static int __brieflz_encode(
+    const void* source,
+    size_t      sourceLength, 
+    void**      output,
+    size_t*     outputLength,
+    void*       userData)
 {
     struct __brieflz_block* block;
     uint32_t                compressedSize;
@@ -163,7 +179,13 @@ error:
     return -1;
 }
 
-static int __brieflz_decode(const void* source, size_t sourceLength, void* output, size_t outputLength, size_t* bytesWrittenOut)
+static int __brieflz_decode(
+    const void* source,
+    size_t      sourceLength,
+    void*       output,
+    size_t      outputLength,
+    void*       userData,
+    size_t*     bytesWrittenOut)
 {
     uint64_t                decompressedSize;
     const struct __brieflz_block* block = source;

@@ -295,24 +295,37 @@ static int __initialize_fsstreams_read(struct VaFs* vafs)
     return status;
 }
 
-static int __default_fail_encode(const void* Input, size_t InputLength, void** Output, size_t* OutputLength)
+static int __default_fail_encode(
+    const void* source,
+    size_t      sourceLength, 
+    void**      output,
+    size_t*     outputLength,
+    void*       userData)
 {
-    (void)Input;
-    (void)InputLength;
-    (void)Output;
-    (void)OutputLength;
+    (void)source;
+    (void)sourceLength;
+    (void)output;
+    (void)outputLength;
+    (void)userData;
     VAFS_ERROR("__default_fail_encode: encode handler not installed\n");
     errno = ENOTSUP;
     return -1;
 }
 
-static int __default_fail_decode(const void* Input, size_t InputLength, void* Output, size_t OutputLength, size_t* BytesWrittenOut)
+static int __default_fail_decode(
+    const void* source,
+    size_t      sourceLength,
+    void*       output,
+    size_t      outputLength,
+    void*       userData,
+    size_t*     bytesWrittenOut)
 {
-    (void)Input;
-    (void)InputLength;
-    (void)Output;
-    (void)OutputLength;
-    (void)BytesWrittenOut;
+    (void)source;
+    (void)sourceLength;
+    (void)output;
+    (void)outputLength;
+    (void)userData;
+    (void)bytesWrittenOut;
     VAFS_ERROR("__default_fail_decode: decode handler not installed\n");
     errno = ENOTSUP;
     return -1;
@@ -357,7 +370,7 @@ static int __install_encoding_handlers(
                     errno = ENOTSUP;
                     return -1;
                 }
-                vafs_stream_set_filter(vafs->DescriptorStream, codec->Encode, codec->Decode);
+                vafs_stream_set_codec(vafs->DescriptorStream, codec);
             }
 
             if (filter->DataEncoding[0] != '\0') {
@@ -367,7 +380,7 @@ static int __install_encoding_handlers(
                     errno = ENOTSUP;
                     return -1;
                 }
-                vafs_stream_set_filter(vafs->DataStream, codec->Encode, codec->Decode);
+                vafs_stream_set_codec(vafs->DataStream, codec);
             }
         }
     }
