@@ -524,7 +524,7 @@ static int __load_blockbuffer(
         status = stream->Codec.Decode(
             blockData, blockSize,
             reader->BlockBuffer, stream->Layout.BlockSize, 
-            &bytesDecoded, stream->Codec.UserData
+            stream->Codec.UserData, &bytesDecoded
         );
         if (status) {
             VAFS_ERROR("__load_blockbuffer: failed to decode block, %i\n", errno);
