@@ -2,39 +2,16 @@
 
 VaFS is a read-only filesystem format and C library originally built for Vali/MollenOS initrd images. The project packages directory trees into compact `.vafs` images, exposes a small C API for reading and creating them, and ships command-line tools for building, extracting, mounting, and benchmarking images.
 
-## Overview
-
-| Area | What VaFS provides |
-| --- | --- |
-| Format | A read-only image layout with separate descriptor and data streams |
-| Library | A static C library for image creation, traversal, metadata queries, and file reads |
-| Storage backends | Open images from files, memory buffers, or custom `VaFsOperations` backends |
-| Metadata | Files, directories, symbolic links, stored permissions, and POSIX-like `stat` queries |
-| Compression | Stream filters with BriefLZ enabled by default and aplib available optionally |
-| Integrity | CRC32 validation on block data |
-| Extensibility | GUID-based feature records plus runtime-only filter callback installation |
-| Tooling | `mkvafs`, `unmkvafs`, optional `vafs-util` FUSE mounting, and `vafs-bench` |
-
-## Highlights
+## Features
 
 - Separate descriptor and data streams let metadata stay small and random-access friendly while file payloads use their own block sizing policy.
 - The feature system cleanly splits portable on-disk metadata from host-specific runtime behavior, so images stay stable while filter callbacks remain pluggable.
 - The same read path can operate on `FILE*`, in-memory images, and custom backends, which makes the library usable in boot flows, tools, and embedded integrations.
 - Read-heavy workloads benefit from a block cache, a bounded lookup cache for path components, and stored-block bypass for incompressible data.
 
-## Project Structure
-
-| Component | Purpose |
-| --- | --- |
-| `libvafs` | Core library for creating and reading VaFS images |
-| `mkvafs` | Packs a directory tree into a `.vafs` image |
-| `unmkvafs` | Extracts an image back to a host directory |
-| `vafs-util` | Optional FUSE mount tool built when FUSE is available on non-Windows hosts |
-| `vafs-bench` | Benchmark suite for mount, metadata, lookup, and file-read workloads |
-
 ## Performance
 
-The table below summarizes the stable Windows rerun recorded in `benchmarks/BENCHMARK_BASELINE.md`.
+The table below summarizes the stable Windows rerun recorded in `benchmarks/BASELINE.md`.
 
 - Host: Windows 11 on Snapdragon X Elite
 - Filter: BriefLZ
