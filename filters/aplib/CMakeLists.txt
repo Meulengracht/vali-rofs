@@ -1,18 +1,23 @@
-add_library(libap STATIC IMPORTED GLOBAL)
-if(WIN32)
-    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-        target_include_directories(libap INTERFACE coff64)
-        set_property(TARGET libap PROPERTY IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/coff64/aplib.lib)
-    elseif(CMAKE_SIZEOF_VOID_P EQUAL 4)
-        target_include_directories(libap INTERFACE coff)
-        set_property(TARGET libap PROPERTY IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/coff/aplib.lib)
-    endif()
-elseif(UNIX)
-    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-        target_include_directories(libap INTERFACE elf64)
-        set_target_properties(libap PROPERTIES IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/elf64/aplib.a)
-    elseif(CMAKE_SIZEOF_VOID_P EQUAL 4)
-        target_include_directories(libap INTERFACE elf)
-        set_target_properties(libap PROPERTIES IMPORTED_LOCATION ${CMAKE_CURRENT_SOURCE_DIR}/elf/aplib.a)
-    endif()
-endif()
+# Reuse Vali's bounded portable AP32 decoder. The upstream apultra decoder is
+# not used: unlike this implementation it can read past a truncated payload.
+add_library(aplib_decoder OBJECT "${CMAKE_CURRENT_SOURCE_DIR}/depacks.c")
+target_compile_definitions(aplib_decoder PRIVATE
+    aP_depack_safe=aplib_depack_ap32
+    aP_get_orig_size=aplib_header_orig_size
+)
+
+add_library(libap STATIC
+    aplib.c
+    shrink.c
+    matchfinder.c
+    libdivsufsort/divsufsort.c
+    libdivsufsort/sssort.c
+    libdivsufsort/trsort.c
+    $<TARGET_OBJECTS:aplib_decoder>
+)
+target_compile_features(libap PRIVATE c_std_99)
+target_include_directories(libap PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_include_directories(libap PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/libdivsufsort/include"
+)
