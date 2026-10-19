@@ -28,6 +28,8 @@
 #if defined(_WIN32) || defined(_WIN64)
 #include <io.h>
 #include <windows.h>
+#elif defined(VALI)
+#include <io.h>
 #else
 #include <sys/types.h>
 #include <unistd.h>
@@ -616,6 +618,39 @@ static int __file_read_at(void* data, uint64_t offset, void* buffer, size_t leng
         return -1;
     }
     return 0;
+#elif defined(VALI)
+    // Vali has 64-bit stdio positioning but no POSIX pread. Serialize access
+    // to this private FILE and restore its cursor before returning.
+    long long position;
+    int       status = -1;
+    
+    *bytesRead = 0;
+    if (offset > INT64_MAX) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    
+    if (mtx_lock(&device->Lock) != thrd_success) {
+        errno = EBUSY;
+        return -1;
+    }
+    
+    position = ftelli64(device->File);
+    if (position >= 0) {
+        if (fseeki64(device->File, (long long)offset, SEEK_SET) == 0) {
+            *bytesRead = fread(buffer, 1, length, device->File);
+            status = *bytesRead == length ? 0 : -1;
+            if (status) {
+                errno = EIO;
+            }
+        }
+        
+        if (fseeki64(device->File, position, SEEK_SET) != 0) {
+            status = -1;
+        }
+    }
+    mtx_unlock(&device->Lock);
+    return status;
 #else
     int     descriptor;
     ssize_t result;
